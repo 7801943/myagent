@@ -1,0 +1,47 @@
+[project]
+name = "myagent"
+version = "0.1.0"
+description = "全自研生产级异步 Python Agent 框架"
+requires-python = ">=3.12"
+
+dependencies = [
+    # LLM Provider
+    "openai>=1.0",
+    "anthropic>=0.40",
+    "httpx>=0.27",
+
+    # 数据模型
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+
+    # CLI 界面
+    "rich>=13.0",
+    "click>=8.0",
+
+    # WebSocket（Phase 1 仅创建 lock.py 占位，不启动 server）
+    "websockets>=12.0",
+
+    # 配置 & 应用日志
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+    "picologging>=0.9",
+
+    # 审计日志
+    "aiofiles>=23.0",
+    "aiosqlite>=0.20",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio", "pytest-cov", "ruff"]
+postgres = ["asyncpg>=0.29"]
+
+[project.scripts]
+myagent = "myagent.interfaces.cli.main:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
