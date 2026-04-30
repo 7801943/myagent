@@ -21,10 +21,9 @@ from myagent.tools.idempotency import IdempotencyCache
 from myagent.core.hook import HookContext, HookManager
 from myagent.core.loop import AgentLoop
 from myagent.core.stream import StreamResult
-from myagent.core.session import Session, SessionManager
+from myagent.core.session import SessionManager
 from myagent.core.cancellation import CancellationToken, CancelReason, AgentCancelledError
 from myagent.observability.audit_logger import AuditLogger
-from myagent.observability.events import EventType
 from myagent.utils.config import TimeoutConfig
 from myagent.utils.logging import get_logger
 
@@ -110,6 +109,9 @@ class Agent:
         if system_prompt:
             self._context.set_system(system_prompt)
 
+        # 注册状态同步：Turn 的 state_change hook 事件 → 更新 Session 状态
+        self._hooks.on("state_change", self._on_session_state_change)
+
     @property
     def session_id(self) -> str:
         return self._session_id
@@ -121,11 +123,6 @@ class Agent:
     @property
     def tools(self) -> ToolRegistry:
         return self._tool_registry
-
-    @property
-    def hook(self) -> HookManager:
-        """向后兼容属性。推荐使用 hooks。"""
-        return self._hooks
 
     @property
     def hooks(self) -> HookManager:
@@ -142,6 +139,21 @@ class Agent:
     def add_hook(self, hook) -> None:
         """追加 Hook（兼容旧接口，推荐使用 hooks.register()）。"""
         self._hooks.register(hook)
+
+    async def _on_session_state_change(self, ctx, state):
+        """Hook 回调：当 Turn 发射 state_change 事件时更新 Session 状态。"""
+        session = self._session_manager.active
+        if session:
+            try:
+                session.agent_state = AgentState(state)
+            except ValueError:
+                pass  # 忽略未知的状态值
+
+    async def _persist(self, state=None, metadata=None):
+        """统一持久化入口：通过 Session 写入状态和消息历史。"""
+        session = self._session_manager.active
+        if session:
+            await session.persist(self._context.messages, state, metadata)
 
     def request_cancel(
         self,
@@ -166,9 +178,6 @@ class Agent:
             agent_id="main",
         )
 
-        # Session 生命周期
-        await self._hooks.emit("session_start", ctx)
-
         # 审计内联：session_start
         if self._audit:
             await self._audit.log_event("session_start", ctx.snapshot(), session_id=ctx.session_id)
@@ -176,9 +185,6 @@ class Agent:
         try:
             # 写入用户消息
             self._context.add_user_message(user_input)
-
-            # Turn 生命周期
-            await self._hooks.emit("turn_start", ctx)
 
             # 审计内联：turn_start
             if self._audit:
@@ -190,17 +196,9 @@ class Agent:
             # 内容后处理
             final_content = self._hooks.finalize_content(ctx, result.text)
 
-            await self._hooks.emit("turn_end", ctx)
-
             # 审计内联：turn_end
             if self._audit:
                 await self._audit.log_event("turn_end", ctx.snapshot(), session_id=ctx.session_id)
-
-            await self._hooks.emit("session_end",
-                ctx,
-                final_content=final_content,
-                exit_reason=result.stop_reason or "completed",
-            )
 
             # 审计内联：session_end
             if self._audit:
@@ -209,44 +207,28 @@ class Agent:
                 }, session_id=ctx.session_id)
 
             # 持久化状态
-            if self._state_store:
-                await self._state_store.save_messages(
-                    self._session_id,
-                    self._context.messages,
-                )
-                await self._state_store.save_state(
-                    self._session_id,
-                    AgentState.FINISHED,
-                    {"stop_reason": result.stop_reason or "completed"}
-                )
+            await self._persist(
+                AgentState.IDLE,
+                {"stop_reason": result.stop_reason or "completed"}
+            )
 
             return final_content or ""
 
         except AgentCancelledError as e:
             # AgentLoop 内部已处理，这里只做持久化
             logger.info(f"Agent run cancelled: {e}")
-            if self._state_store:
-                await self._state_store.save_messages(
-                    self._session_id, self._context.messages
-                )
-                state = AgentState.IDLE
-                metadata = {"cancelled": True, "cancel_reason": e.reason.value}
-                await self._state_store.save_state(
-                    self._session_id, state, metadata
-                )
+            await self._persist(AgentState.IDLE, {
+                "cancelled": True,
+                "cancel_reason": e.reason.value,
+            })
             raise
 
         except asyncio.CancelledError as e:
             logger.info("Agent run task cancelled by asyncio.")
-            if self._state_store:
-                await self._state_store.save_messages(
-                    self._session_id, self._context.messages
-                )
-                state = AgentState.IDLE
-                metadata = {"cancelled": True, "cancel_reason": "asyncio_cancelled"}
-                await self._state_store.save_state(
-                    self._session_id, state, metadata
-                )
+            await self._persist(AgentState.IDLE, {
+                "cancelled": True,
+                "cancel_reason": "asyncio_cancelled",
+            })
             raise
 
         except Exception as e:
@@ -256,14 +238,7 @@ class Agent:
                 await self._audit.log_event("error", {
                     "error": str(e), "error_type": type(e).__name__,
                 }, session_id=ctx.session_id)
-            await self._hooks.emit("session_end",
-                ctx, final_content=None, exit_reason=f"error: {e}"
-            )
-            if self._state_store:
-                await self._state_store.save_messages(
-                    self._session_id,
-                    self._context.messages,
-                )
+            await self._persist(AgentState.ERROR)
             raise
 
     async def restore_session(self, session_id: str) -> None:
@@ -276,7 +251,7 @@ class Agent:
         self._session_id = session.id
         
         # 恢复上下文
-        messages = await self._state_store.load_messages(session_id)
+        messages = await session.load_messages()
         self._context.restore_from(messages)
         
         logger.info(f"Session restored: {session_id}")

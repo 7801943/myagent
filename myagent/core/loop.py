@@ -3,8 +3,6 @@ AgentLoop：ReAct 循环引擎（Turn 抽象版）。
 Loop 退化为极简 dispatcher：创建 Turn → 执行 → 根据结果决定下一个 Turn。
 
 保留在 dispatcher 层的职责：
-- iteration_start/end 事件（iteration 是 dispatcher 才知道的语义）
-- state_change("finished") 事件（整个循环结束的状态）
 - cancelled 异常处理（跨 Turn 的全局事件）
 - max_iterations 控制
 """
@@ -97,7 +95,6 @@ class AgentLoop:
                     await self._cancel_token.check()
 
                 # → iteration_start 留在 dispatcher 层
-                await self._hook.emit("iteration_start", ctx)
                 if self._audit:
                     await self._audit.log_event("iteration_start", ctx.snapshot(), session_id=ctx.session_id)
 
@@ -108,8 +105,7 @@ class AgentLoop:
                 if model_result.next_turn is None:
                     # 无工具调用，循环结束
                     final_result = model_result.stream_result
-                    await self._hook.emit("state_change", ctx, state="finished")
-                    await self._hook.emit("iteration_end", ctx)
+                    await self._hook.emit("state_change", ctx, state="idle")
                     if self._audit:
                         await self._audit.log_event("iteration_end", ctx.snapshot(), session_id=ctx.session_id)
                     break
@@ -119,7 +115,6 @@ class AgentLoop:
                 await tool_turn.execute(ctx, model_result.data)
 
                 # → iteration_end 留在 dispatcher 层
-                await self._hook.emit("iteration_end", ctx)
                 if self._audit:
                     await self._audit.log_event("iteration_end", ctx.snapshot(), session_id=ctx.session_id)
 
@@ -138,10 +133,6 @@ class AgentLoop:
 
             self._context.add_assistant_message(
                 content=cancel_msg, tool_calls=None
-            )
-
-            await self._hook.emit("cancelled", ctx,
-                reason=e.reason.value, detail=e.detail
             )
 
             if self._audit:

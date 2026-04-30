@@ -59,14 +59,12 @@
     const STATE_MAP = {
         idle: { text: "空闲", css: "status-connected", emoji: "" },
         thinking: { text: "思考中...", css: "status-thinking", emoji: "🧠" },
-        running: { text: "生成中...", css: "status-running", emoji: "⚡" },
+        generating: { text: "生成中...", css: "status-running", emoji: "⚡" },
         waiting_tool: { text: "等待工具...", css: "status-waiting-tool", emoji: "🔧" },
         waiting_hitl: { text: "等待审批...", css: "status-waiting-hitl", emoji: "⏳" },
         error: { text: "错误", css: "status-error", emoji: "❌" },
-        finished: { text: "已完成", css: "status-finished", emoji: "✅" },
     };
 
-    let finishedTimer = null;
 
     // ── Sidebar Toggle ──
     function initSidebar() {
@@ -185,7 +183,12 @@
                     }
 
                     if (msg.content) {
-                        appendTextDelta(msg.content);
+                        let rawText = currentContentEl._rawText || "";
+                        rawText += msg.content;
+                        currentContentEl._rawText = rawText;
+                        currentContentEl.innerHTML = renderMarkdown(rawText);
+                        const replySection = currentContentEl.closest(".msg-reply-section");
+                        if (replySection) replySection.style.display = "";
                     }
                 } else if (msg.role === "tool") {
                     if (hasActiveAssistant) {
@@ -534,24 +537,8 @@
             return;
         }
 
-        if (finishedTimer) {
-            clearTimeout(finishedTimer);
-            finishedTimer = null;
-        }
-
         statusIndicator.className = "status-badge " + info.css;
         statusIndicator.textContent = info.text;
-
-        // Header connection dot only shows connection state (not agent state)
-        // It stays "connected" as long as WS is open
-
-        if (state === "finished") {
-            finishedTimer = setTimeout(function () {
-                if (!isProcessing) {
-                    setStatus("connected", "空闲");
-                }
-            }, 2000);
-        }
     }
 
     // ── DOM 操作函数 ──
@@ -629,7 +616,10 @@
         currentContentEl.innerHTML = renderMarkdownStream(rawText);
         const replySection = currentContentEl.closest(".msg-reply-section");
         if (replySection) replySection.style.display = "";
-        currentContentEl.classList.add("streaming-cursor");
+
+        if (isProcessing) {
+            currentContentEl.classList.add("streaming-cursor");
+        }
         scrollToEnd(false);
     }
 
@@ -985,10 +975,6 @@
 
         showSendButton();
 
-        if (finishedTimer) {
-            clearTimeout(finishedTimer);
-            finishedTimer = null;
-        }
         setStatus("connected", "空闲");
 
         scrollToEnd(true);

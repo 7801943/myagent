@@ -23,14 +23,6 @@ class StreamParser:
                 await self._hook.emit("thinking_stream", ctx, delta=event.text)
             elif event.type == "error" and event.error:
                 await self._hook.emit("error", ctx, error=event.error)
-            elif event.type == "provider_failover":
-                # Router 发生 failover，元信息通过 event.meta 传递，保持层间解耦
-                await self._hook.emit("provider_failover",
-                    ctx,
-                    from_provider=event.meta.get("from_provider", ""),
-                    to_provider=event.meta.get("to_provider", ""),
-                    reason=event.meta.get("reason", ""),
-                )
         except Exception as e:
             logger.warning(f"Hook dispatch error: {e}")
 

@@ -60,8 +60,7 @@ class BaseTurn(ABC):
     Turn 基类，封装横切关注点：
     - 取消检查（每个 Turn 开始前）
     - 看门狗超时（Turn 执行期间）
-    - Turn 生命周期事件（turn_start / turn_end / turn_error）
-    - 持久化预留接口（_persist_turn_history）
+    - Turn 生命周期事件（turn_error 保留为调试点）
     - 清理（finally 中取消看门狗）
 
     子类只需实现 _do_execute() 和 kind / _stage_name 属性。
@@ -88,19 +87,9 @@ class BaseTurn(ABC):
         if self._cancel:
             await self._cancel.check()
 
-        # 统一 emit turn_start，方便外部追踪生命周期
-        turn_event_name = f"{self.kind.name.lower()}_turn_start"
-        await self._hooks.emit(turn_event_name, ctx)
-
         watchdog = asyncio.create_task(self._watchdog(ctx))
         try:
             result = await self._do_execute(ctx, input_data)
-
-            # 正常完成：持久化 + turn_end
-            await self._persist_turn_history(ctx, result)
-
-            turn_end_name = f"{self.kind.name.lower()}_turn_end"
-            await self._hooks.emit(turn_end_name, ctx)
 
             return result
 
@@ -120,13 +109,6 @@ class BaseTurn(ABC):
                 await watchdog
             except asyncio.CancelledError:
                 pass
-
-    async def _persist_turn_history(self, ctx: HookContext, result: TurnResult):
-        """
-        持久化预留接口：子类可覆盖以实现 Turn 历史记录。
-        默认为空操作，待后续接入具体的持久化实现。
-        """
-        pass
 
     async def _watchdog(self, ctx: HookContext):
         """看门狗协程：超时后发出 timeout_warning 事件。"""
@@ -186,7 +168,6 @@ class ModelTurn(BaseTurn):
         processor = StreamProcessor()
         parser = StreamParser(self._hooks)
 
-        await self._hooks.emit("provider_call_start", ctx)
         await self._hooks.emit("state_change", ctx, state="thinking")
 
         if self._audit:
@@ -210,7 +191,7 @@ class ModelTurn(BaseTurn):
 
                 if not content_started and event.type == "text_delta" and event.text:
                     content_started = True
-                    await self._hooks.emit("state_change", ctx, state="running")
+                    await self._hooks.emit("state_change", ctx, state="generating")
 
                 processor.process(event)
                 await parser.dispatch(event, ctx)
@@ -230,9 +211,6 @@ class ModelTurn(BaseTurn):
             raise
 
         # Provider 调用结束
-        await self._hooks.emit("provider_call_end",
-            ctx, stop_reason=result.stop_reason or "", usage=result.usage
-        )
         if self._audit:
             await self._audit.log_event("provider_call_end", {
                 "stop_reason": result.stop_reason or "",
@@ -298,7 +276,6 @@ class ToolTurn(BaseTurn):
             await self._cancel.check()
 
         await self._hooks.emit("state_change", ctx, state="waiting_tool")
-        await self._hooks.emit("before_execute_tools", ctx)
 
         # per-tool: tool_start
         for tc in tool_calls:
@@ -312,8 +289,6 @@ class ToolTurn(BaseTurn):
 
         # 批量执行
         tool_results = await self._executor.execute_batch(tool_calls)
-
-        await self._hooks.emit("after_execute_tools", ctx)
 
         # 写入工具结果到上下文 + per-tool 事件
         for tc, tr in zip(tool_calls, tool_results):

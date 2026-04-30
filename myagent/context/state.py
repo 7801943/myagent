@@ -26,13 +26,21 @@ class AgentState(str, Enum):
     AgentLoop 的每一次状态变迁都必须先持久化到 StateStore，
     再执行实际操作——这是断电恢复的基石。
     """
-    IDLE = "idle"                    # 等待输入
-    THINKING = "thinking"            # LLM 正在进行思维链推理
-    RUNNING = "running"              # 正在调用 LLM / 内容生成
+    IDLE = "idle"                    # 空闲。run() 未执行，或刚结束回到此状态
+    THINKING = "thinking"            # LLM 推理阶段（对应 extended thinking）
+    GENERATING = "generating"        # LLM 流式输出中（首次 text_delta 后进入）
     WAITING_TOOL = "waiting_tool"    # LLM 已返回 tool_calls，等待执行
-    WAITING_HITL = "waiting_hitl"    # 等待人工审批（Phase 2 实现，Phase 1 预留）
+    WAITING_HITL = "waiting_hitl"    # 等待人工审批（Phase 2 预留）
     ERROR = "error"                  # 发生错误
-    FINISHED = "finished"            # 当前 Turn 完成
+
+
+# ── 旧状态值迁移映射 ──
+# 精简重构时移除了 RUNNING / FINISHED，但旧数据库中可能仍存储了这些值。
+# 加载时通过此映射自动转换，避免 ValueError。
+_LEGACY_STATE_MAP: dict[str, str] = {
+    "running": "generating",   # RUNNING → GENERATING
+    "finished": "idle",        # FINISHED → IDLE（会话结束即回到空闲）
+}
 
 class StateStore(ABC):
     """状态持久化抽象接口。"""
@@ -135,7 +143,9 @@ class SQLiteStateStore(StateStore):
             row = await cursor.fetchone()
             if row is None:
                 return AgentState.IDLE, {}
-            return AgentState(row[0]), json.loads(row[1])
+            # 兼容旧数据库中的已废弃状态值（running / finished）
+            state_str = _LEGACY_STATE_MAP.get(row[0], row[0])
+            return AgentState(state_str), json.loads(row[1])
 
     async def save_messages(self, session_id: str, messages: list[Message]) -> None:
         now = datetime.now(timezone.utc).isoformat()
@@ -200,9 +210,11 @@ class SQLiteStateStore(StateStore):
             result = []
             for row in rows:
                 meta = json.loads(row[2]) if row[2] else {}
+                # 兼容旧数据库中的已废弃状态值
+                state_str = _LEGACY_STATE_MAP.get(row[1], row[1])
                 result.append({
                     "session_id": row[0],
-                    "agent_state": row[1],
+                    "agent_state": state_str,
                     "metadata": meta,
                     "updated_at": row[3],
                 })

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from myagent.context.state import AgentState
+from myagent.context.message import Message
 from myagent.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -38,6 +39,23 @@ class Session:
             )
             if messages is not None:
                 await self._state_store.save_messages(self.id, messages)
+
+    async def persist(self, messages: list[Message] | None = None, state: AgentState | None = None, metadata: dict | None = None) -> None:
+        """一站式持久化：更新内存状态并写入持久层。"""
+        if state is not None:
+            self.agent_state = state
+        if metadata is not None:
+            self.metadata.update(metadata)
+        if messages is not None:
+            await self.save(messages)
+        else:
+            await self.save()
+
+    async def load_messages(self) -> list[Message]:
+        """加载该会话的全部消息历史。"""
+        if not self._state_store:
+            return []
+        return await self._state_store.load_messages(self.id)
 
     @classmethod
     async def restore(cls, session_id: str, state_store: "StateStore") -> "Session":
