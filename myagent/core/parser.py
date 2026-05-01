@@ -1,34 +1,9 @@
 """
-StreamEvent → UI Callback 路由。
-将 StreamEvent 分发给 HookManager（事件分发器）和 Interface 回调。
+StructuredOutputParser：从 LLM 文本输出中提取结构化数据。
+
+注意：原 StreamParser（StreamEvent → Hook 分发）已合并入 StreamProcessor（stream.py）。
+本文件仅保留 StructuredOutputParser。
 """
-from myagent.providers.base import StreamEvent
-from myagent.core.hook import HookContext, HookManager
-from myagent.utils.logging import get_logger
-
-logger = get_logger(__name__)
-
-class StreamParser:
-    """将 StreamEvent 流式分发给 HookManager。"""
-
-    def __init__(self, hook: HookManager):
-        self._hook = hook
-
-    async def dispatch(self, event: StreamEvent, ctx: HookContext) -> None:
-        """将单个 StreamEvent 分发给 HookManager（通过 emit 事件）。"""
-        try:
-            if event.type == "text_delta" and event.text:
-                await self._hook.emit("stream", ctx, delta=event.text)
-            elif event.type == "thinking_delta" and event.text:
-                await self._hook.emit("thinking_stream", ctx, delta=event.text)
-            elif event.type == "error" and event.error:
-                await self._hook.emit("error", ctx, error=event.error)
-        except Exception as e:
-            logger.warning(f"Hook dispatch error: {e}")
-
-
-# ── Phase 2: StructuredOutputParser ──────────────────────────────
-
 import json
 import re as _re
 from typing import Any, Callable

@@ -79,6 +79,14 @@ class ProviderRouter:
     def providers(self) -> list[BaseProvider]:
         return list(self._providers)
 
+    @property
+    def current_provider(self) -> BaseProvider | None:
+        """返回当前可用的主 Provider（列表中第一个未被熔断的）。"""
+        for p in self._providers:
+            if not self._breaker.is_open(p.name):
+                return p
+        return self._providers[0] if self._providers else None
+
     async def stream(
         self,
         messages: list,

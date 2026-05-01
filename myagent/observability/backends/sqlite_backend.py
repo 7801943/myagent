@@ -1,6 +1,7 @@
 """
 SqliteAuditBackend：SQLite 审计日志后端。
 """
+import asyncio
 import json
 import sqlite3
 from pathlib import Path
@@ -54,11 +55,10 @@ class SqliteAuditBackend(BaseAuditBackend):
         if len(self._buffer) >= self._buffer_size:
             await self.flush()
 
-    async def flush(self) -> None:
-        if not self._buffer:
-            return
+    def _flush_sync(self, events: list[AuditEvent]) -> None:
+        """同步写入数据库（在后台线程中执行）。"""
         with sqlite3.connect(self._path) as conn:
-            for event in self._buffer:
+            for event in events:
                 data = self._masker.mask_dict(event.data)
                 conn.execute(
                     """INSERT INTO audit_events
@@ -78,5 +78,11 @@ class SqliteAuditBackend(BaseAuditBackend):
                     ),
                 )
             conn.commit()
-        self._buffer.clear()
-        logger.debug(f"Flushed {len(self._buffer)} audit events to SQLite")
+
+    async def flush(self) -> None:
+        if not self._buffer:
+            return
+        events_to_flush = self._buffer
+        self._buffer = []
+        await asyncio.to_thread(self._flush_sync, events_to_flush)
+        logger.debug(f"Flushed {len(events_to_flush)} audit events to SQLite")

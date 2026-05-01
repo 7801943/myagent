@@ -6,7 +6,7 @@ from myagent.core.hook import (
     HookManager, HookHandle,
 )
 from myagent.core.stream import StreamProcessor, StreamResult
-from myagent.core.parser import StreamParser
+from myagent.core.parser import StructuredOutputParser
 from myagent.core.cancellation import (
     CancellationToken, CancelReason, AgentCancelledError,
 )
@@ -17,7 +17,7 @@ __all__ = [
     "HookContext",
     "HookManager", "HookHandle",
     "StreamProcessor", "StreamResult",
-    "StreamParser",
+    "StructuredOutputParser",
     "CancellationToken", "CancelReason", "AgentCancelledError",
     "Session", "SessionManager",
 ]

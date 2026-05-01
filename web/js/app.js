@@ -327,7 +327,8 @@
         try {
             ws = new WebSocket(WS_URL);
         } catch (e) {
-
+            console.error("WebSocket creation failed:", e);
+            appendErrorMessage("无法创建 WebSocket 连接");
             scheduleReconnect();
             return;
         }
@@ -349,12 +350,17 @@
             scheduleReconnect();
         };
 
-        ws.onerror = function () {
-
+        ws.onerror = function (err) {
+            console.error("WebSocket error:", err);
+            setStatus("disconnected", "连接错误");
         };
 
         ws.onmessage = function (event) {
-            handleMessage(JSON.parse(event.data));
+            try {
+                handleMessage(JSON.parse(event.data));
+            } catch (e) {
+                console.error("Failed to parse WebSocket message:", e, event.data);
+            }
         };
     }
 

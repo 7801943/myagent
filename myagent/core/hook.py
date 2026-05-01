@@ -9,6 +9,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
 from uuid import uuid4
 
+from myagent.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
 if TYPE_CHECKING:
     from myagent.tools.base import ToolResult
 
@@ -111,7 +115,7 @@ class HookManager:
                 else:
                     cb(ctx, **kwargs)
             except Exception:
-                pass  # 回调错误不应中断主流程
+                logger.exception("Hook callback failed for event '%s'", event)
 
     def wants_streaming(self) -> bool:
         """检查是否有任何监听者需要流式回调。"""
@@ -125,5 +129,5 @@ class HookManager:
                 if res is not None:
                     content = res
             except Exception:
-                pass
+                logger.exception("Hook callback failed for event 'finalize_content'")
         return content

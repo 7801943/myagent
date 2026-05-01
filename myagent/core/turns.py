@@ -21,7 +21,6 @@ from myagent.context.manager import ContextManager
 from myagent.context.message import ToolResult as MsgToolResult
 from myagent.core.hook import HookContext, HookManager
 from myagent.core.stream import StreamProcessor, StreamResult
-from myagent.core.parser import StreamParser
 from myagent.core.cancellation import CancellationToken, AgentCancelledError, CancelReason
 from myagent.tools.executor import ToolExecutor
 from myagent.observability.audit_logger import AuditLogger
@@ -165,38 +164,23 @@ class ModelTurn(BaseTurn):
         self._executor = executor
 
     async def _do_execute(self, ctx: HookContext, input_data: Any = None) -> TurnResult:
-        processor = StreamProcessor()
-        parser = StreamParser(self._hooks)
+        stream = StreamProcessor(router=self._router, hook=self._hooks)
 
         await self._hooks.emit("state_change", ctx, state="thinking")
 
         if self._audit:
             await self._audit.log_event("provider_call_start", ctx.snapshot(), session_id=ctx.session_id)
 
-        if self._hooks.wants_streaming():
-            await self._hooks.emit("stream_start", ctx)
-
         try:
             messages = self._context.get_messages()
             tools = self._executor._registry.list_tools() if len(self._executor._registry) > 0 else None
 
-            content_started = False
-            async for event in self._router.stream(messages, tools):
-                # 每 chunk 检查取消
-                if self._cancel and self._cancel.is_cancelled:
-                    raise AgentCancelledError(
-                        self._cancel.reason or CancelReason.USER_CANCEL,
-                        "LLM generation cancelled"
-                    )
-
-                if not content_started and event.type == "text_delta" and event.text:
-                    content_started = True
-                    await self._hooks.emit("state_change", ctx, state="generating")
-
-                processor.process(event)
-                await parser.dispatch(event, ctx)
-
-            result = processor.result()
+            result = await stream.run(
+                messages=messages,
+                tools=tools,
+                ctx=ctx,
+                cancel_token=self._cancel,
+            )
 
         except AgentCancelledError:
             raise  # 向上传递取消
