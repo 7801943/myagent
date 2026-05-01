@@ -89,6 +89,10 @@ class SQLiteStateStore(StateStore):
     async def initialize(self) -> None:
         """创建表结构。Agent 启动时调用。"""
         self._db = await aiosqlite.connect(self._db_path)
+        # 启用 SQLite 健壮性 PRAGMA
+        await self._db.execute("PRAGMA journal_mode=WAL")
+        await self._db.execute("PRAGMA busy_timeout=5000")
+        await self._db.execute("PRAGMA foreign_keys=ON")
         await self._db.executescript("""
             CREATE TABLE IF NOT EXISTS sessions (
                 session_id TEXT PRIMARY KEY,

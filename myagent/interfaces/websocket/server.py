@@ -579,7 +579,8 @@ class WebSocketServer:
                         content = str(first_user.content)
                 s["title"] = content[:50] if content else "新对话"
                 s["message_count"] = len(messages)
-            except Exception:
+            except Exception as e:
+                logger.warning(f"Failed to load session title for {s.get('session_id', '?')}: {e}")
                 s["title"] = "新对话"
                 s["message_count"] = 0
         await websocket.send(json.dumps({

@@ -45,3 +45,11 @@ build-backend = "hatchling.build"
 [tool.ruff]
 target-version = "py312"
 line-length = 120
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+
+[[tool.mypy.overrides]]
+module = ["openai.*", "anthropic.*", "aiosqlite.*"]
+ignore_missing_imports = true

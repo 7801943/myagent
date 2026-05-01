@@ -81,6 +81,7 @@ class CliUI:
                 from rich.console import Console
                 Console(file=self._output).print(f"[red]❌ {message}[/red]")
             except Exception:
+                logger.debug("Rich rendering failed in print_error, falling back to plain text")
                 print(f"❌ {message}", file=self._output)
         else:
             print(f"❌ {message}", file=self._output)
@@ -91,6 +92,7 @@ class CliUI:
             from rich.markdown import Markdown
             Console(file=self._output).print(Markdown(text))
         except Exception:
+            logger.debug("Rich rendering failed in _print_rich, falling back to plain text")
             print(text, file=self._output)
 
     def _print_tool_rich(self, tool_name: str, args: dict, call_id: str) -> None:
@@ -106,6 +108,7 @@ class CliUI:
                 )
             )
         except Exception:
+            logger.debug("Rich rendering failed in _print_tool_rich, falling back to plain text")
             print(f"\n🔧 调用工具: {tool_name}", file=self._output)
 
     def _print_result_rich(self, tool_name: str, result: str, latency_ms: int) -> None:
@@ -115,6 +118,7 @@ class CliUI:
                 f"  [green]✅ {tool_name}[/green] ({latency_ms}ms)"
             )
         except Exception:
+            logger.debug("Rich rendering failed in _print_result_rich, falling back to plain text")
             print(f"  ✅ {tool_name} ({latency_ms}ms)", file=self._output)
 
     def _print_result_full_rich(self, tool_name: str, result: str, latency_ms: int) -> None:
@@ -129,4 +133,5 @@ class CliUI:
                 )
             )
         except Exception:
+            logger.debug("Rich rendering failed in _print_result_full_rich, falling back to plain text")
             print(f"  ✅ {tool_name} ({latency_ms}ms):\n{result[:500]}", file=self._output)
