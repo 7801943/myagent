@@ -49,7 +49,7 @@
     let reconnectTimer = null;
     let reconnectAttempts = 0;
     const MAX_RECONNECT = 10;
-    const WS_URL = `ws://${window.location.hostname || "localhost"}:8765`;
+    const WS_URL = `ws://${window.location.host}/ws`;
 
     // Session state
     let currentSessionId = null;

@@ -18,8 +18,9 @@ dependencies = [
     "rich>=13.0",
     "click>=8.0",
 
-    # WebSocket（Phase 1 仅创建 lock.py 占位，不启动 server）
-    "websockets>=12.0",
+    # Web 框架（FastAPI 统一 HTTP + WebSocket + 静态文件）
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
 
     # 配置 & 应用日志
     "pyyaml>=6.0",
