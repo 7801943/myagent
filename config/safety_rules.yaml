@@ -13,8 +13,6 @@ cli_fence:
     - pwd
     - env
     - python3
-    - pip
-    - git
     - curl
     - wget
     - head
@@ -23,11 +21,7 @@ cli_fence:
     - sort
     - uniq
     - diff
-    - mkdir
-    - cp
-    - mv
     - touch
-    - chmod
 
   # 拒绝执行的模式（黑名单，正则匹配）
   denied_patterns:
@@ -79,6 +73,24 @@ policy_engine:
         - pattern: "sudo"
           action: deny
           reason: "禁止使用 sudo 提权"
+        - pattern: "^mv\\b"
+          action: require_hitl
+          reason: "移动/重命名文件需要审批"
+        - pattern: "^cp\\b"
+          action: require_hitl
+          reason: "复制文件需要审批"
+        - pattern: "^chmod\\b"
+          action: require_hitl
+          reason: "修改文件权限需要审批"
+        - pattern: "^mkdir\\b"
+          action: require_hitl
+          reason: "创建目录需要审批"
+        - pattern: "^pip\\b"
+          action: require_hitl
+          reason: "pip 包管理操作需要审批"
+        - pattern: "^git\\b"
+          action: require_hitl
+          reason: "git 版本控制操作需要审批"
 
     # 文件写入 - 特定路径需审批
     - tool_name: "file_write"

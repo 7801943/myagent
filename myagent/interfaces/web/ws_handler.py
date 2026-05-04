@@ -52,7 +52,7 @@ class WebSocketApprovalHandler:
         self._pending_futures: dict[str, asyncio.Future] = {}
 
     async def __call__(self, tool_calls: list[ToolCall]) -> list[bool]:
-        """approval_handler 接口：批量发送审批请求，等待所有回复。"""
+        """approval_handler 接口：逐个发送审批请求，等待所有回复。"""
         # 为每个 tool_call 创建 Future
         futures = {}
         for tc in tool_calls:
@@ -60,29 +60,38 @@ class WebSocketApprovalHandler:
             self._pending_futures[tc.id] = fut
             futures[tc.id] = fut
 
-        # 批量发送审批请求
-        requests = []
+        # 逐个发送 hitl_request 消息（匹配前端期望的消息格式）
         for tc in tool_calls:
-            requests.append({
-                "call_id": tc.id,
-                "tool_name": tc.name,
-                "arguments": tc.arguments,
-            })
-
-        try:
-            await self._ws.send_text(json.dumps({
-                "type": "approval_needed",
-                "tool_calls": requests,
-            }, ensure_ascii=False))
-        except Exception:
-            # 发送失败，全部拒绝
-            for tc in tool_calls:
+            args = tc.arguments
+            if isinstance(args, str):
+                try:
+                    import json as _json
+                    args = _json.loads(args)
+                except Exception:
+                    pass
+            try:
+                await self._ws.send_text(json.dumps({
+                    "type": "hitl_request",
+                    "tool_name": tc.name,
+                    "reason": f"工具 '{tc.name}' 需要人工审批",
+                    "args": args,
+                    "call_id": tc.id,
+                }, ensure_ascii=False))
+            except Exception:
+                # 发送失败，该调用拒绝
                 self._pending_futures.pop(tc.id, None)
+                futures.pop(tc.id, None)
+
+        # 如果全部发送失败，返回全部拒绝
+        if not futures:
             return [False] * len(tool_calls)
 
         # 等待所有回复（带超时）
         decisions = []
         for tc in tool_calls:
+            if tc.id not in futures:
+                decisions.append(False)
+                continue
             try:
                 result = await asyncio.wait_for(futures[tc.id], timeout=120.0)
                 decisions.append(result)
