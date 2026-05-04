@@ -1,0 +1,100 @@
+# 安全规则配置文件
+# 定义 CLI 围栏、策略引擎规则、HITL 审批条件
+
+cli_fence:
+  # 允许执行的命令（白名单）
+  allowed_commands:
+    - ls
+    - cd
+    - cat
+    - grep
+    - find
+    - echo
+    - pwd
+    - env
+    - python3
+    - pip
+    - git
+    - curl
+    - wget
+    - head
+    - tail
+    - wc
+    - sort
+    - uniq
+    - diff
+    - mkdir
+    - cp
+    - mv
+    - touch
+    - chmod
+
+  # 拒绝执行的模式（黑名单，正则匹配）
+  denied_patterns:
+    - "rm\\s+-rf\\s+/"
+    - "sudo\\s+"
+    - "mkfs"
+    - "dd\\s+if="
+    - ":(){ :|:& };:"
+    - "\\|\\s*mail\\b"
+    - ">\\/dev\\/sd"
+    - "chmod\\s+777\\s+/"
+
+  # 禁止访问的路径
+  denied_paths:
+    - /etc/shadow
+    - /etc/passwd
+    - /root
+    - /sys
+    - /proc/sys
+    - /boot
+    - /dev
+
+  # 资源限制
+  resource_limits:
+    max_cpu_seconds: 30
+    max_memory_mb: 512
+    max_output_bytes: 102400
+    timeout_seconds: 60
+
+# 策略引擎规则
+policy_engine:
+  # 默认策略（当无规则匹配时）
+  default_action: allow
+
+  # 工具级策略
+  tool_policies:
+    # 高危工具 - 需要人工审批
+    - tool_name: "cli_execute"
+      conditions:
+        - pattern: "DROP\\s+TABLE"
+          action: require_hitl
+          reason: "检测到数据库删表操作"
+        - pattern: "DELETE\\s+FROM"
+          action: require_hitl
+          reason: "检测到数据库删除操作"
+        - pattern: "rm\\s+-rf"
+          action: deny
+          reason: "禁止递归删除操作"
+        - pattern: "sudo"
+          action: deny
+          reason: "禁止使用 sudo 提权"
+
+    # 文件写入 - 特定路径需审批
+    - tool_name: "file_write"
+      conditions:
+        - pattern: "\\.(sh|bash|py)$"
+          match_field: "path"
+          action: require_hitl
+          reason: "写入可执行脚本文件需要审批"
+        - pattern: "^/etc/"
+          match_field: "path"
+          action: deny
+          reason: "禁止写入系统配置目录"
+
+# HITL 配置
+hitl:
+  # CLI 模式下的审批超时（秒）
+  cli_approval_timeout: 120
+  # 默认自动拒绝（超时后的行为）
+  timeout_action: reject
