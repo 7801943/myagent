@@ -12,18 +12,36 @@ class ContextManager:
     def __init__(
         self,
         max_tokens_budget: int = 200000,
+        context_window_size: int = 128000,
         tool_result_max_chars: int = 100000,
         recent_turns: int = 20,
     ):
         self._messages: list[Message] = []
         self._system_prompt: str | None = None
         self._max_tokens_budget = max_tokens_budget
+        self._context_window_size = context_window_size
         self._tool_result_max_chars = tool_result_max_chars
         self._recent_turns = recent_turns
+        self._last_usage_input_tokens: int = 0
 
     @property
     def messages(self) -> list[Message]:
         return list(self._messages)
+
+    @property
+    def context_window_size(self) -> int:
+        return self._context_window_size
+
+    @property
+    def last_usage_input_tokens(self) -> int:
+        """返回最后一次 API 调用的 input_tokens（即当前上下文实际占用量）。"""
+        return self._last_usage_input_tokens
+
+    def update_usage(self, usage: dict) -> None:
+        """更新来自 API 返回的 token 使用量。取最后一次的 input_tokens。"""
+        if usage and usage.get("input_tokens"):
+            self._last_usage_input_tokens = usage["input_tokens"]
+            logger.debug(f"Context usage updated: input_tokens={self._last_usage_input_tokens}")
 
     def set_system(self, prompt: str) -> None:
         """设置/替换 System Prompt。"""

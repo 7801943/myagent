@@ -2,19 +2,25 @@
 Turn 抽象层：将 AgentLoop.run() 的单体方法拆分为独立的 Turn 执行单元。
 
 ModelTurn — LLM 流式生成（包含 StreamProcessor + StreamParser + context 写入）
-ToolTurn  — 工具批量执行（包含结果分发 + context 写入）
+ToolTurn  — 工具批量执行（包含安全分拣 + 结果分发 + context 写入）
+HumanTurn — 人工审批（等待用户决策，继承看门狗 + 取消检查）
 BaseTurn  — 模板方法（取消检查 + 看门狗 + 子类逻辑）
 
+状态机路由：
+  MODEL → TOOL → MODEL（全部安全）
+  MODEL → TOOL → HUMAN → TOOL → MODEL（部分需审批）
+  MODEL → TOOL → HUMAN → MODEL（全部被拒绝）
+
 设计决策：
-- 路线 A：Turn 是一次性执行器
-- 方案 1：Turn 自己声明下一步（状态机模式）
-- 选择 A：Hook 旁路分发（保持现有流式消费模式）
+- Turn 是一次性执行器
+- Turn 自己声明下一步（状态机模式）
+- Hook 旁路分发（保持现有流式消费模式）
 """
 import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any
+from typing import Any, Callable, Awaitable
 
 from myagent.providers.router import ProviderRouter
 from myagent.context.manager import ContextManager
@@ -33,7 +39,7 @@ class TurnKind(Enum):
     """Turn 类型枚举。"""
     MODEL = auto()
     TOOL = auto()
-    # HUMAN = auto()  # 预留，当前架构中 Agent.run() 已处理用户输入
+    HUMAN = auto()
 
 
 @dataclass
@@ -77,9 +83,10 @@ class BaseTurn(ABC):
         self._audit = audit
         self._timeout = watchdog_timeout
 
-    async def execute(self, ctx: HookContext, input_data: Any = None) -> TurnResult:
+    async def execute(self, ctx: HookContext, input_data: Any = None, source: TurnKind | None = None) -> TurnResult:
         """
-        模板方法：取消检查 → turn_start → 看门狗 → 子类逻辑 → 持久化 → turn_end。
+        模板方法：取消检查 → 看门狗 → 子类逻辑 → 清理。
+        source: 上一个 Turn 的类型（用于 ToolTurn 判断是否来自 HumanTurn）。
         异常路径：turn_error → raise。
         取消路径：直接 raise（由 Loop dispatcher 统一处理）。
         """
@@ -88,7 +95,7 @@ class BaseTurn(ABC):
 
         watchdog = asyncio.create_task(self._watchdog(ctx))
         try:
-            result = await self._do_execute(ctx, input_data)
+            result = await self._do_execute(ctx, input_data, source)
 
             return result
 
@@ -134,7 +141,7 @@ class BaseTurn(ABC):
     def _stage_name(self) -> str: ...
 
     @abstractmethod
-    async def _do_execute(self, ctx: HookContext, input_data: Any) -> TurnResult: ...
+    async def _do_execute(self, ctx: HookContext, input_data: Any, source: TurnKind | None) -> TurnResult: ...
 
 
 class ModelTurn(BaseTurn):
@@ -163,7 +170,7 @@ class ModelTurn(BaseTurn):
         self._context = context
         self._executor = executor
 
-    async def _do_execute(self, ctx: HookContext, input_data: Any = None) -> TurnResult:
+    async def _do_execute(self, ctx: HookContext, input_data: Any = None, source: TurnKind | None = None) -> TurnResult:
         stream = StreamProcessor(router=self._router, hook=self._hooks)
 
         await self._hooks.emit("state_change", ctx, state="thinking")
@@ -201,6 +208,10 @@ class ModelTurn(BaseTurn):
                 "usage": result.usage,
             }, session_id=ctx.session_id)
 
+        # 更新上下文的 token 使用量（来自 API 返回的真实数据）
+        if result.usage:
+            self._context.update_usage(result.usage)
+
         # 写入 assistant 消息到上下文
         self._context.add_assistant_message(
             content=result.text,
@@ -231,10 +242,13 @@ class ToolTurn(BaseTurn):
     """
     工具批量执行 Turn。
     职责：
-    1. 并行执行 tool_calls
-    2. 写入 tool_results 到 context
-    3. 分发 tool_start / tool_end / tool_error / safety_blocked 事件
-    4. 决定下一步：固定为 MODEL（工具执行完总是回到模型）
+    1. 并行执行 tool_calls（通过 ToolExecutor）
+    2. 分拣结果：已完成 vs 需审批（needs_approval）
+    3. 写入已完成的 tool_results 到 context
+    4. 决定下一步：
+       - 全部完成 → MODEL
+       - 有待审批 → HUMAN
+    当 source=HUMAN 时（已审批的调用），跳过安全检查。
     """
     kind = TurnKind.TOOL
     _stage_name = "tool_execution"
@@ -252,14 +266,17 @@ class ToolTurn(BaseTurn):
         self._context = context
         self._executor = executor
 
-    async def _do_execute(self, ctx: HookContext, input_data: Any = None) -> TurnResult:
-        tool_calls = input_data  # ModelTurn 传递的 tool_calls 列表
+    async def _do_execute(self, ctx: HookContext, input_data: Any = None, source: TurnKind | None = None) -> TurnResult:
+        tool_calls = input_data  # ModelTurn 或 HumanTurn 传递的 tool_calls 列表
 
         # 工具执行前检查取消
         if self._cancel:
             await self._cancel.check()
 
         await self._hooks.emit("state_change", ctx, state="waiting_tool")
+
+        # 判断是否来自 HumanTurn（已审批的调用跳过安全检查）
+        skip_safety = (source == TurnKind.HUMAN)
 
         # per-tool: tool_start
         for tc in tool_calls:
@@ -272,10 +289,16 @@ class ToolTurn(BaseTurn):
                 }, session_id=ctx.session_id)
 
         # 批量执行
-        tool_results = await self._executor.execute_batch(tool_calls)
+        tool_results = await self._executor.execute_batch(tool_calls, skip_safety=skip_safety)
 
-        # 写入工具结果到上下文 + per-tool 事件
-        for tc, tr in zip(tool_calls, tool_results):
+        # 分拣：已完成 vs 需审批
+        pending = [(tc, tr) for tc, tr in zip(tool_calls, tool_results)
+                   if tr.metadata.get("needs_approval")]
+        completed = [(tc, tr) for tc, tr in zip(tool_calls, tool_results)
+                     if not tr.metadata.get("needs_approval")]
+
+        # 已完成的正常写入 context + 发射 hook 事件
+        for tc, tr in completed:
             msg_result = MsgToolResult(
                 tool_call_id=tc.id,
                 tool_name=tc.name,
@@ -322,8 +345,107 @@ class ToolTurn(BaseTurn):
                         "is_error": False,
                     }, session_id=ctx.session_id)
 
-        return TurnResult(
-            kind=TurnKind.TOOL,
-            next_turn=TurnKind.MODEL,  # 工具执行完总是回到模型
-            data=tool_results,
-        )
+        if pending:
+            # 有待审批 → 下一步走 HumanTurn
+            if self._audit:
+                await self._audit.log_event("approval_needed", {
+                    "pending_count": len(pending),
+                    "tool_names": [tc.name for tc, _ in pending],
+                }, session_id=ctx.session_id)
+            return TurnResult(
+                kind=TurnKind.TOOL,
+                next_turn=TurnKind.HUMAN,
+                data=[tc for tc, _ in pending],
+            )
+        else:
+            return TurnResult(
+                kind=TurnKind.TOOL,
+                next_turn=TurnKind.MODEL,
+                data=tool_results,
+            )
+
+
+class HumanTurn(BaseTurn):
+    """
+    人工审批 Turn。继承 BaseTurn 获得看门狗 + 取消检查。
+    职责：
+    1. 通过 hook 事件 approval_needed 通知 UI 层
+    2. 等待 approval_handler 返回审批决策
+    3. 被拒绝的写入 context 让 LLM 知道
+    4. 决定下一步：有批准 → TOOL（执行），全部拒绝 → MODEL
+    """
+    kind = TurnKind.HUMAN
+    _stage_name = "human_approval"
+
+    def __init__(
+        self,
+        context: ContextManager,
+        hooks: HookManager,
+        cancel_token: CancellationToken | None,
+        audit: AuditLogger | None,
+        watchdog_timeout: float,
+        approval_handler: Callable[[list], Awaitable[list[bool]]] | None = None,
+    ):
+        super().__init__(hooks, cancel_token, audit, watchdog_timeout)
+        self._context = context
+        self._approval_handler = approval_handler  # async (tool_calls) -> list[bool]
+
+    async def _do_execute(self, ctx: HookContext, input_data: Any = None, source: TurnKind | None = None) -> TurnResult:
+        """input_data: list[ToolCall] 需要审批的工具调用"""
+        pending_calls = input_data
+
+        # 通过 hook 通知 UI 层
+        await self._hooks.emit("approval_needed", ctx, tool_calls=pending_calls)
+
+        if self._audit:
+            await self._audit.log_event("human_turn_start", {
+                "pending_count": len(pending_calls),
+                "tool_names": [tc.name for tc in pending_calls],
+            }, session_id=ctx.session_id)
+
+        if self._approval_handler:
+            decisions = await self._approval_handler(pending_calls)
+        else:
+            # 无 handler，默认全部拒绝
+            decisions = [False] * len(pending_calls)
+
+        approved = [tc for tc, ok in zip(pending_calls, decisions) if ok]
+        rejected = [tc for tc, ok in zip(pending_calls, decisions) if not ok]
+
+        # 被拒绝的写入 context 让 LLM 知道
+        if rejected:
+            for tc in rejected:
+                msg_result = MsgToolResult(
+                    tool_call_id=tc.id,
+                    tool_name=tc.name,
+                    content=f"工具 '{tc.name}' 被用户拒绝执行",
+                )
+                self._context.add_tool_result(tc.id, msg_result)
+
+                await self._hooks.emit("tool_error",
+                    ctx, tool_name=tc.name,
+                    error=Exception(f"工具 '{tc.name}' 被用户拒绝执行"),
+                    call_id=tc.id,
+                )
+                if self._audit:
+                    await self._audit.log_event("tool_rejected", {
+                        "tool_name": tc.name, "call_id": tc.id,
+                    }, session_id=ctx.session_id)
+
+        if self._audit:
+            await self._audit.log_event("human_turn_end", {
+                "approved_count": len(approved),
+                "rejected_count": len(rejected),
+            }, session_id=ctx.session_id)
+
+        if approved:
+            return TurnResult(
+                kind=TurnKind.HUMAN,
+                next_turn=TurnKind.TOOL,
+                data=approved,
+            )
+        else:
+            return TurnResult(
+                kind=TurnKind.HUMAN,
+                next_turn=TurnKind.MODEL,
+            )

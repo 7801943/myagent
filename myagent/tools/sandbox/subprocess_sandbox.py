@@ -49,10 +49,15 @@ class SubprocessSandbox(BaseSandbox):
         start_time = time.monotonic()
 
         # 构建 ulimit 前缀命令
-        ulimit_prefix = (
-            f"ulimit -t {self._limits.max_cpu_seconds} && "
-            f"ulimit -v {self._limits.max_memory_mb * 1024} && "
-        )
+        # macOS (darwin) 不支持 ulimit -v，会报 Invalid argument 错误
+        import sys
+        if sys.platform == "darwin":
+            ulimit_prefix = f"ulimit -t {self._limits.max_cpu_seconds} && "
+        else:
+            ulimit_prefix = (
+                f"ulimit -t {self._limits.max_cpu_seconds} && "
+                f"ulimit -v {self._limits.max_memory_mb * 1024} && "
+            )
 
         # 构建环境变量
         proc_env = self._build_env(env)
