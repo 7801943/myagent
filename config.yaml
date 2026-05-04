@@ -11,12 +11,12 @@ agent:
 
   # Provider 配置（支持多路冗余）
   providers:
-    # - name: "openai-primary"
-    #   type: "openai"
-    #   model: "glm-5.1"
-    #   api_key: "4d1d17ae5953451e872f0efcf9c4ffe2.WILVHXpssYeAPLQD"   # 支持环境变量引用
-    #   api_base: "https://open.bigmodel.cn/api/coding/paas/v4"  # 可选，自定义 API 基地址
-    #   priority: 1
+    - name: "openai-primary"
+      type: "openai"
+      model: "glm-5.1"
+      api_key: "4d1d17ae5953451e872f0efcf9c4ffe2.WILVHXpssYeAPLQD"   # 支持环境变量引用
+      api_base: "https://open.bigmodel.cn/api/coding/paas/v4"  # 可选，自定义 API 基地址
+      priority: 1
 
     - name: "openai-backup"
       type: "openai"

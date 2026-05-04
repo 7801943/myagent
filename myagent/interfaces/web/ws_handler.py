@@ -6,17 +6,14 @@ WebSocket Handler：处理 WebSocket 连接的完整生命周期。
 1. WebSocket 连接管理（accept/close/心跳）
 2. 消息路由（基于 Pydantic 模型校验）
 3. Agent 生命周期管理（创建/运行/取消）
-4. 会话管理（创建/切换/列表/删除）
-5. HITL 审批控制器
+4. 会话管理（创建/切换/列表/删除）— 通过 Agent 的 Session 工厂
+5. 人工审批控制器（approval_handler 模式）
 6. Hook 回调 → WebSocket JSON 推送
 
-注意：FastAPI WebSocket API 与 websockets 库的差异：
-  - send(data) → send_text(data)
-  - async for msg in ws → async for msg in ws.iter_text()
-
-未来扩展：
-  - [AUTH] 连接时校验 token，按用户隔离会话
-  - [MCP] 处理 MCP 协议相关的 WebSocket 消息
+重构变更：
+- 单 Agent 多会话模式（Agent 持有共享组件，Session 管理独立上下文）
+- approval_handler 替代旧的 HITLController（批量审批 + 异步 Future）
+- 删除对 hitl.py / HITLController 的依赖
 """
 import asyncio
 import json
@@ -27,8 +24,9 @@ from fastapi import WebSocket, WebSocketDisconnect
 from myagent.core.agent import Agent
 from myagent.core.factory import AgentFactory
 from myagent.core.hook import HookManager
-from myagent.core.hitl import HITLController
 from myagent.core.cancellation import AgentCancelledError, CancelReason
+from myagent.core.session import Session
+from myagent.context.message import ToolCall
 from myagent.context.state import StateStore
 from myagent.interfaces.websocket.lock import WebSocketLock
 from myagent.interfaces.web.ws_models import INCOMING_MESSAGE_TYPES
@@ -37,55 +35,69 @@ from myagent.utils.logging import get_logger
 logger = get_logger(__name__)
 
 
-class WebSocketHITLController(HITLController):
+class WebSocketApprovalHandler:
     """
-    WebSocket 模式下的 HITL 控制器。
-    通过 WebSocket 向客户端发送审批请求，等待客户端回复。
-    适配 FastAPI WebSocket API（send_text）。
+    WebSocket 模式下的人工审批 handler。
+    签名：async (tool_calls: list[ToolCall]) -> list[bool]
+    
+    工作流程：
+    1. HumanTurn 调用 __call__(tool_calls)
+    2. 向 WS 客户端发送批量审批请求
+    3. 等待客户端逐个回复（通过 Future）
+    4. 返回决策列表
     """
 
     def __init__(self, websocket: WebSocket):
         self._ws = websocket
-        self._pending_approvals: dict[str, asyncio.Event] = {}
-        self._approval_results: dict[str, bool] = {}
+        self._pending_futures: dict[str, asyncio.Future] = {}
 
-    async def request_approval(
-        self,
-        tool_name: str,
-        reason: str,
-        tool_call,
-    ) -> bool:
-        """通过 WebSocket 请求审批。"""
-        call_id = tool_call.id
-        event = asyncio.Event()
-        self._pending_approvals[call_id] = event
+    async def __call__(self, tool_calls: list[ToolCall]) -> list[bool]:
+        """approval_handler 接口：批量发送审批请求，等待所有回复。"""
+        # 为每个 tool_call 创建 Future
+        futures = {}
+        for tc in tool_calls:
+            fut = asyncio.get_event_loop().create_future()
+            self._pending_futures[tc.id] = fut
+            futures[tc.id] = fut
+
+        # 批量发送审批请求
+        requests = []
+        for tc in tool_calls:
+            requests.append({
+                "call_id": tc.id,
+                "tool_name": tc.name,
+                "arguments": tc.arguments,
+            })
 
         try:
             await self._ws.send_text(json.dumps({
-                "type": "hitl_request",
-                "tool_name": tool_name,
-                "reason": reason,
-                "args": tool_call.arguments,
-                "call_id": call_id,
+                "type": "approval_needed",
+                "tool_calls": requests,
             }, ensure_ascii=False))
         except Exception:
-            return False
+            # 发送失败，全部拒绝
+            for tc in tool_calls:
+                self._pending_futures.pop(tc.id, None)
+            return [False] * len(tool_calls)
 
-        # 等待客户端回复（带超时）
-        try:
-            await asyncio.wait_for(event.wait(), timeout=120.0)
-        except asyncio.TimeoutError:
-            self._pending_approvals.pop(call_id, None)
-            return False
+        # 等待所有回复（带超时）
+        decisions = []
+        for tc in tool_calls:
+            try:
+                result = await asyncio.wait_for(futures[tc.id], timeout=120.0)
+                decisions.append(result)
+            except asyncio.TimeoutError:
+                decisions.append(False)
+            finally:
+                self._pending_futures.pop(tc.id, None)
 
-        return self._approval_results.pop(call_id, False)
+        return decisions
 
-    def handle_hitl_response(self, call_id: str, approved: bool) -> None:
-        """处理客户端发来的 HITL 审批回复。"""
-        self._approval_results[call_id] = approved
-        event = self._pending_approvals.pop(call_id, None)
-        if event:
-            event.set()
+    def handle_response(self, call_id: str, approved: bool) -> None:
+        """处理客户端发来的审批回复。"""
+        fut = self._pending_futures.pop(call_id, None)
+        if fut and not fut.done():
+            fut.set_result(approved)
 
 
 def _serialize_messages(messages: list) -> list[dict]:
@@ -139,7 +151,7 @@ def _serialize_messages(messages: list) -> list[dict]:
 class WebSocketHandler:
     """
     WebSocket 连接处理器。
-    管理单个 WebSocket 连接的完整生命周期：Agent 创建、消息路由、会话管理。
+    单 Agent 多会话模式：一个 Agent 实例管理多个 Session。
     """
 
     def __init__(
@@ -152,10 +164,10 @@ class WebSocketHandler:
         self._factory = factory
         self._state_store = state_store
         self._ws_lock = WebSocketLock()
-        self._agents: dict[str, Agent] = {}
+        self._agent: Agent | None = None
         self._running_tasks: dict[str, asyncio.Task] = {}
         self._session_id: str = ""
-        self._hitl_controller: WebSocketHITLController | None = None
+        self._approval_handler: WebSocketApprovalHandler | None = None
 
     async def run(self) -> None:
         """WebSocket 连接主循环。"""
@@ -173,25 +185,23 @@ class WebSocketHandler:
             "context_window_size": context_window_size,
         })
 
-        # 创建 HITL 控制器
-        self._hitl_controller = WebSocketHITLController(self._ws)
+        # 构建 Agent（单 Agent 多会话）
+        self._approval_handler = WebSocketApprovalHandler(self._ws)
 
-        # 构建 Agent
         try:
-            agent = self._build_agent(self._session_id)
+            self._agent = self._build_agent()
         except Exception as e:
             logger.error(f"Failed to build agent: {e}")
             await self._send_json({"type": "error", "message": f"Agent 初始化失败: {e}"})
             await self._ws.close()
             return
 
-        self._agents[self._session_id] = agent
+        # 创建初始会话
+        self._agent.create_session(session_id=self._session_id)
 
         try:
             async for raw_message in self._ws.iter_text():
-                # 每次从映射表获取最新 agent（session_switch/session_create 可能替换了它）
-                agent = self._agents.get(self._session_id, agent)
-                await self._dispatch_message(raw_message, agent)
+                await self._dispatch_message(raw_message)
 
         except WebSocketDisconnect:
             logger.info(f"WebSocket client disconnected, session: {self._session_id}")
@@ -200,7 +210,7 @@ class WebSocketHandler:
         finally:
             self._cleanup()
 
-    def _build_agent(self, session_id: str) -> Agent:
+    def _build_agent(self) -> Agent:
         """构建 Agent 实例，注册 WebSocket Hook 回调。"""
         hooks = HookManager()
 
@@ -279,14 +289,13 @@ class WebSocketHandler:
             })
         hooks.on("timeout_warning", _on_timeout_warning)
 
-        # 通过 AgentFactory 创建 Agent
+        # 通过 AgentFactory 创建 Agent（单 Agent，多会话由 Agent 内部管理）
         return self._factory.create_agent(
             hooks=hooks,
-            hitl_callback=self._hitl_controller.request_approval,
-            session_id=session_id,
+            approval_handler=self._approval_handler,
         )
 
-    async def _dispatch_message(self, raw_message: str, agent: Agent) -> None:
+    async def _dispatch_message(self, raw_message: str) -> None:
         """解析并路由 WebSocket 消息。"""
         try:
             data = json.loads(raw_message)
@@ -300,7 +309,6 @@ class WebSocketHandler:
         model_cls = INCOMING_MESSAGE_TYPES.get(msg_type)
         if model_cls:
             try:
-                # 校验通过后使用原始 dict 处理（保持兼容性）
                 model_cls(**data)
             except Exception as e:
                 await self._send_json({"type": "error", "message": f"消息格式错误: {e}"})
@@ -311,49 +319,52 @@ class WebSocketHandler:
 
         # 路由到对应处理器
         if msg_type == "chat":
-            asyncio.create_task(self._handle_chat(agent, data))
+            asyncio.create_task(self._handle_chat(data))
         elif msg_type == "cancel":
             await self._handle_cancel()
         elif msg_type == "hitl_response":
-            self._handle_hitl_response(data)
+            self._handle_approval_response(data)
         elif msg_type == "session_list":
             await self._handle_session_list()
         elif msg_type == "session_create":
-            result = await self._handle_session_create()
-            if result:
-                self._session_id, agent = result
-                self._agents[self._session_id] = agent
+            await self._handle_session_create()
         elif msg_type == "session_switch":
-            result = await self._handle_session_switch(data)
-            if result:
-                self._session_id, agent = result
-                self._agents[self._session_id] = agent
+            await self._handle_session_switch(data)
         elif msg_type == "session_delete":
             await self._handle_session_delete(data)
         elif msg_type == "ping":
             await self._send_json({"type": "pong"})
 
-    async def _handle_chat(self, agent: Agent, data: dict) -> None:
+    async def _handle_chat(self, data: dict) -> None:
         """处理聊天消息。"""
         user_text = data.get("text", "").strip()
         if not user_text:
             await self._send_json({"type": "error", "message": "消息内容不能为空"})
             return
 
+        session_id = self._session_id
+
         # 获取会话锁
-        if self._ws_lock.get_lock(self._session_id).locked():
+        if self._ws_lock.get_lock(session_id).locked():
             await self._send_json({"type": "error", "message": "上一条消息正在处理中，请等待完成"})
             return
 
-        await self._ws_lock.acquire(self._session_id)
+        await self._ws_lock.acquire(session_id)
         try:
-            task = asyncio.create_task(agent.run(user_text))
-            self._running_tasks[self._session_id] = task
+            # 确保活跃会话正确
+            session = self._agent.get_session(session_id)
+            if not session:
+                session = self._agent.create_session(session_id=session_id)
+
+            self._agent.set_active_session(session_id)
+
+            task = asyncio.create_task(self._agent.run(user_text))
+            self._running_tasks[session_id] = task
 
             try:
                 response = await task
             except AgentCancelledError as e:
-                logger.info(f"Agent cancelled (session={self._session_id}): {e}")
+                logger.info(f"Agent cancelled (session={session_id}): {e}")
                 await self._send_json({
                     "type": "message_end",
                     "text": f"操作已取消 — {e.reason.value}",
@@ -361,14 +372,14 @@ class WebSocketHandler:
                 })
                 return
             except asyncio.CancelledError:
-                logger.info(f"Agent task cancelled (session={self._session_id})")
+                logger.info(f"Agent task cancelled (session={session_id})")
                 await self._send_json({"type": "message_end", "text": "", "stop_reason": "cancelled"})
                 return
             finally:
-                self._running_tasks.pop(self._session_id, None)
+                self._running_tasks.pop(session_id, None)
 
             # 携带上下文使用量信息
-            context_usage = self._build_context_usage(agent)
+            context_usage = self._build_context_usage(session)
             await self._send_json({
                 "type": "message_end",
                 "text": response,
@@ -377,16 +388,16 @@ class WebSocketHandler:
             })
 
         except Exception as e:
-            logger.error(f"Agent run error (session={self._session_id}): {e}")
+            logger.error(f"Agent run error (session={session_id}): {e}")
             await self._send_json({"type": "error", "message": f"Agent 执行出错: {e}"})
         finally:
-            self._ws_lock.release(self._session_id)
+            self._ws_lock.release(session_id)
 
     async def _handle_cancel(self) -> None:
         """处理取消请求。"""
-        agent = self._agents.get(self._session_id)
-        if agent:
-            agent.request_cancel(CancelReason.USER_CANCEL, "用户通过 WebSocket 取消")
+        session = self._agent.get_session(self._session_id)
+        if session:
+            session.request_cancel(CancelReason.USER_CANCEL, "用户通过 WebSocket 取消")
 
         task = self._running_tasks.get(self._session_id)
         if task and not task.done():
@@ -394,12 +405,12 @@ class WebSocketHandler:
         else:
             await self._send_json({"type": "error", "message": "当前没有正在运行的任务"})
 
-    def _handle_hitl_response(self, data: dict) -> None:
-        """处理 HITL 审批回复。"""
+    def _handle_approval_response(self, data: dict) -> None:
+        """处理人工审批回复。"""
         call_id = data.get("call_id", "")
         approved = data.get("approved", False)
-        if self._hitl_controller:
-            self._hitl_controller.handle_hitl_response(call_id, approved)
+        if self._approval_handler:
+            self._approval_handler.handle_response(call_id, approved)
 
     async def _handle_session_list(self) -> None:
         """处理会话列表请求。"""
@@ -430,15 +441,9 @@ class WebSocketHandler:
 
         await self._send_json({"type": "session_list_result", "sessions": sessions})
 
-    async def _handle_session_create(self) -> tuple[str, Agent] | None:
+    async def _handle_session_create(self) -> None:
         """处理创建新会话请求。"""
         new_session_id = uuid4().hex[:16]
-
-        try:
-            agent = self._build_agent(new_session_id)
-        except Exception as e:
-            await self._send_json({"type": "error", "message": f"创建会话失败: {e}"})
-            return None
 
         # 取消旧会话的运行任务
         old_task = self._running_tasks.pop(self._session_id, None)
@@ -447,22 +452,30 @@ class WebSocketHandler:
 
         self._ws_lock.cleanup(self._session_id)
 
-        await self._send_json({"type": "session_created", "session_id": new_session_id})
-        return new_session_id, agent
+        # 通过 Agent 创建新会话
+        self._agent.create_session(session_id=new_session_id)
+        self._session_id = new_session_id
 
-    async def _handle_session_switch(self, data: dict) -> tuple[str, Agent] | None:
+        await self._send_json({"type": "session_created", "session_id": new_session_id})
+
+    async def _handle_session_switch(self, data: dict) -> None:
         """处理切换会话请求。"""
         target_id = data.get("session_id", "")
         if not target_id:
             await self._send_json({"type": "error", "message": "缺少 session_id"})
-            return None
+            return
 
         try:
-            agent = self._build_agent(target_id)
-            await agent.restore_session(target_id)
+            # 尝试恢复已有会话
+            existing = self._agent.get_session(target_id)
+            if existing:
+                self._agent.set_active_session(target_id)
+            else:
+                # 从 StateStore 恢复
+                await self._agent.restore_session(target_id)
         except Exception as e:
             await self._send_json({"type": "error", "message": f"切换会话失败: {e}"})
-            return None
+            return
 
         # 取消旧会话任务
         old_task = self._running_tasks.pop(self._session_id, None)
@@ -470,6 +483,7 @@ class WebSocketHandler:
             old_task.cancel()
 
         self._ws_lock.cleanup(self._session_id)
+        self._session_id = target_id
 
         # 加载历史消息
         messages = await self._state_store.load_messages(target_id)
@@ -481,8 +495,6 @@ class WebSocketHandler:
             "messages": history,
         })
 
-        return target_id, agent
-
     async def _handle_session_delete(self, data: dict) -> None:
         """处理删除会话请求。"""
         target_id = data.get("session_id", "")
@@ -491,14 +503,18 @@ class WebSocketHandler:
             return
 
         await self._state_store.clear_session(target_id)
-        self._agents.pop(target_id, None)
         self._running_tasks.pop(target_id, None)
+
+        # 从 Agent 的会话列表中移除
+        session = self._agent.get_session(target_id)
+        if session:
+            self._agent._sessions.pop(target_id, None)
 
         await self._send_json({"type": "session_deleted", "session_id": target_id})
 
-    def _build_context_usage(self, agent: Agent) -> dict:
+    def _build_context_usage(self, session: Session) -> dict:
         """构建上下文使用量信息，用于前端进度条展示。"""
-        ctx = agent.context
+        ctx = session.context
         used = ctx.last_usage_input_tokens
         window_size = ctx.context_window_size
         percentage = round(used / window_size * 100, 1) if window_size > 0 else 0

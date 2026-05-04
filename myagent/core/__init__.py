@@ -10,7 +10,8 @@ from myagent.core.parser import StructuredOutputParser
 from myagent.core.cancellation import (
     CancellationToken, CancelReason, AgentCancelledError,
 )
-from myagent.core.session import Session, SessionManager
+from myagent.core.session import Session
+from myagent.core.turns import TurnKind, TurnResult, ModelTurn, ToolTurn, HumanTurn
 
 __all__ = [
     "Agent", "AgentLoop",
@@ -19,5 +20,6 @@ __all__ = [
     "StreamProcessor", "StreamResult",
     "StructuredOutputParser",
     "CancellationToken", "CancelReason", "AgentCancelledError",
-    "Session", "SessionManager",
+    "Session",
+    "TurnKind", "TurnResult", "ModelTurn", "ToolTurn", "HumanTurn",
 ]

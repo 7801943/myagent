@@ -14,7 +14,7 @@ AgentFactory：统一的 Agent 构建工厂。
 9. 组装 Agent 实例
 
 注意：
-- hooks 和 hitl_callback 由调用方提供（CLI/WebSocket 的回调方式不同）
+- hooks 和 approval_handler 由调用方提供（CLI/WebSocket 的回调方式不同）
 - 未来扩展：
   - [AUTH] 用户鉴权后可按用户维度隔离 Agent 实例
   - [MCP] FastMCP 协议工具将在此处注册到 ToolRegistry
@@ -25,7 +25,6 @@ from typing import Callable
 import yaml
 
 from myagent.core.agent import Agent
-from myagent.context.manager import ContextManager
 from myagent.core.hook import HookManager
 from myagent.utils.config import load_yaml_config, AgentConfig
 from myagent.utils.logging import get_logger
@@ -54,7 +53,7 @@ class AgentFactory:
 
     用法：
         factory = AgentFactory(config_path="config.yaml")
-        agent = factory.create_agent(hooks=my_hooks, hitl_callback=my_hitl)
+        agent = factory.create_agent(hooks=my_hooks, approval_handler=my_handler)
     """
 
     def __init__(
@@ -91,8 +90,7 @@ class AgentFactory:
         self,
         *,
         hooks: HookManager,
-        hitl_callback: Callable | None = None,
-        session_id: str | None = None,
+        approval_handler=None,
         no_safety: bool = False,
     ) -> Agent:
         """
@@ -100,8 +98,7 @@ class AgentFactory:
 
         Args:
             hooks: 由调用方构建的 HookManager（CLI 用终端打印，WebSocket 用 JSON 推送）
-            hitl_callback: 可选的 HITL 审批回调
-            session_id: 可选的会话 ID
+            approval_handler: 可选的人工审批回调 async (tool_calls) -> list[bool]
             no_safety: 是否禁用安全检查（仅 CLI 调试用）
 
         Returns:
@@ -128,31 +125,25 @@ class AgentFactory:
         # ── 7. 构建工具注册表 ──
         tool_registry = self._build_tool_registry(sandbox)
 
-        # ── 8. 构建 ContextManager ──
-        context = ContextManager(
-            max_tokens_budget=self._config_obj.max_tokens_budget,
-            context_window_size=self._config_obj.context_window_size,
-            tool_result_max_chars=self._config_obj.tool_result_max_chars,
-        )
-
-        # ── 9. 组装 Agent ──
+        # ── 8. 组装 Agent ──
         agent = Agent(
             provider_router=router,
-            context=context,
             hooks=hooks,
             tool_registry=tool_registry,
             system_prompt=system_prompt,
             max_iterations=self._config_obj.max_iterations,
             safety_guard=safety_guard,
             secret_manager=secret_manager,
-            hitl_callback=hitl_callback,
+            approval_handler=approval_handler,
             audit_logger=audit_logger,
             timeout_config=self._config_obj.timeout,
             state_store=self._state_store,
-            session_id=session_id,
+            max_tokens_budget=self._config_obj.max_tokens_budget,
+            context_window_size=self._config_obj.context_window_size,
+            tool_result_max_chars=self._config_obj.tool_result_max_chars,
         )
 
-        logger.info(f"Agent created: session={session_id or agent.session_id}")
+        logger.info(f"Agent created")
         return agent
 
     def _build_router(self) -> ProviderRouter:

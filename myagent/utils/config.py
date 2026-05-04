@@ -63,6 +63,7 @@ class TimeoutConfig(BaseModel):
     llm_generation: float = 120.0      # LLM 流式生成超时（秒）
     tool_batch: float = 60.0           # 工具批量执行超时（秒）
     iteration: float = 300.0           # 单次 ReAct 迭代超时（秒）
+    human_approval: float = 300.0      # 人工审批等待超时（秒）
 
 class AgentConfig(BaseSettings):
     """Agent 全局配置，支持 YAML 文件加载和环境变量覆盖。"""

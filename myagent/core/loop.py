@@ -1,6 +1,12 @@
 """
-AgentLoop：ReAct 循环引擎（Turn 抽象版）。
-Loop 退化为极简 dispatcher：创建 Turn → 执行 → 根据结果决定下一个 Turn。
+AgentLoop：ReAct 循环引擎（通用 Turn dispatcher 版）。
+Loop 根据上一个 Turn 返回的 next_turn 动态路由到下一个 Turn。
+
+状态机：
+  MODEL → TOOL → MODEL（全部安全，无审批）
+  MODEL → TOOL → HUMAN → TOOL → MODEL（部分需审批，审批后执行）
+  MODEL → TOOL → HUMAN → MODEL（全部被拒绝）
+  MODEL → None（无工具调用，结束）
 
 保留在 dispatcher 层的职责：
 - cancelled 异常处理（跨 Turn 的全局事件）
@@ -11,22 +17,23 @@ from myagent.context.manager import ContextManager
 from myagent.core.hook import HookContext, HookManager
 from myagent.core.stream import StreamResult
 from myagent.core.cancellation import CancellationToken, AgentCancelledError, CancelReason
-from myagent.core.turns import TurnKind, TurnResult, ModelTurn, ToolTurn
+from myagent.core.turns import TurnKind, TurnResult, ModelTurn, ToolTurn, HumanTurn
 from myagent.tools.executor import ToolExecutor
 from myagent.observability.audit_logger import AuditLogger
 from myagent.utils.logging import get_logger
+from typing import Callable, Awaitable
 
 logger = get_logger(__name__)
 
 
 class AgentLoop:
     """
-    ReAct 循环引擎（Turn dispatcher 版）。
+    ReAct 循环引擎（通用 Turn dispatcher 版）。
     
-    while True:
-        1. 创建并执行 ModelTurn（LLM 流式生成）
-        2. 如果有 tool_calls → 创建并执行 ToolTurn（工具批量执行）
-        3. 回到步骤 1，直到 ModelTurn 无 tool_calls 或达到 max_iterations
+    根据 TurnResult.next_turn 动态路由到下一个 Turn：
+    1. MODEL → LLM 生成，决定是否有 tool_calls
+    2. TOOL → 执行工具，分拣结果（完成 vs 需审批）
+    3. HUMAN → 等待人工审批（仅在有 needs_approval 时触发）
     """
 
     def __init__(
@@ -39,11 +46,14 @@ class AgentLoop:
         # ── 超时看门狗参数 ──
         llm_timeout: float = 120.0,
         tool_batch_timeout: float = 60.0,
+        human_approval_timeout: float = 300.0,
         iteration_timeout: float = 300.0,
-        # ── 取消令牌（由 Agent.run() 设置）──
+        # ── 取消令牌（由 Session.run() 设置）──
         cancel_token: CancellationToken | None = None,
         # ── 审计日志（内联）──
         audit_logger: AuditLogger | None = None,
+        # ── 人工审批 handler ──
+        approval_handler: Callable[[list], Awaitable[list[bool]]] | None = None,
     ):
         self._router = provider_router
         self._context = context
@@ -52,9 +62,11 @@ class AgentLoop:
         self._max_iterations = max_iterations
         self._llm_timeout = llm_timeout
         self._tool_batch_timeout = tool_batch_timeout
+        self._human_approval_timeout = human_approval_timeout
         self._iteration_timeout = iteration_timeout
         self._cancel_token = cancel_token
         self._audit = audit_logger
+        self._approval_handler = approval_handler
 
     def _create_turn(self, kind: TurnKind):
         """工厂方法：根据 TurnKind 创建对应的 Turn 实例。"""
@@ -77,14 +89,27 @@ class AgentLoop:
                 audit=self._audit,
                 watchdog_timeout=self._tool_batch_timeout,
             )
+        elif kind == TurnKind.HUMAN:
+            return HumanTurn(
+                context=self._context,
+                hooks=self._hook,
+                cancel_token=self._cancel_token,
+                audit=self._audit,
+                watchdog_timeout=self._human_approval_timeout,
+                approval_handler=self._approval_handler,
+            )
         else:
             raise ValueError(f"Unknown TurnKind: {kind}")
 
     async def run(self, ctx: HookContext) -> StreamResult:
         """
         执行完整的 ReAct 循环，返回最终的 StreamResult。
+        通用 dispatcher：根据 TurnResult.next_turn 动态路由。
         """
         final_result: StreamResult | None = None
+        current_kind = TurnKind.MODEL
+        current_data = None
+        previous_kind: TurnKind | None = None
 
         try:
             for iteration in range(self._max_iterations):
@@ -98,21 +123,22 @@ class AgentLoop:
                 if self._audit:
                     await self._audit.log_event("iteration_start", ctx.snapshot(), session_id=ctx.session_id)
 
-                # ── ModelTurn ──
-                model_turn = self._create_turn(TurnKind.MODEL)
-                model_result: TurnResult = await model_turn.execute(ctx)
+                # 创建并执行当前 Turn
+                turn = self._create_turn(current_kind)
+                result: TurnResult = await turn.execute(ctx, current_data, source=previous_kind)
 
-                if model_result.next_turn is None:
-                    # 无工具调用，循环结束
-                    final_result = model_result.stream_result
+                if result.next_turn is None:
+                    # 循环结束
+                    final_result = result.stream_result
                     await self._hook.emit("state_change", ctx, state="idle")
                     if self._audit:
                         await self._audit.log_event("iteration_end", ctx.snapshot(), session_id=ctx.session_id)
                     break
 
-                # ── ToolTurn ──
-                tool_turn = self._create_turn(TurnKind.TOOL)
-                await tool_turn.execute(ctx, model_result.data)
+                # 路由到下一个 Turn
+                previous_kind = result.kind
+                current_kind = result.next_turn
+                current_data = result.data
 
                 # → iteration_end 留在 dispatcher 层
                 if self._audit:
