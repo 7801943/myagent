@@ -72,6 +72,7 @@ class AgentConfig(BaseSettings):
     timeout: TimeoutConfig = Field(default_factory=TimeoutConfig)
     max_iterations: int = 25
     max_tokens_budget: int = 100000
+    context_window_size: int = 128000
     tool_result_max_chars: int = 4000
     system_prompt: str | None = None
     system_prompt_file: str | None = None

@@ -11,17 +11,18 @@ agent:
 
   # Provider 配置（支持多路冗余）
   providers:
-    - name: "openai-primary"
-      type: "openai"
-      model: "glm-5.1"
-      api_key: "4d1d17ae5953451e872f0efcf9c4ffe2.WILVHXpssYeAPLQD"   # 支持环境变量引用
-      api_base: "https://open.bigmodel.cn/api/coding/paas/v4"  # 可选，自定义 API 基地址
-      priority: 1
+    # - name: "openai-primary"
+    #   type: "openai"
+    #   model: "glm-5.1"
+    #   api_key: "4d1d17ae5953451e872f0efcf9c4ffe2.WILVHXpssYeAPLQD"   # 支持环境变量引用
+    #   api_base: "https://open.bigmodel.cn/api/coding/paas/v4"  # 可选，自定义 API 基地址
+    #   priority: 1
 
     - name: "openai-backup"
       type: "openai"
-      model: "gpt-4o-mini"
-      api_key: "${OPENAI_API_KEY}"
+      model: "Qwen3.6-27b-4bit"
+      api_key: "Zhangying139"
+      api_base: "http://127.0.0.1:8000/v1"
       priority: 2
 
     # - name: "anthropic"
@@ -32,6 +33,7 @@ agent:
   # 上下文管理
   context:
     max_tokens_budget: 100000
+    context_window_size: 128000    # 模型上下文窗口大小（用于前端进度条计算）
     tool_result_max_chars: 4000
     recent_turns: 20
 

@@ -201,6 +201,10 @@ class ModelTurn(BaseTurn):
                 "usage": result.usage,
             }, session_id=ctx.session_id)
 
+        # 更新上下文的 token 使用量（来自 API 返回的真实数据）
+        if result.usage:
+            self._context.update_usage(result.usage)
+
         # 写入 assistant 消息到上下文
         self._context.add_assistant_message(
             content=result.text,

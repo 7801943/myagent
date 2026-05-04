@@ -25,6 +25,7 @@ from typing import Callable
 import yaml
 
 from myagent.core.agent import Agent
+from myagent.context.manager import ContextManager
 from myagent.core.hook import HookManager
 from myagent.utils.config import load_yaml_config, AgentConfig
 from myagent.utils.logging import get_logger
@@ -127,9 +128,17 @@ class AgentFactory:
         # ── 7. 构建工具注册表 ──
         tool_registry = self._build_tool_registry(sandbox)
 
-        # ── 8. 组装 Agent ──
+        # ── 8. 构建 ContextManager ──
+        context = ContextManager(
+            max_tokens_budget=self._config_obj.max_tokens_budget,
+            context_window_size=self._config_obj.context_window_size,
+            tool_result_max_chars=self._config_obj.tool_result_max_chars,
+        )
+
+        # ── 9. 组装 Agent ──
         agent = Agent(
             provider_router=router,
+            context=context,
             hooks=hooks,
             tool_registry=tool_registry,
             system_prompt=system_prompt,

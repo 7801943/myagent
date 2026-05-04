@@ -165,8 +165,13 @@ class WebSocketHandler:
         self._session_id = uuid4().hex[:16]
         logger.info(f"WebSocket client connected, session: {self._session_id}")
 
-        # 发送连接确认
-        await self._send_json({"type": "connected", "session_id": self._session_id})
+        # 发送连接确认（含上下文窗口大小）
+        context_window_size = self._factory.config.context_window_size
+        await self._send_json({
+            "type": "connected",
+            "session_id": self._session_id,
+            "context_window_size": context_window_size,
+        })
 
         # 创建 HITL 控制器
         self._hitl_controller = WebSocketHITLController(self._ws)
@@ -362,7 +367,14 @@ class WebSocketHandler:
             finally:
                 self._running_tasks.pop(self._session_id, None)
 
-            await self._send_json({"type": "message_end", "text": response, "stop_reason": "completed"})
+            # 携带上下文使用量信息
+            context_usage = self._build_context_usage(agent)
+            await self._send_json({
+                "type": "message_end",
+                "text": response,
+                "stop_reason": "completed",
+                "context_usage": context_usage,
+            })
 
         except Exception as e:
             logger.error(f"Agent run error (session={self._session_id}): {e}")
@@ -483,6 +495,18 @@ class WebSocketHandler:
         self._running_tasks.pop(target_id, None)
 
         await self._send_json({"type": "session_deleted", "session_id": target_id})
+
+    def _build_context_usage(self, agent: Agent) -> dict:
+        """构建上下文使用量信息，用于前端进度条展示。"""
+        ctx = agent.context
+        used = ctx.last_usage_input_tokens
+        window_size = ctx.context_window_size
+        percentage = round(used / window_size * 100, 1) if window_size > 0 else 0
+        return {
+            "used_tokens": used,
+            "context_window_size": window_size,
+            "percentage": percentage,
+        }
 
     def _cleanup(self) -> None:
         """连接断开时清理资源。"""
