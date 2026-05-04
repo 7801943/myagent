@@ -1,0 +1,38 @@
+# 用户配置（含敏感信息）
+config.yaml
+
+# 虚拟环境
+venv/
+.venv/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# 数据库
+*.db
+*.sqlite3
+
+# 审计日志
+audit_logs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 环境变量
+.env
+
+# OS 文件
+.DS_Store
+Thumbs.db
+
+# 分发 / 构建
+dist/
+build/
+*.egg-info/
