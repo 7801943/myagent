@@ -11,7 +11,7 @@ import click
 import sys
 
 from myagent.core.agent import Agent
-from myagent.core.factory import AgentFactory
+from myagent.factory import AgentFactory
 from myagent.core.hook import HookManager
 from myagent.core.cancellation import AgentCancelledError
 from myagent.context.message import ToolCall

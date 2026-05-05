@@ -22,7 +22,7 @@ from uuid import uuid4
 from fastapi import WebSocket, WebSocketDisconnect
 
 from myagent.core.agent import Agent
-from myagent.core.factory import AgentFactory
+from myagent.factory import AgentFactory
 from myagent.core.hook import HookManager
 from myagent.core.cancellation import AgentCancelledError, CancelReason
 from myagent.core.session import Session
