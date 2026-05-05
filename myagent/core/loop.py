@@ -34,14 +34,34 @@ from typing import Any, Callable, Awaitable
 
 from myagent.providers.router import ProviderRouter
 from myagent.context.manager import ContextManager
-from myagent.context.message import ToolResult as MsgToolResult
+from myagent.context.message import ToolCall, ToolResult as MsgToolResult
 from myagent.core.hook import HookContext, HookManager
-from myagent.core.stream import StreamProcessor, StreamResult
+from myagent.providers.base import StreamEvent
 from myagent.tools.executor import ToolExecutor
 from myagent.observability.audit_logger import AuditLogger
 from myagent.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 流式聚合结果
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+@dataclass
+class StreamResult:
+    """一次 Provider 调用的聚合结果。"""
+    text: str = ""
+    reasoning_text: str = ""
+    tool_calls: list[ToolCall] = None
+    stop_reason: str | None = None
+    usage: dict = None
+
+    def __post_init__(self):
+        if self.tool_calls is None:
+            self.tool_calls = []
+        if self.usage is None:
+            self.usage = {}
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -161,7 +181,7 @@ class ModelTurn(BaseTurn):
     """
     LLM 流式生成 Turn。
     职责：
-    1. 流式调用 Provider → StreamProcessor 聚合 → Hook 分发
+    1. 流式调用 Provider → 事件聚合 → Hook 分发（原 StreamProcessor 已溶解到此类）
     2. 写入 assistant 消息到 context
     3. 决定下一步：有 tool_calls → TOOL，无 → None（结束）
     """
@@ -181,9 +201,16 @@ class ModelTurn(BaseTurn):
         self._router = provider_router
         self._context = context
         self._tool_schemas = tool_schemas
+        # ── 流式聚合状态 ──
+        self._text_parts: list[str] = []
+        self._reasoning_parts: list[str] = []
+        self._tool_calls: list[ToolCall] = []
+        self._tool_call_buffers: dict[str, dict] = {}
+        self._stop_reason: str | None = None
+        self._usage: dict = {}
 
     async def _do_execute(self, ctx: HookContext, input_data: Any = None, source: TurnKind | None = None) -> TurnResult:
-        stream = StreamProcessor(router=self._router, hook=self._hooks)
+        self._reset_stream()
 
         await self._hooks.emit("state_change", ctx, state="thinking")
 
@@ -194,11 +221,23 @@ class ModelTurn(BaseTurn):
             messages = self._context.get_messages()
             tools = self._tool_schemas
 
-            result = await stream.run(
-                messages=messages,
-                tools=tools,
-                ctx=ctx,
-            )
+            # stream_start 信号
+            if self._hooks.wants_streaming():
+                await self._hooks.emit("stream_start", ctx)
+
+            # 流式消费 + 聚合 + Hook 分发
+            content_started = False
+            async for event in self._router.stream(messages, tools):
+                # 聚合事件
+                self._accumulate(event)
+
+                # 状态追踪：首次文本输出时切换到 generating
+                if not content_started and event.type == "text_delta" and event.text:
+                    content_started = True
+                    await self._hooks.emit("state_change", ctx, state="generating")
+
+                # Hook 分发
+                await self._dispatch_event(event, ctx)
 
         except asyncio.CancelledError:
             raise  # 向上传递取消
@@ -212,6 +251,13 @@ class ModelTurn(BaseTurn):
                 }, session_id=ctx.session_id)
             raise
 
+        # 构建聚合结果
+        result = self._build_result()
+
+        # stream_end 信号（只发射一次，修复原 StreamProcessor + ModelTurn 重复发射的 bug）
+        if self._hooks.wants_streaming():
+            await self._hooks.emit("stream_end", ctx, resuming=bool(result.tool_calls))
+
         # Provider 调用结束
         if self._audit:
             await self._audit.log_event("provider_call_end", {
@@ -219,7 +265,7 @@ class ModelTurn(BaseTurn):
                 "usage": result.usage,
             }, session_id=ctx.session_id)
 
-        # 更新上下文的 token 使用量（来自 API 返回的真实数据）
+        # 更新上下文的 token 使用量
         if result.usage:
             self._context.update_usage(result.usage)
 
@@ -229,11 +275,8 @@ class ModelTurn(BaseTurn):
             tool_calls=result.tool_calls if result.tool_calls else None,
         )
 
-        # 检查是否有工具调用
+        # 决定下一步
         has_tools = bool(result.tool_calls)
-        if self._hooks.wants_streaming():
-            await self._hooks.emit("stream_end", ctx, resuming=has_tools)
-
         if has_tools:
             return TurnResult(
                 kind=TurnKind.MODEL,
@@ -247,6 +290,71 @@ class ModelTurn(BaseTurn):
                 next_turn=None,
                 stream_result=result,
             )
+
+    # ── 流式聚合方法（原 StreamProcessor 溶解）─────────────────
+
+    def _accumulate(self, event: StreamEvent) -> None:
+        """将 StreamEvent 累积到内部缓冲区。"""
+        if event.type == "text_delta" and event.text:
+            self._text_parts.append(event.text)
+
+        elif event.type == "thinking_delta" and event.text:
+            self._reasoning_parts.append(event.text)
+
+        elif event.type == "tool_call_start":
+            self._tool_call_buffers[event.tool_call_id] = {
+                "name": event.tool_name,
+                "args_json": "",
+            }
+
+        elif event.type == "tool_call_delta":
+            buf = self._tool_call_buffers.get(event.tool_call_id)
+            if buf and event.tool_args_delta:
+                buf["args_json"] += event.tool_args_delta
+
+        elif event.type == "tool_call_end" and event.tool_args is not None:
+            self._tool_calls.append(ToolCall(
+                id=event.tool_call_id,
+                name=event.tool_name,
+                arguments=event.tool_args,
+            ))
+            self._tool_call_buffers.pop(event.tool_call_id, None)
+
+        elif event.type == "message_end":
+            self._stop_reason = event.stop_reason
+            if event.usage:
+                self._usage = event.usage
+
+    async def _dispatch_event(self, event: StreamEvent, ctx: HookContext) -> None:
+        """将关键事件通过 HookManager 广播给 UI/审计等订阅方。"""
+        try:
+            if event.type == "text_delta" and event.text:
+                await self._hooks.emit("stream", ctx, delta=event.text)
+            elif event.type == "thinking_delta" and event.text:
+                await self._hooks.emit("thinking_stream", ctx, delta=event.text)
+            elif event.type == "error" and event.error:
+                await self._hooks.emit("error", ctx, error=event.error)
+        except Exception as e:
+            logger.warning(f"Hook dispatch error: {e}")
+
+    def _build_result(self) -> StreamResult:
+        """从内部缓冲区构建最终的 StreamResult。"""
+        return StreamResult(
+            text="".join(self._text_parts),
+            reasoning_text="".join(self._reasoning_parts),
+            tool_calls=list(self._tool_calls),
+            stop_reason=self._stop_reason,
+            usage=dict(self._usage),
+        )
+
+    def _reset_stream(self) -> None:
+        """重置所有流式聚合状态（每次 _do_execute 自动调用）。"""
+        self._text_parts.clear()
+        self._reasoning_parts.clear()
+        self._tool_calls.clear()
+        self._tool_call_buffers.clear()
+        self._stop_reason = None
+        self._usage.clear()
 
 
 class ToolTurn(BaseTurn):

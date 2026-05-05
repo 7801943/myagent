@@ -14,8 +14,7 @@ from myagent.context.manager import ContextManager
 from myagent.context.state import AgentState
 from myagent.context.message import Message
 from myagent.core.hook import HookContext, HookManager
-from myagent.core.loop import AgentLoop
-from myagent.core.stream import StreamResult
+from myagent.core.loop import AgentLoop, StreamResult
 from myagent.tools.executor import ToolExecutor
 from myagent.observability.audit_logger import AuditLogger
 from myagent.utils.config import TimeoutConfig
