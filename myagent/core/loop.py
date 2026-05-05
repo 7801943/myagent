@@ -592,7 +592,6 @@ class AgentLoop:
         context: ContextManager,
         executor: ToolExecutor,
         hook: HookManager,
-        tool_schemas: list | None = None,
         max_iterations: int = 50,
         # ── 超时看门狗参数 ──
         llm_timeout: float = 120.0,
@@ -607,7 +606,6 @@ class AgentLoop:
         self._context = context
         self._executor = executor
         self._hook = hook
-        self._tool_schemas = tool_schemas
         self._max_iterations = max_iterations
         self._llm_timeout = llm_timeout
         self._tool_batch_timeout = tool_batch_timeout
@@ -616,12 +614,13 @@ class AgentLoop:
         self._approval_handler = approval_handler
 
     def _create_turn(self, kind: TurnKind):
-        """工厂方法：根据 TurnKind 创建对应的 Turn 实例。"""
+        """工厂方法：根据 TurnKind 创建对应的 Turn 实例。
+        每次动态获取 tool_schemas（通过 executor），支持运行时热加载工具。"""
         if kind == TurnKind.MODEL:
             return ModelTurn(
                 provider_router=self._router,
                 context=self._context,
-                tool_schemas=self._tool_schemas,
+                tool_schemas=self._executor.get_tool_schemas(),
                 hooks=self._hook,
                 audit=self._audit,
                 watchdog_timeout=self._llm_timeout,

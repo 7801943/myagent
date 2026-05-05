@@ -80,16 +80,13 @@ class Session:
         # 超时配置
         tc = timeout_config or TimeoutConfig()
 
-        # 预计算工具 schema（供 ModelTurn 使用，避免 Turn 内部访问 executor 私有成员）
-        self._tool_schemas = executor.get_tool_schemas()
-
         # Loop（每会话独立，但引用共享组件）
+        # tool_schemas 由 AgentLoop 每次创建 ModelTurn 时通过 executor 动态获取，支持热加载
         self._loop = AgentLoop(
             provider_router=router,
             context=self._context,
             executor=executor,
             hook=hooks,
-            tool_schemas=self._tool_schemas,
             max_iterations=max_iterations,
             llm_timeout=tc.llm_generation,
             tool_batch_timeout=tc.tool_batch,
