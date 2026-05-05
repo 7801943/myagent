@@ -63,14 +63,15 @@ class TurnResult:
     data: Any = None                       # 传递给下一个 Turn 的数据
     stream_result: StreamResult | None = None  # ModelTurn 专用
 
-    def to_dict(self) -> dict:
-        """序列化为可持久化的字典。"""
-        return {
-            "kind": self.kind.name,
-            "next_turn": self.next_turn.name if self.next_turn else None,
-            "has_stream_result": self.stream_result is not None,
-            "has_data": self.data is not None,
-        }
+    # NOTE: to_dict() 当前未被消费，暂注释保留。
+    # def to_dict(self) -> dict:
+    #     """序列化为可持久化的字典。"""
+    #     return {
+    #         "kind": self.kind.name,
+    #         "next_turn": self.next_turn.name if self.next_turn else None,
+    #         "has_stream_result": self.stream_result is not None,
+    #         "has_data": self.data is not None,
+    #     }
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -171,7 +172,7 @@ class ModelTurn(BaseTurn):
         self,
         provider_router: ProviderRouter,
         context: ContextManager,
-        executor: ToolExecutor,
+        tool_schemas: list | None,
         hooks: HookManager,
         audit: AuditLogger | None,
         watchdog_timeout: float,
@@ -179,7 +180,7 @@ class ModelTurn(BaseTurn):
         super().__init__(hooks, audit, watchdog_timeout)
         self._router = provider_router
         self._context = context
-        self._executor = executor
+        self._tool_schemas = tool_schemas
 
     async def _do_execute(self, ctx: HookContext, input_data: Any = None, source: TurnKind | None = None) -> TurnResult:
         stream = StreamProcessor(router=self._router, hook=self._hooks)
@@ -191,7 +192,7 @@ class ModelTurn(BaseTurn):
 
         try:
             messages = self._context.get_messages()
-            tools = self._executor._registry.list_tools() if len(self._executor._registry) > 0 else None
+            tools = self._tool_schemas
 
             result = await stream.run(
                 messages=messages,
@@ -475,12 +476,12 @@ class AgentLoop:
         context: ContextManager,
         executor: ToolExecutor,
         hook: HookManager,
+        tool_schemas: list | None = None,
         max_iterations: int = 50,
         # ── 超时看门狗参数 ──
         llm_timeout: float = 120.0,
         tool_batch_timeout: float = 60.0,
         human_approval_timeout: float = 300.0,
-        iteration_timeout: float = 300.0,
         # ── 审计日志（内联）──
         audit_logger: AuditLogger | None = None,
         # ── 人工审批 handler ──
@@ -490,11 +491,11 @@ class AgentLoop:
         self._context = context
         self._executor = executor
         self._hook = hook
+        self._tool_schemas = tool_schemas
         self._max_iterations = max_iterations
         self._llm_timeout = llm_timeout
         self._tool_batch_timeout = tool_batch_timeout
         self._human_approval_timeout = human_approval_timeout
-        self._iteration_timeout = iteration_timeout
         self._audit = audit_logger
         self._approval_handler = approval_handler
 
@@ -504,7 +505,7 @@ class AgentLoop:
             return ModelTurn(
                 provider_router=self._router,
                 context=self._context,
-                executor=self._executor,
+                tool_schemas=self._tool_schemas,
                 hooks=self._hook,
                 audit=self._audit,
                 watchdog_timeout=self._llm_timeout,

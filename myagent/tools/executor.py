@@ -131,3 +131,8 @@ class ToolExecutor:
         """并行执行多个工具调用。skip_safety 用于已通过 HumanTurn 审批的调用。"""
         tasks = [self.execute(tc, skip_safety=skip_safety) for tc in tool_calls]
         return await asyncio.gather(*tasks)
+
+    def get_tool_schemas(self) -> list | None:
+        """返回工具的 JSON schema 列表（供 LLM API 调用）。无工具时返回 None。"""
+        tools = self._registry.list_tools()
+        return tools if tools else None
