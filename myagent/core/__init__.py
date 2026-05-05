@@ -7,7 +7,7 @@ from myagent.core.hook import (
 )
 from myagent.core.stream import StreamProcessor, StreamResult
 from myagent.core.session import Session
-from myagent.core.turns import TurnKind, TurnResult, ModelTurn, ToolTurn, HumanTurn
+from myagent.core.loop import TurnKind, TurnResult, ModelTurn, ToolTurn, HumanTurn
 
 __all__ = [
     "Agent", "AgentLoop",
