@@ -133,38 +133,42 @@ async def _chat(
     if system_prompt:
         session.context.set_system(system_prompt)
 
-    if images:
-        from myagent.vision.image_handler import ImageHandler
-        from myagent.context.message import ContentBlock
+    try:
+        if images:
+            from myagent.vision.image_handler import ImageHandler
+            from myagent.context.message import ContentBlock
 
-        provider = agent._router.current_provider
-        provider_type = "anthropic" if provider and "anthropic" in provider.name else "openai"
-        handler = ImageHandler(capabilities=provider.capabilities if provider else None)
+            provider = agent._router.current_provider
+            provider_type = "anthropic" if provider and "anthropic" in provider.name else "openai"
+            handler = ImageHandler(capabilities=provider.capabilities if provider else None)
 
-        content_blocks = []
-        if message:
-            content_blocks.append(ContentBlock(type="text", text=message))
-        for img_path in images:
-            block = await handler.prepare(img_path, provider_type=provider_type)
-            content_blocks.append(block)
-        
-        session.context.add_user_message(content_blocks)
-        try:
-            response = await agent.run("")
-            ui.print(f"\n\n🤖 Assistant: {response}\n")
-        except asyncio.CancelledError:
-            ui.print("\n\n⚠ 操作已取消\n")
-        except Exception as e:
-            logger.error(f"Agent run error: {e}")
-            ui.print_error(f"执行出错: {e}")
-    elif message:
-        try:
-            response = await agent.run(message)
-            ui.print(f"\n\n🤖 Assistant: {response}\n")
-        except asyncio.CancelledError:
-            ui.print("\n\n⚠ 操作已取消\n")
-    else:
-        await interactive_loop(agent)
+            content_blocks = []
+            if message:
+                content_blocks.append(ContentBlock(type="text", text=message))
+            for img_path in images:
+                block = await handler.prepare(img_path, provider_type=provider_type)
+                content_blocks.append(block)
+            
+            session.context.add_user_message(content_blocks)
+            try:
+                response = await agent.run("")
+                ui.print(f"\n\n🤖 Assistant: {response}\n")
+            except asyncio.CancelledError:
+                ui.print("\n\n⚠ 操作已取消\n")
+            except Exception as e:
+                logger.error(f"Agent run error: {e}")
+                ui.print_error(f"执行出错: {e}")
+        elif message:
+            try:
+                response = await agent.run(message)
+                ui.print(f"\n\n🤖 Assistant: {response}\n")
+            except asyncio.CancelledError:
+                ui.print("\n\n⚠ 操作已取消\n")
+        else:
+            await interactive_loop(agent)
+    finally:
+        # 清理：停止热加载器
+        await agent.stop_hot_reload()
 
 if __name__ == "__main__":
     cli()

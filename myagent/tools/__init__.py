@@ -8,7 +8,7 @@ from myagent.tools.file_tools import FileReadTool, FileWriteTool
 from myagent.tools.secrets import SecretManager
 from myagent.tools.schema import generate_schema, extract_description
 from myagent.tools.wrapper import FunctionTool, make_tool
-from myagent.tools.loader import ToolLoader
+from myagent.tools.loader import ToolLoader, HotReloader
 
 __all__ = [
     "BaseTool",
@@ -25,4 +25,5 @@ __all__ = [
     "FunctionTool",
     "make_tool",
     "ToolLoader",
+    "HotReloader",
 ]

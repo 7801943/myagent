@@ -17,6 +17,7 @@ from myagent.providers.router import ProviderRouter
 from myagent.tools.registry import ToolRegistry
 from myagent.tools.executor import ToolExecutor
 from myagent.tools.idempotency import IdempotencyCache
+from myagent.tools.loader import HotReloader
 from myagent.core.hook import HookManager
 from myagent.core.session import Session
 from myagent.observability.audit_logger import AuditLogger
@@ -54,6 +55,8 @@ class Agent:
         max_tokens_budget: int = 200000,
         context_window_size: int = 128000,
         tool_result_max_chars: int = 100000,
+        # ── 工具热加载 ──
+        hot_reloader: HotReloader | None = None,
     ):
         # 共享组件
         self._router = provider_router
@@ -63,6 +66,7 @@ class Agent:
         self._audit = audit_logger
         self._timeout_config = timeout_config or TimeoutConfig()
         self._approval_handler = approval_handler
+        self._hot_reloader = hot_reloader
 
         # 配置
         self._max_iterations = max_iterations
@@ -155,10 +159,33 @@ class Agent:
         """
         便捷入口：在活跃会话上执行。
         如果没有活跃会话，自动创建一个。
+        首次调用时自动启动热加载器（如果已配置且未运行）。
         """
         if not self._active:
             self.create_session()
+
+        # 懒启动热加载器（确保在 event loop 中）
+        if self._hot_reloader and not self._hot_reloader.is_running:
+            await self.start_hot_reload()
+
         return await self._active.run(user_input)
+
+    # ── 热加载生命周期 ──
+
+    async def start_hot_reload(self) -> None:
+        """启动工具热加载器。"""
+        if self._hot_reloader:
+            await self._hot_reloader.start()
+
+    async def stop_hot_reload(self) -> None:
+        """停止工具热加载器。"""
+        if self._hot_reloader:
+            await self._hot_reloader.stop()
+
+    @property
+    def hot_reloader(self) -> HotReloader | None:
+        """返回热加载器实例（供外部查询状态）。"""
+        return self._hot_reloader
 
     def request_cancel(
         self,

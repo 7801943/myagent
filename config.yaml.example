@@ -78,6 +78,13 @@ agent:
     # audit_path: "./logs/audit.db"
     log_level: "INFO"
 
+  # ── 工具热加载 ──
+  hot_reload:
+    enabled: true                          # 是否启用工具热加载
+    watch_dir: "myagent/tools/tools_store" # 监控的工具脚本目录
+    poll_interval: 60.0                    # 扫描间隔（秒）
+    safe_mode: false                       # AST 安全检查（动态工具可能用到 urllib 等，建议关闭）
+
   # 状态持久化
   state:
     backend: "jsonl"          # jsonl | sqlite

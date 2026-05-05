@@ -43,6 +43,7 @@ from myagent.tools.sandbox.subprocess_sandbox import ResourceLimits
 from myagent.tools.cli_tool import CLITool
 from myagent.tools.file_tools import FileReadTool, FileWriteTool
 from myagent.tools.secrets import SecretManager
+from myagent.tools.loader import HotReloader
 
 logger = get_logger(__name__)
 
@@ -125,7 +126,10 @@ class AgentFactory:
         # ── 7. 构建工具注册表 ──
         tool_registry = self._build_tool_registry(sandbox)
 
-        # ── 8. 组装 Agent ──
+        # ── 8. 构建热加载器 ──
+        hot_reloader = self._build_hot_reloader(tool_registry)
+
+        # ── 9. 组装 Agent ──
         agent = Agent(
             provider_router=router,
             hooks=hooks,
@@ -141,9 +145,10 @@ class AgentFactory:
             max_tokens_budget=self._config_obj.max_tokens_budget,
             context_window_size=self._config_obj.context_window_size,
             tool_result_max_chars=self._config_obj.tool_result_max_chars,
+            hot_reloader=hot_reloader,
         )
 
-        logger.info(f"Agent created")
+        logger.info("Agent created")
         return agent
 
     def _build_router(self) -> ProviderRouter:
@@ -281,3 +286,25 @@ class AgentFactory:
         tool_registry.register(FileWriteTool())
         logger.info("Registered tools: cli_execute, file_read, file_write")
         return tool_registry
+
+    def _build_hot_reloader(self, registry: ToolRegistry) -> HotReloader | None:
+        """构建工具热加载器。"""
+        hr_cfg = self._config_obj.hot_reload
+        if not hr_cfg.enabled:
+            return None
+
+        def _on_reload(tool, event: str) -> None:
+            logger.info(f"HotReload [{event}]: {tool.name} — {tool.description}")
+
+        reloader = HotReloader(
+            registry=registry,
+            watch_dir=hr_cfg.watch_dir,
+            poll_interval=hr_cfg.poll_interval,
+            on_reload=_on_reload,
+            safe_mode=hr_cfg.safe_mode,
+        )
+        logger.info(
+            f"HotReloader configured: watch_dir={hr_cfg.watch_dir}, "
+            f"interval={hr_cfg.poll_interval}s"
+        )
+        return reloader

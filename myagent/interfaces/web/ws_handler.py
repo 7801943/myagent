@@ -216,6 +216,9 @@ class WebSocketHandler:
         except Exception as e:
             logger.error(f"WebSocket connection error: {e}")
         finally:
+            # 清理：停止热加载器
+            if self._agent:
+                await self._agent.stop_hot_reload()
             self._cleanup()
 
     def _build_agent(self) -> Agent:
