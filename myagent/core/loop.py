@@ -27,6 +27,7 @@ AgentLoop 统一 catch 后写入取消消息并返回 StreamResult（不 re-rais
 使 Task 正常完成，支持后续恢复执行。
 """
 import asyncio
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -82,6 +83,7 @@ class TurnResult:
     next_turn: TurnKind | None = None
     data: Any = None                       # 传递给下一个 Turn 的数据
     stream_result: StreamResult | None = None  # ModelTurn 专用
+    meta: dict = field(default_factory=dict)   # 执行元数据（elapsed_seconds, usage 等）
 
     # NOTE: to_dict() 当前未被消费，暂注释保留。
     # def to_dict(self) -> dict:
@@ -126,9 +128,11 @@ class BaseTurn(ABC):
         异常路径：turn_error → raise。
         取消路径：CancelledError 直接向上传播（由 AgentLoop 统一处理）。
         """
+        start = time.monotonic()
         watchdog = asyncio.create_task(self._watchdog(ctx))
         try:
             result = await self._do_execute(ctx, input_data, source)
+            result.meta["elapsed_seconds"] = round(time.monotonic() - start, 3)
 
             return result
 
@@ -277,21 +281,25 @@ class ModelTurn(BaseTurn):
 
         # 决定下一步
         has_tools = bool(result.tool_calls)
+        meta = {"usage": result.usage} if result.usage else {}
+
         if has_tools:
             return TurnResult(
                 kind=TurnKind.MODEL,
                 next_turn=TurnKind.TOOL,
                 data=result.tool_calls,
                 stream_result=result,
+                meta=meta,
             )
         else:
             return TurnResult(
                 kind=TurnKind.MODEL,
                 next_turn=None,
                 stream_result=result,
+                meta=meta,
             )
 
-    # ── 流式聚合方法（原 StreamProcessor 溶解）─────────────────
+    # ── 流式聚合方法────
 
     def _accumulate(self, event: StreamEvent) -> None:
         """将 StreamEvent 累积到内部缓冲区。"""

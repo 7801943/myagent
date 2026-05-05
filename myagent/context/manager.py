@@ -11,9 +11,9 @@ logger = get_logger(__name__)
 class ContextManager:
     def __init__(
         self,
-        max_tokens_budget: int = 200000,
-        context_window_size: int = 128000,
-        tool_result_max_chars: int = 100000,
+        max_tokens_budget: int = 100000,
+        context_window_size: int = 200000,
+        tool_result_max_chars: int = 200000,
         recent_turns: int = 20,
     ):
         self._messages: list[Message] = []
