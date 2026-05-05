@@ -9,14 +9,19 @@ Loop 根据上一个 Turn 返回的 next_turn 动态路由到下一个 Turn。
   MODEL → None（无工具调用，结束）
 
 保留在 dispatcher 层的职责：
-- cancelled 异常处理（跨 Turn 的全局事件）
+- cancelled 异常处理（asyncio.CancelledError，跨 Turn 的全局事件）
 - max_iterations 控制
+
+取消机制：由 asyncio.Task.cancel() 驱动，CancelledError 在 await 点自动抛出，
+AgentLoop 统一 catch 后写入取消消息并返回 StreamResult（不 re-raise），
+使 Task 正常完成，支持后续恢复执行。
 """
+import asyncio
+
 from myagent.providers.router import ProviderRouter
 from myagent.context.manager import ContextManager
 from myagent.core.hook import HookContext, HookManager
 from myagent.core.stream import StreamResult
-from myagent.core.cancellation import CancellationToken, AgentCancelledError, CancelReason
 from myagent.core.turns import TurnKind, TurnResult, ModelTurn, ToolTurn, HumanTurn
 from myagent.tools.executor import ToolExecutor
 from myagent.observability.audit_logger import AuditLogger
@@ -48,8 +53,6 @@ class AgentLoop:
         tool_batch_timeout: float = 60.0,
         human_approval_timeout: float = 300.0,
         iteration_timeout: float = 300.0,
-        # ── 取消令牌（由 Session.run() 设置）──
-        cancel_token: CancellationToken | None = None,
         # ── 审计日志（内联）──
         audit_logger: AuditLogger | None = None,
         # ── 人工审批 handler ──
@@ -64,7 +67,6 @@ class AgentLoop:
         self._tool_batch_timeout = tool_batch_timeout
         self._human_approval_timeout = human_approval_timeout
         self._iteration_timeout = iteration_timeout
-        self._cancel_token = cancel_token
         self._audit = audit_logger
         self._approval_handler = approval_handler
 
@@ -76,7 +78,6 @@ class AgentLoop:
                 context=self._context,
                 executor=self._executor,
                 hooks=self._hook,
-                cancel_token=self._cancel_token,
                 audit=self._audit,
                 watchdog_timeout=self._llm_timeout,
             )
@@ -85,7 +86,6 @@ class AgentLoop:
                 context=self._context,
                 executor=self._executor,
                 hooks=self._hook,
-                cancel_token=self._cancel_token,
                 audit=self._audit,
                 watchdog_timeout=self._tool_batch_timeout,
             )
@@ -93,7 +93,6 @@ class AgentLoop:
             return HumanTurn(
                 context=self._context,
                 hooks=self._hook,
-                cancel_token=self._cancel_token,
                 audit=self._audit,
                 watchdog_timeout=self._human_approval_timeout,
                 approval_handler=self._approval_handler,
@@ -114,10 +113,6 @@ class AgentLoop:
         try:
             for iteration in range(self._max_iterations):
                 ctx.iteration = iteration + 1
-
-                # 迭代级取消检查
-                if self._cancel_token:
-                    await self._cancel_token.check()
 
                 # → iteration_start 留在 dispatcher 层
                 if self._audit:
@@ -152,26 +147,32 @@ class AgentLoop:
                     stop_reason="max_iterations",
                 )
 
-        except AgentCancelledError as e:
+        except asyncio.CancelledError:
             # → cancelled 处理留在 dispatcher 层
-            cancel_msg = f"[系统] 操作已取消 — {e.reason.value}: {e.detail}"
-            logger.info(f"AgentLoop cancelled: {e}")
+            # CancelledError 被 catch 且正常返回，Task 不会进入 cancelled 终态
+            cancel_msg = "[系统] 操作已取消"
+            logger.info(f"AgentLoop cancelled at iteration {ctx.iteration}")
 
             self._context.add_assistant_message(
                 content=cancel_msg, tool_calls=None
             )
 
             if self._audit:
-                await self._audit.emit_cancelled(
-                    reason=e.reason.value,
-                    detail=e.detail,
-                    session_id=ctx.session_id,
-                    iteration=ctx.iteration,
-                )
+                try:
+                    await asyncio.shield(
+                        self._audit.emit_cancelled(
+                            reason="user_cancelled",
+                            detail="",
+                            session_id=ctx.session_id,
+                            iteration=ctx.iteration,
+                        )
+                    )
+                except Exception:
+                    pass
 
             return StreamResult(
                 text=cancel_msg,
-                stop_reason=f"cancelled:{e.reason.value}",
+                stop_reason="cancelled",
             )
 
         return final_result or StreamResult(stop_reason="unknown")

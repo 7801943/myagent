@@ -24,7 +24,6 @@ from fastapi import WebSocket, WebSocketDisconnect
 from myagent.core.agent import Agent
 from myagent.factory import AgentFactory
 from myagent.core.hook import HookManager
-from myagent.core.cancellation import AgentCancelledError, CancelReason
 from myagent.core.session import Session
 from myagent.context.message import ToolCall
 from myagent.context.state import StateStore
@@ -372,17 +371,15 @@ class WebSocketHandler:
 
             try:
                 response = await task
-            except AgentCancelledError as e:
-                logger.info(f"Agent cancelled (session={session_id}): {e}")
+            except asyncio.CancelledError:
+                logger.info(f"Agent cancelled (session={session_id})")
+                # Session/AgentLoop 已处理取消并正常返回，
+                # 此处捕获的是极少数 Session 层面的取消
                 await self._send_json({
                     "type": "message_end",
-                    "text": f"操作已取消 — {e.reason.value}",
-                    "stop_reason": f"cancelled:{e.reason.value}",
+                    "text": "操作已取消",
+                    "stop_reason": "cancelled",
                 })
-                return
-            except asyncio.CancelledError:
-                logger.info(f"Agent task cancelled (session={session_id})")
-                await self._send_json({"type": "message_end", "text": "", "stop_reason": "cancelled"})
                 return
             finally:
                 self._running_tasks.pop(session_id, None)
@@ -403,11 +400,21 @@ class WebSocketHandler:
             self._ws_lock.release(session_id)
 
     async def _handle_cancel(self) -> None:
-        """处理取消请求。"""
+        """处理取消请求。先设置 session 取消理由，再取消 task。"""
         session = self._agent.get_session(self._session_id)
         if session:
-            session.request_cancel(CancelReason.USER_CANCEL, "用户通过 WebSocket 取消")
+            # 先设置取消理由，再由 request_cancel 内部调用 task.cancel()
+            session.request_cancel("user_cancelled", "用户通过 WebSocket 取消")
+        else:
+            # 无 session 时直接取消 task
+            task = self._running_tasks.get(self._session_id)
+            if task and not task.done():
+                task.cancel()
+            else:
+                await self._send_json({"type": "error", "message": "当前没有正在运行的任务"})
+            return
 
+        # session.request_cancel 已调用 task.cancel()，此处做兜底
         task = self._running_tasks.get(self._session_id)
         if task and not task.done():
             task.cancel()

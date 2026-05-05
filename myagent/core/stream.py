@@ -14,7 +14,6 @@ from myagent.providers.base import StreamEvent
 from myagent.providers.router import ProviderRouter
 from myagent.context.message import ToolCall
 from myagent.core.hook import HookContext, HookManager
-from myagent.core.cancellation import CancellationToken, AgentCancelledError, CancelReason
 from myagent.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -43,7 +42,7 @@ class StreamProcessor:
     
     用法：
         stream = StreamProcessor(router=self._router, hook=self._hooks)
-        result: StreamResult = await stream.run(messages, tools, ctx=ctx, cancel_token=self._cancel)
+        result: StreamResult = await stream.run(messages, tools, ctx=ctx)
     """
 
     def __init__(self, router: ProviderRouter, hook: HookManager):
@@ -62,7 +61,6 @@ class StreamProcessor:
         messages: list,
         tools: list | None = None,
         ctx: HookContext | None = None,
-        cancel_token: CancellationToken | None = None,
     ) -> StreamResult:
         """
         一站式流式调用。
@@ -71,10 +69,11 @@ class StreamProcessor:
             messages: 格式化后的消息列表
             tools: 格式化后的工具列表
             ctx: Hook 上下文（用于事件分发）
-            cancel_token: 取消令牌
             
         Returns:
             StreamResult: 聚合后的完整结果
+            
+        取消由 asyncio.Task.cancel() 驱动，CancelledError 在 await 点自动抛出。
         """
         self._reset()
 
@@ -85,13 +84,6 @@ class StreamProcessor:
         content_started = False
 
         async for event in self._router.stream(messages, tools):
-            # 取消检查
-            if cancel_token and cancel_token.is_cancelled:
-                raise AgentCancelledError(
-                    cancel_token.reason or CancelReason.USER_CANCEL,
-                    "LLM generation cancelled"
-                )
-
             # 状态追踪：首次文本输出时切换到 generating
             if not content_started and event.type == "text_delta" and event.text:
                 content_started = True

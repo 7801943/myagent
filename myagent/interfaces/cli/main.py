@@ -13,7 +13,6 @@ import sys
 from myagent.core.agent import Agent
 from myagent.factory import AgentFactory
 from myagent.core.hook import HookManager
-from myagent.core.cancellation import AgentCancelledError
 from myagent.context.message import ToolCall
 from myagent.interfaces.cli.ui import CliUI, print_warning
 from myagent.utils.logging import get_logger, setup_logging
@@ -153,7 +152,7 @@ async def _chat(
         try:
             response = await agent.run("")
             ui.print(f"\n\n🤖 Assistant: {response}\n")
-        except AgentCancelledError:
+        except asyncio.CancelledError:
             ui.print("\n\n⚠ 操作已取消\n")
         except Exception as e:
             logger.error(f"Agent run error: {e}")
@@ -162,7 +161,7 @@ async def _chat(
         try:
             response = await agent.run(message)
             ui.print(f"\n\n🤖 Assistant: {response}\n")
-        except AgentCancelledError:
+        except asyncio.CancelledError:
             ui.print("\n\n⚠ 操作已取消\n")
     else:
         await interactive_loop(agent)

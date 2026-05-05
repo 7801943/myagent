@@ -1,7 +1,8 @@
 """
 Session：交互过程的容器。
-每个 Session 拥有独立的 ContextManager、AgentLoop、CancellationToken。
+每个 Session 拥有独立的 ContextManager、AgentLoop。
 共享组件（ProviderRouter、ToolExecutor、HookManager、AuditLogger）由 Agent 注入。
+取消机制：由 asyncio.Task.cancel() 驱动，Session 通过 _running_task 自动管理。
 """
 import asyncio
 from datetime import datetime, timezone
@@ -15,7 +16,6 @@ from myagent.context.message import Message
 from myagent.core.hook import HookContext, HookManager
 from myagent.core.loop import AgentLoop
 from myagent.core.stream import StreamResult
-from myagent.core.cancellation import CancellationToken, CancelReason, AgentCancelledError
 from myagent.tools.executor import ToolExecutor
 from myagent.observability.audit_logger import AuditLogger
 from myagent.utils.config import TimeoutConfig
@@ -73,7 +73,9 @@ class Session:
             context_window_size=context_window_size,
             tool_result_max_chars=tool_result_max_chars,
         )
-        self._cancel_token: CancellationToken | None = None
+        self._running_task: asyncio.Task | None = None
+        self._cancel_reason: str = ""
+        self._cancel_detail: str = ""
         self._approval_handler = approval_handler
 
         # 超时配置
@@ -113,9 +115,9 @@ class Session:
 
     async def run(self, user_input: str) -> str:
         """在此会话中执行一轮用户交互。"""
-        # 每次 run 创建新的 CancellationToken
-        self._cancel_token = CancellationToken()
-        self._loop._cancel_token = self._cancel_token
+        self._running_task = asyncio.current_task()
+        self._cancel_reason = ""
+        self._cancel_detail = ""
 
         ctx = HookContext(session_id=self.id)
 
@@ -130,7 +132,7 @@ class Session:
             if self._audit:
                 await self._audit.log_event("turn_start", ctx.snapshot(), session_id=ctx.session_id)
 
-            # 执行 ReAct 循环
+            # 执行 ReAct 循环（AgentLoop 内部处理 CancelledError）
             result: StreamResult = await self._loop.run(ctx)
 
             # 内容后处理
@@ -150,21 +152,23 @@ class Session:
 
             return final_content or ""
 
-        except AgentCancelledError as e:
-            logger.info(f"Session run cancelled: {e}")
-            await self._persist(AgentState.IDLE, {
-                "cancelled": True,
-                "cancel_reason": e.reason.value,
-            })
-            raise
-
         except asyncio.CancelledError:
-            logger.info("Session run task cancelled by asyncio.")
-            await self._persist(AgentState.IDLE, {
-                "cancelled": True,
-                "cancel_reason": "asyncio_cancelled",
-            })
-            raise
+            # Session 层面取消（AgentLoop 未能捕获的极端情况）
+            reason = self._cancel_reason or "user_cancelled"
+            cancel_msg = f"[系统] 操作已取消 — {reason}"
+            if self._cancel_detail:
+                cancel_msg += f": {self._cancel_detail}"
+            logger.info(f"Session run cancelled (session-level): {reason}")
+            try:
+                await asyncio.shield(
+                    self._persist(AgentState.IDLE, {
+                        "cancelled": True,
+                        "cancel_reason": reason,
+                    })
+                )
+            except Exception:
+                pass
+            return cancel_msg
 
         except Exception as e:
             logger.error(f"Session run error: {e}")
@@ -176,15 +180,20 @@ class Session:
             await self._persist(AgentState.ERROR)
             raise
 
+        finally:
+            self._running_task = None
+
     def request_cancel(
         self,
-        reason: CancelReason = CancelReason.USER_CANCEL,
+        reason: str = "user_cancelled",
         detail: str = "",
     ) -> None:
-        """供外部（CLI/WebSocket）调用的取消入口。"""
-        if self._cancel_token:
-            self._cancel_token.cancel(reason, detail)
-            logger.info(f"Session cancel requested: {reason.value} — {detail}")
+        """供外部（CLI/WebSocket）调用的取消入口。先设置理由，再取消 task。"""
+        self._cancel_reason = reason
+        self._cancel_detail = detail
+        if self._running_task and not self._running_task.done():
+            self._running_task.cancel()
+            logger.info(f"Session cancel requested: {reason} — {detail}")
 
     async def save(self, messages=None) -> None:
         """持久化会话状态和消息。"""

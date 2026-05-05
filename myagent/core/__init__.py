@@ -1,4 +1,4 @@
-"""MyAgent Core：ReAct 循环引擎 + Hook 体系 + 取消 + 会话管理。"""
+"""MyAgent Core：ReAct 循环引擎 + Hook 体系 + 会话管理。"""
 from myagent.core.agent import Agent
 from myagent.core.loop import AgentLoop
 from myagent.core.hook import (
@@ -6,9 +6,6 @@ from myagent.core.hook import (
     HookManager, HookHandle,
 )
 from myagent.core.stream import StreamProcessor, StreamResult
-from myagent.core.cancellation import (
-    CancellationToken, CancelReason, AgentCancelledError,
-)
 from myagent.core.session import Session
 from myagent.core.turns import TurnKind, TurnResult, ModelTurn, ToolTurn, HumanTurn
 
@@ -17,7 +14,6 @@ __all__ = [
     "HookContext",
     "HookManager", "HookHandle",
     "StreamProcessor", "StreamResult",
-    "CancellationToken", "CancelReason", "AgentCancelledError",
     "Session",
     "TurnKind", "TurnResult", "ModelTurn", "ToolTurn", "HumanTurn",
 ]

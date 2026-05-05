@@ -1,6 +1,6 @@
 """
 Agent：顶层配置持有者 + 会话工厂。
-重构后 Agent 变薄，不再持有 ContextManager/AgentLoop/CancellationToken。
+重构后 Agent 变薄，不再持有 ContextManager/AgentLoop。
 这些职责转移到 Session。
 
 Agent 保留的职责：
@@ -19,7 +19,6 @@ from myagent.tools.executor import ToolExecutor
 from myagent.tools.idempotency import IdempotencyCache
 from myagent.core.hook import HookManager
 from myagent.core.session import Session
-from myagent.core.cancellation import CancelReason
 from myagent.observability.audit_logger import AuditLogger
 from myagent.utils.config import TimeoutConfig
 from myagent.utils.logging import get_logger
@@ -163,13 +162,13 @@ class Agent:
 
     def request_cancel(
         self,
-        reason: CancelReason = CancelReason.USER_CANCEL,
+        reason: str = "user_cancelled",
         detail: str = "",
     ) -> None:
         """供外部（CLI/WebSocket）调用的取消入口。"""
         if self._active:
             self._active.request_cancel(reason, detail)
-            logger.info(f"Cancel requested: {reason.value} — {detail}")
+            logger.info(f"Cancel requested: {reason} — {detail}")
 
     async def restore_session(self, session_id: str) -> Session:
         """从 StateStore 恢复会话。"""
