@@ -64,12 +64,19 @@ class TimeoutConfig(BaseModel):
     tool_batch: float = 60.0           # 工具批量执行超时（秒）
     iteration: float = 300.0           # 单次 ReAct 迭代超时（秒）
 
+class HotReloadConfig(BaseModel):
+    enabled: bool = True
+    watch_dir: str = "/myagent/tools/tools_store"
+    poll_interval: int = 60
+    safe_mode: bool = False
+
 class AgentConfig(BaseSettings):
     """Agent 全局配置，支持 YAML 文件加载和环境变量覆盖。"""
     providers: list[ProviderConfig] = Field(default_factory=list)
     failover: FailoverConfig = Field(default_factory=FailoverConfig)
     audit: AuditConfig = Field(default_factory=AuditConfig)
     timeout: TimeoutConfig = Field(default_factory=TimeoutConfig)
+    hot_reload: HotReloadConfig = Field(default_factory=HotReloadConfig)
     max_iterations: int = 25
     max_tokens_budget: int = 100000
     tool_result_max_chars: int = 4000
