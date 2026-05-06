@@ -1,5 +1,6 @@
 # 用户配置（含敏感信息）
 config.yaml
+*.yaml
 
 # 虚拟环境
 venv/
@@ -14,6 +15,7 @@ __pycache__/
 
 # 数据库
 *.db
+*.db-*
 *.sqlite3
 
 # 审计日志
@@ -36,3 +38,11 @@ Thumbs.db
 dist/
 build/
 *.egg-info/
+
+# 隐藏文件/文件夹
+.*
+!.gitignore
+
+# 其他忽略项
+旧方案/
+*.md
