@@ -6,7 +6,7 @@ FastAPI 依赖注入：管理共享服务实例。
   - [MCP] 注入 MCP 客户端管理器
 """
 from myagent.context.state import SQLiteStateStore
-from myagent.core.factory import AgentFactory
+from myagent.factory import AgentFactory
 
 
 # ── 全局单例（由 app.py lifespan 管理生命周期）──

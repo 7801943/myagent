@@ -114,7 +114,7 @@ app = create_app()
 def main():
     """CLI 入口：python -m myagent.interfaces.web.app"""
     parser = argparse.ArgumentParser(description="MyAgent FastAPI Server")
-    parser.add_argument("--host", default="", help="监听地址 (默认 0.0.0.0)")
+    parser.add_argument("--host", default="0.0.0.0", help="监听地址 (默认 0.0.0.0)")
     parser.add_argument("--port", type=int, default=8000, help="监听端口 (默认 8000)")
     parser.add_argument("--config", default="config.yaml", help="配置文件路径")
     parser.add_argument("--reload", action="store_true", help="启用热重载（开发模式）")

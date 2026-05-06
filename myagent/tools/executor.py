@@ -1,13 +1,11 @@
 """
-ToolExecutor：工具执行引擎（Phase 2 增强版）。
-新增：
-1. SafetyGuard 前置安全检查
-2. SecretManager 凭据注入
-3. HITL 挂起支持（通过回调通知上层）
+ToolExecutor：工具执行引擎。
+流水线：SafetyGuard -> IdempotencyCache -> SecretManager -> Execute -> Cache。
+HITL 不再阻塞 executor，改为返回 needs_approval 标记由上层 HumanTurn 处理。
 """
 import asyncio
 import time
-from typing import Any, Callable, Awaitable
+from typing import Any
 
 from myagent.tools.base import BaseTool, ToolResult
 from myagent.tools.registry import ToolRegistry
@@ -21,7 +19,8 @@ logger = get_logger(__name__)
 class ToolExecutor:
     """
     工具执行引擎。
-    Phase 2 增强：SafetyGuard -> IdempotencyCache -> SecretManager -> execute。
+    SafetyGuard -> IdempotencyCache -> SecretManager -> Execute -> Cache。
+    requires_hitl 时返回 needs_approval 标记，不阻塞等待审批。
     """
 
     def __init__(
@@ -31,19 +30,18 @@ class ToolExecutor:
         default_timeout: float = 30.0,
         safety_guard: Any | None = None,          # SafetyGuard 实例
         secret_manager: Any | None = None,         # SecretManager 实例
-        hitl_callback: Callable[[str, str, ToolCall], Awaitable[bool]] | None = None,
     ):
         self._registry = registry
         self._cache = idempotency_cache
         self._default_timeout = default_timeout
         self._safety_guard = safety_guard
         self._secret_manager = secret_manager
-        self._hitl_callback = hitl_callback  # async fn(tool_name, reason, tool_call) -> approved: bool
 
-    async def execute(self, tool_call: ToolCall) -> ToolResult:
+    async def execute(self, tool_call: ToolCall, skip_safety: bool = False) -> ToolResult:
         """
         执行单个工具调用。
         流程：Safety -> Idempotency -> Secret -> Execute -> Cache
+        skip_safety: 跳过安全检查（用于已通过 HumanTurn 审批的调用）
         """
         tool = self._registry.get(tool_call.name)
         if tool is None:
@@ -54,8 +52,8 @@ class ToolExecutor:
                 metadata={"tool_call_id": tool_call.id},
             )
 
-        # -- Phase 2: 安全检查（必须在幂等缓存之前） --
-        if self._safety_guard:
+        # -- 安全检查（必须在幂等缓存之前，已审批的调用可跳过） --
+        if not skip_safety and self._safety_guard:
             guard_result = await self._safety_guard.check_tool_call(
                 tool_call.name, tool_call.arguments
             )
@@ -67,27 +65,19 @@ class ToolExecutor:
                     metadata={"denied_by": guard_result.rule_name, "tool_call_id": tool_call.id},
                 )
             if guard_result.requires_hitl:
-                # 需要人工审批
-                if self._hitl_callback:
-                    approved = await self._hitl_callback(
-                        tool_call.name, guard_result.reason, tool_call
-                    )
-                    if not approved:
-                        logger.info(f"Tool REJECTED by user: {tool_call.name}")
-                        return ToolResult(
-                            content=f"工具 '{tool_call.name}' 被用户拒绝执行: {guard_result.reason}",
-                            is_error=True,
-                            metadata={"rejected_by": "hitl", "tool_call_id": tool_call.id},
-                        )
-                    logger.info(f"Tool APPROVED by user: {tool_call.name}")
-                else:
-                    # 无 HITL 回调时，默认拒绝
-                    logger.warning(f"Tool requires HITL but no callback: {tool_call.name}")
-                    return ToolResult(
-                        content=f"工具 '{tool_call.name}' 需要人工审批但未配置审批通道: {guard_result.reason}",
-                        is_error=True,
-                        metadata={"tool_call_id": tool_call.id},
-                    )
+                # 需要人工审批：返回 needs_approval 标记，不阻塞等待
+                # 上层 ToolTurn 会分拣并路由到 HumanTurn
+                logger.info(f"Tool requires approval: {tool_call.name} - {guard_result.reason}")
+                return ToolResult(
+                    content=f"工具 '{tool_call.name}' 需要人工审批: {guard_result.reason}",
+                    is_error=False,
+                    metadata={
+                        "needs_approval": True,
+                        "reason": guard_result.reason,
+                        "rule_name": guard_result.rule_name,
+                        "tool_call_id": tool_call.id,
+                    },
+                )
             if guard_result.decision.value == "rewrite" and guard_result.rewritten_args:
                 # 参数重写
                 tool_call = ToolCall(
@@ -137,7 +127,12 @@ class ToolExecutor:
 
         return result
 
-    async def execute_batch(self, tool_calls: list[ToolCall]) -> list[ToolResult]:
-        """并行执行多个工具调用。"""
-        tasks = [self.execute(tc) for tc in tool_calls]
+    async def execute_batch(self, tool_calls: list[ToolCall], skip_safety: bool = False) -> list[ToolResult]:
+        """并行执行多个工具调用。skip_safety 用于已通过 HumanTurn 审批的调用。"""
+        tasks = [self.execute(tc, skip_safety=skip_safety) for tc in tool_calls]
         return await asyncio.gather(*tasks)
+
+    def get_tool_schemas(self) -> list | None:
+        """返回工具的 JSON schema 列表（供 LLM API 调用）。无工具时返回 None。"""
+        tools = self._registry.list_tools()
+        return tools if tools else None

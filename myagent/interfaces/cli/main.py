@@ -11,10 +11,9 @@ import click
 import sys
 
 from myagent.core.agent import Agent
-from myagent.core.factory import AgentFactory
+from myagent.factory import AgentFactory
 from myagent.core.hook import HookManager
-from myagent.core.cancellation import AgentCancelledError
-from myagent.core.hitl import CLIHITLController
+from myagent.context.message import ToolCall
 from myagent.interfaces.cli.ui import CliUI, print_warning
 from myagent.utils.logging import get_logger, setup_logging
 
@@ -105,57 +104,71 @@ async def _chat(
     # 注册超时警告回调
     hooks.on("timeout_warning", lambda ctx, **kw: print_warning(kw.get("message", "操作超时")))
 
-    # 构建 HITL 控制器（CLI 模式）
+    # 构建 CLI 审批 handler
     hitl_cfg = factory.app_config.get("hitl", {})
-    hitl_callback = None
+    approval_handler = None
     if hitl_cfg.get("enabled", True):
-        hitl_controller = CLIHITLController(timeout=hitl_cfg.get("timeout", 120))
-        hitl_callback = hitl_controller.request_approval
+        async def _cli_approval_handler(tool_calls: list[ToolCall]) -> list[bool]:
+            """CLI 人工审批：逐个询问用户是否批准工具调用。"""
+            decisions = []
+            for tc in tool_calls:
+                ui.print(f"\n⚠ 工具需要审批: {tc.name}")
+                ui.print(f"  参数: {tc.arguments}")
+                choice = input("  批准执行？[y/N]: ").strip().lower()
+                decisions.append(choice in ("y", "yes"))
+            return decisions
+        approval_handler = _cli_approval_handler
 
     # 通过工厂创建 Agent
     agent = factory.create_agent(
         hooks=hooks,
-        hitl_callback=hitl_callback,
-        session_id=session_id,
+        approval_handler=approval_handler,
         no_safety=no_safety,
     )
 
+    # 创建会话（如果指定了 session_id）
+    session = agent.create_session(session_id=session_id)
+
     # 覆盖系统提示词（如果命令行指定了）
     if system_prompt:
-        agent.context.set_system(system_prompt)
+        session.context.set_system(system_prompt)
 
-    if images:
-        from myagent.vision.image_handler import ImageHandler
-        from myagent.context.message import ContentBlock
+    try:
+        if images:
+            from myagent.vision.image_handler import ImageHandler
+            from myagent.context.message import ContentBlock
 
-        provider = agent._router.current_provider
-        provider_type = "anthropic" if provider and "anthropic" in provider.name else "openai"
-        handler = ImageHandler(capabilities=provider.capabilities if provider else None)
+            provider = agent._router.current_provider
+            provider_type = "anthropic" if provider and "anthropic" in provider.name else "openai"
+            handler = ImageHandler(capabilities=provider.capabilities if provider else None)
 
-        content_blocks = []
-        if message:
-            content_blocks.append(ContentBlock(type="text", text=message))
-        for img_path in images:
-            block = await handler.prepare(img_path, provider_type=provider_type)
-            content_blocks.append(block)
-        
-        agent._context.add_user_message(content_blocks)
-        try:
-            response = await agent.run("")
-            ui.print(f"\n\n🤖 Assistant: {response}\n")
-        except AgentCancelledError:
-            ui.print("\n\n⚠ 操作已取消\n")
-        except Exception as e:
-            logger.error(f"Agent run error: {e}")
-            ui.print_error(f"执行出错: {e}")
-    elif message:
-        try:
-            response = await agent.run(message)
-            ui.print(f"\n\n🤖 Assistant: {response}\n")
-        except AgentCancelledError:
-            ui.print("\n\n⚠ 操作已取消\n")
-    else:
-        await interactive_loop(agent)
+            content_blocks = []
+            if message:
+                content_blocks.append(ContentBlock(type="text", text=message))
+            for img_path in images:
+                block = await handler.prepare(img_path, provider_type=provider_type)
+                content_blocks.append(block)
+            
+            session.context.add_user_message(content_blocks)
+            try:
+                response = await agent.run("")
+                ui.print(f"\n\n🤖 Assistant: {response}\n")
+            except asyncio.CancelledError:
+                ui.print("\n\n⚠ 操作已取消\n")
+            except Exception as e:
+                logger.error(f"Agent run error: {e}")
+                ui.print_error(f"执行出错: {e}")
+        elif message:
+            try:
+                response = await agent.run(message)
+                ui.print(f"\n\n🤖 Assistant: {response}\n")
+            except asyncio.CancelledError:
+                ui.print("\n\n⚠ 操作已取消\n")
+        else:
+            await interactive_loop(agent)
+    finally:
+        # 清理：停止热加载器
+        await agent.stop_hot_reload()
 
 if __name__ == "__main__":
     cli()

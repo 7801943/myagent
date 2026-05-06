@@ -23,6 +23,11 @@
     const hitlApprove = $("#hitlApprove");
     const hitlReject = $("#hitlReject");
 
+    // Context progress bar elements
+    const contextProgressContainer = $("#contextProgressContainer");
+    const contextProgressFill = $("#contextProgressFill");
+    const contextProgressLabel = $("#contextProgressLabel");
+
     // Sidebar elements
     const sidebar = $(".sidebar");
     const sidebarToggle = $("#sidebarToggle");
@@ -54,6 +59,9 @@
     // Session state
     let currentSessionId = null;
     let sessions = [];
+
+    // Context window state
+    let contextWindowSize = 0;
 
     // ── AgentState Display Map ──
     const STATE_MAP = {
@@ -432,7 +440,8 @@
         switch (type) {
             case "connected":
                 currentSessionId = data.session_id;
-                console.log("Session:", data.session_id);
+                contextWindowSize = data.context_window_size || 0;
+                console.log("Session:", data.session_id, "Context Window:", contextWindowSize);
                 requestSessionList();
                 break;
 
@@ -508,6 +517,10 @@
                 break;
 
             case "message_end":
+                // Update context progress bar
+                if (data.context_usage) {
+                    updateContextProgress(data.context_usage);
+                }
                 finalizeAssistantMessage(data.stop_reason || "completed");
                 break;
 
@@ -1107,6 +1120,34 @@
             return JSON.stringify(args).substring(0, 60);
         } catch (e) {
             return "";
+        }
+    }
+
+    // ── Context Progress Bar ──
+    function updateContextProgress(contextUsage) {
+        if (!contextUsage) return;
+        const used = contextUsage.used_tokens || 0;
+        const total = contextUsage.context_window_size || contextWindowSize || 1;
+        const pct = Math.min(used / total, 1);
+
+        // Show container
+        if (contextProgressContainer) {
+            contextProgressContainer.classList.add("visible");
+        }
+
+        // Update fill width
+        if (contextProgressFill) {
+            contextProgressFill.style.width = (pct * 100).toFixed(1) + "%";
+            // Color: blue (hsl 210) → orange (hsl 30) based on percentage
+            const hue = Math.round(210 - pct * 180); // 210 → 30
+            contextProgressFill.style.backgroundColor = "hsl(" + hue + ", 100%, 55%)";
+        }
+
+        // Update label
+        if (contextProgressLabel) {
+            const usedK = used >= 1000 ? (used / 1000).toFixed(1) + "K" : used;
+            const totalK = total >= 1000 ? (total / 1000).toFixed(0) + "K" : total;
+            contextProgressLabel.textContent = usedK + " / " + totalK + " tokens";
         }
     }
 
