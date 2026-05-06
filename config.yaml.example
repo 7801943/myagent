@@ -1,0 +1,91 @@
+# MyAgent 配置文件示例
+# 复制为 config.yaml 并填入实际值
+
+agent:
+  # System Prompt
+  system_prompt: "你是一个智能助手，可以帮助用户完成各种任务。"
+  system_prompt_file: "config/prompt.txt"
+
+  # 最大 ReAct 迭代次数
+  max_iterations: 50
+
+  # Provider 配置（支持多路冗余）
+  providers:
+    - name: "openai-primary"
+      type: "openai"
+      model: "your-model-name"
+      api_key: "YOUR_API_KEY_HERE"           # 支持环境变量引用，如 "${OPENAI_API_KEY}"
+      api_base: "https://api.example.com/v1" # 可选，自定义 API 基地址
+      priority: 1
+
+    # - name: "openai-backup"
+    #   type: "openai"
+    #   model: "backup-model-name"
+    #   api_key: "YOUR_BACKUP_API_KEY"
+    #   api_base: "http://127.0.0.1:8000/v1"
+    #   priority: 2
+
+    # - name: "anthropic"
+    #   type: "anthropic"
+    #   model: "claude-sonnet-4-20250514"
+    #   api_key: "${ANTHROPIC_API_KEY}"
+
+  # 上下文管理
+  context:
+    max_tokens_budget: 100000
+    context_window_size: 128000    # 模型上下文窗口大小（用于前端进度条计算）
+    tool_result_max_chars: 4000
+    recent_turns: 20
+
+  # 工具执行
+  tools:
+    default_timeout: 30.0
+
+  # ── Phase 2: 安全系统 ──
+  safety:
+    enabled: true
+    rules_path: "./config/safety_rules.yaml"
+    default_action: "allow"          # allow | deny
+
+  # ── Phase 2: 沙盒配置 ──
+  sandbox:
+    backend: "subprocess"            # subprocess | docker (预留)
+    max_cpu_seconds: 30
+    max_memory_mb: 512
+    max_output_bytes: 102400         # 100KB
+    timeout_seconds: 60.0
+
+  # ── Phase 2: 人在回路 ──
+  hitl:
+    enabled: true                    # 是否启用 HITL 审批
+    timeout: 120                     # 审批超时（秒）
+
+  # ── Phase 2: 密钥管理 ──
+  secrets:
+    env_prefix: "MYAGENT_SECRET_"
+    sensitive_fields:
+      - "password"
+      - "api_key"
+      - "token"
+      - "secret"
+      - "access_key"
+      - "secret_key"
+
+  # 可观测性
+  observability:
+    audit_backend: "jsonl"    # jsonl | sqlite
+    audit_path: "./logs/audit.jsonl"
+    # audit_path: "./logs/audit.db"
+    log_level: "INFO"
+
+  # ── 工具热加载 ──
+  hot_reload:
+    enabled: true                          # 是否启用工具热加载
+    watch_dir: "myagent/tools/tools_store" # 监控的工具脚本目录
+    poll_interval: 60.0                    # 扫描间隔（秒）
+    safe_mode: false                       # AST 安全检查（动态工具可能用到 urllib 等，建议关闭）
+
+  # 状态持久化
+  state:
+    backend: "jsonl"          # jsonl | sqlite
+    path: "./state/sessions.jsonl"
