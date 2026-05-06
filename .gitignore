@@ -157,8 +157,11 @@ Thumbs.db
 
 # Project specific
 *.db
+*.db-shm
+*.db-wal
 audit_logs/
 scratch/
 回滚/
 旧方案/
 设计讨论/
+config.yaml
