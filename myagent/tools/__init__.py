@@ -1,29 +1,34 @@
-"""MyAgent Tools：工具注册与执行。"""
-from myagent.tools.base import BaseTool, ToolResult
+"""
+MyAgent 工具系统。
+
+核心模块：
+- base: BaseTool, ToolResult, ToolMeta, FunctionTool, make_tool
+- registry: ToolRegistry
+- executor: ToolExecutor, IdempotencyCache
+- loader: ToolLoader, HotReloader
+- schema: generate_schema, extract_description
+
+子包：
+- builtin/: 内置工具 (CLITool, FileReadTool, FileWriteTool)
+- tools_store/: 热加载工具目录
+
+已移动（旧路径保留兼容重导出）：
+- sandbox/ → runtime/sandbox/
+- secrets.py → safety/secrets.py
+- wrapper.py → 合并入 base.py
+- idempotency.py → 合并入 executor.py
+"""
+# 核心类
+from myagent.tools.base import BaseTool, ToolResult, ToolMeta, FunctionTool, make_tool
 from myagent.tools.registry import ToolRegistry
-from myagent.tools.executor import ToolExecutor
-from myagent.tools.idempotency import IdempotencyCache
-from myagent.tools.cli_tool import CLITool
-from myagent.tools.file_tools import FileReadTool, FileWriteTool
-from myagent.tools.secrets import SecretManager
-from myagent.tools.schema import generate_schema, extract_description
-from myagent.tools.wrapper import FunctionTool, make_tool
+from myagent.tools.executor import ToolExecutor, IdempotencyCache
 from myagent.tools.loader import ToolLoader, HotReloader
+from myagent.tools.schema import generate_schema, extract_description
 
 __all__ = [
-    "BaseTool",
-    "ToolResult",
-    "ToolRegistry",
-    "ToolExecutor",
-    "IdempotencyCache",
-    "CLITool",
-    "FileReadTool",
-    "FileWriteTool",
-    "SecretManager",
-    "generate_schema",
-    "extract_description",
-    "FunctionTool",
-    "make_tool",
-    "ToolLoader",
-    "HotReloader",
+    # 核心
+    "BaseTool", "ToolResult", "ToolMeta", "FunctionTool", "make_tool",
+    "ToolRegistry", "ToolExecutor", "IdempotencyCache",
+    "ToolLoader", "HotReloader",
+    "generate_schema", "extract_description",
 ]

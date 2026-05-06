@@ -38,11 +38,11 @@ from myagent.safety.policy import PolicyEngine
 from myagent.safety.cli_fence import CLIFence
 from myagent.safety.content_rules import InputContentFilter, OutputContentFilter
 from myagent.tools.registry import ToolRegistry
-from myagent.tools.sandbox import SubprocessSandbox
-from myagent.tools.sandbox.subprocess_sandbox import ResourceLimits
-from myagent.tools.cli_tool import CLITool
-from myagent.tools.file_tools import FileReadTool, FileWriteTool
-from myagent.tools.secrets import SecretManager
+from myagent.runtime.sandbox import SubprocessSandbox
+from myagent.runtime.sandbox.subprocess_sandbox import ResourceLimits
+from myagent.tools.builtin.cli_tool import CLITool
+from myagent.tools.builtin.file_tools import FileReadTool, FileWriteTool
+from myagent.safety.secrets import SecretManager
 from myagent.tools.loader import HotReloader
 
 logger = get_logger(__name__)

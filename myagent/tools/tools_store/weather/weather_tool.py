@@ -1,7 +1,10 @@
 """
 天气查询工具示例。
 调用 wttr.in 免费 API，无需 API Key。
+
+修复：使用 asyncio.to_thread() 避免阻塞事件循环。
 """
+import asyncio
 import json
 import urllib.request
 
@@ -14,10 +17,13 @@ async def query_weather(city: str = "Beijing") -> str:
     """
     url = f"https://wttr.in/{city}?format=j1"
 
-    try:
+    def _fetch():
         req = urllib.request.Request(url, headers={"User-Agent": "curl/7.68.0"})
         with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+            return json.loads(resp.read().decode("utf-8"))
+
+    try:
+        data = await asyncio.to_thread(_fetch)
 
         current = data.get("current_condition", [{}])[0]
         area = data.get("nearest_area", [{}])[0]

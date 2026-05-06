@@ -16,7 +16,7 @@ from uuid import uuid4
 from myagent.providers.router import ProviderRouter
 from myagent.tools.registry import ToolRegistry
 from myagent.tools.executor import ToolExecutor
-from myagent.tools.idempotency import IdempotencyCache
+from myagent.tools.executor import IdempotencyCache
 from myagent.tools.loader import HotReloader
 from myagent.core.hook import HookManager
 from myagent.core.session import Session

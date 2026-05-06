@@ -620,7 +620,7 @@ class AgentLoop:
             return ModelTurn(
                 provider_router=self._router,
                 context=self._context,
-                tool_schemas=self._executor.get_tool_schemas(),
+                tool_schemas=self._executor.get_tools(),
                 hooks=self._hook,
                 audit=self._audit,
                 watchdog_timeout=self._llm_timeout,

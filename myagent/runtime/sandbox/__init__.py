@@ -1,7 +1,4 @@
-"""
-兼容性垫片：sandbox 已移至 myagent.runtime.sandbox。
-旧 import 路径仍可用。
-"""
+"""沙盒执行模块。"""
 from myagent.runtime.sandbox.base import BaseSandbox, SandboxResult
 from myagent.runtime.sandbox.subprocess_sandbox import SubprocessSandbox
 
