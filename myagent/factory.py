@@ -43,7 +43,7 @@ from myagent.runtime.sandbox.subprocess_sandbox import ResourceLimits
 from myagent.tools.builtin.cli_tool import CLITool
 from myagent.tools.builtin.file_tools import FileReadTool, FileWriteTool
 from myagent.safety.secrets import SecretManager
-from myagent.tools.loader import HotReloader
+from myagent.tools.hot_reloader import HotReloader
 
 logger = get_logger(__name__)
 

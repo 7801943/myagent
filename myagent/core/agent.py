@@ -17,7 +17,7 @@ from myagent.providers.router import ProviderRouter
 from myagent.tools.registry import ToolRegistry
 from myagent.tools.executor import ToolExecutor
 from myagent.tools.executor import IdempotencyCache
-from myagent.tools.loader import HotReloader
+from myagent.tools.hot_reloader import HotReloader
 from myagent.core.hook import HookManager
 from myagent.core.session import Session
 from myagent.observability.audit_logger import AuditLogger

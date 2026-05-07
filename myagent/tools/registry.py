@@ -8,7 +8,7 @@ from myagent.utils.logging import get_logger
 logger = get_logger(__name__)
 
 class ToolRegistry:
-    """工具注册中心。线程安全的字典封装。"""
+    """工具注册中心。字典封装。"""
 
     def __init__(self):
         self._tools: dict[str, BaseTool] = {}

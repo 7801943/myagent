@@ -144,6 +144,7 @@ class BaseTool(ABC):
     description: str = ""
     parameters_schema: dict = {}
     meta: ToolMeta | None = None  # 延迟加载，首次访问时从配置文件读取
+    _entry_point: str | None = None  # V2: 原始加载入口，用于子进程 JSON-RPC 通信
 
     @abstractmethod
     async def execute(self, **kwargs) -> ToolResult:

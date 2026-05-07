@@ -4,6 +4,8 @@ ToolExecutor：工具执行引擎。
 HITL 不再阻塞 executor，改为返回 needs_approval 标记由上层 HumanTurn 处理。
 
 IdempotencyCache 已合并到此文件（原 idempotency.py，只有一个使用方，无需独立文件）。
+
+V2：所有工具统一走 ProcessToolRunner 子进程 JSON-RPC，一条路径，零 if/else 分支。
 """
 import asyncio
 import time
@@ -12,6 +14,7 @@ from typing import Any
 
 from myagent.tools.base import BaseTool, ToolResult, ToolMeta
 from myagent.tools.registry import ToolRegistry
+from myagent.tools.process_runner import ProcessToolRunner
 from myagent.context.message import ToolCall
 from myagent.utils.logging import get_logger
 
@@ -98,12 +101,14 @@ class ToolExecutor:
         default_timeout: float = 30.0,
         safety_guard: Any | None = None,          # SafetyGuard 实例
         secret_manager: Any | None = None,         # SecretManager 实例
+        process_runner: ProcessToolRunner | None = None,  # 进程隔离执行器
     ):
         self._registry = registry
         self._cache = idempotency_cache
         self._default_timeout = default_timeout
         self._safety_guard = safety_guard
         self._secret_manager = secret_manager
+        self._process_runner = process_runner or ProcessToolRunner()
 
     async def execute(self, tool_call: ToolCall, skip_safety: bool = False) -> ToolResult:
         """
@@ -166,27 +171,25 @@ class ToolExecutor:
         if self._secret_manager:
             args = self._secret_manager.inject_secrets(tool_call.name, args)
 
-        # -- 执行工具（从 ToolMeta 获取超时配置） --
+        # -- 统一子进程执行（V2：一条路径，零 if/else 分支） --
         meta = tool._ensure_meta()
         timeout = meta.get("timeout", self._default_timeout)
+        # 优先使用原始加载入口（如 "module:query_weather"），回退到类路径
+        entry_point = getattr(tool, "_entry_point", None) or f"{type(tool).__module__}:{type(tool).__name__}"
 
         start_time = time.monotonic()
-        try:
-            result = await asyncio.wait_for(
-                tool.execute(**args),
-                timeout=timeout,
-            )
-        except asyncio.TimeoutError:
-            result = ToolResult(
-                content=f"Tool '{tool_call.name}' timed out after {timeout}s",
-                is_error=True,
-            )
-        except Exception as e:
-            logger.error(f"Tool '{tool_call.name}' exception: {e}", exc_info=True)
-            result = ToolResult(
-                content=f"Error: {type(e).__name__}: {e}",
-                is_error=True,
-            )
+
+        result_dict = await self._process_runner.run_tool(
+            tool_entry=entry_point,
+            arguments=args,
+            timeout=timeout,
+            meta=meta.to_dict(),
+        )
+        result = ToolResult(
+            content=result_dict["content"],
+            is_error=result_dict.get("is_error", False),
+            metadata=result_dict.get("metadata", {}),
+        )
 
         latency_ms = int((time.monotonic() - start_time) * 1000)
         result.metadata["latency_ms"] = latency_ms
@@ -207,8 +210,3 @@ class ToolExecutor:
         """返回所有已注册的工具实例列表。无工具时返回 None。"""
         tools = self._registry.list_tools()
         return tools if tools else None
-
-    # 向后兼容别名（原方法名 get_tool_schemas 具有误导性）
-    def get_tool_schemas(self) -> list | None:
-        """向后兼容别名，推荐使用 get_tools()。"""
-        return self.get_tools()

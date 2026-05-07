@@ -3,6 +3,9 @@ CLITool：在安全沙盒中执行 CLI 命令。
 集成 CLIFence 安全围栏，在执行前进行白名单/黑名单/路径检查。
 
 从 myagent/tools/cli_tool.py 移入 builtin/。
+
+V2 变更：sandbox 参数改为可选，默认使用 SubprocessSandbox。
+这使得 CLITool 可以在子进程中无参实例化（JSON-RPC 统一执行路径）。
 """
 from myagent.tools.base import BaseTool, ToolResult
 from myagent.runtime.sandbox.base import BaseSandbox
@@ -15,6 +18,8 @@ class CLITool(BaseTool):
     """
     CLI 命令执行工具。
     通过 BaseSandbox 执行命令，前置安全检查由 ToolExecutor -> PolicyEngine 处理。
+
+    V2: sandbox 参数可选，默认创建 SubprocessSandbox（支持无参实例化）。
     """
     name = "cli_execute"
     description = (
@@ -38,7 +43,10 @@ class CLITool(BaseTool):
         "required": ["command"],
     }
 
-    def __init__(self, sandbox: BaseSandbox):
+    def __init__(self, sandbox: BaseSandbox | None = None):
+        if sandbox is None:
+            from myagent.runtime.sandbox.subprocess_sandbox import SubprocessSandbox
+            sandbox = SubprocessSandbox()
         self._sandbox = sandbox
 
     async def execute(self, command: str, cwd: str | None = None, **kwargs) -> ToolResult:
