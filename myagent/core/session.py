@@ -15,7 +15,7 @@ from myagent.context.state import AgentState
 from myagent.context.message import Message
 from myagent.core.hook import HookContext, HookManager
 from myagent.core.loop import AgentLoop, StreamResult
-from myagent.tools.executor import ToolExecutor
+from myagent.tools.manager import ToolManager
 from myagent.observability.audit_logger import AuditLogger
 from myagent.utils.config import TimeoutConfig
 from myagent.utils.logging import get_logger
@@ -41,7 +41,8 @@ class Session:
         *,
         session_id: str | None = None,
         router: ProviderRouter,
-        executor: ToolExecutor,
+        tool_manager: ToolManager,
+        tool_executor: Callable | None = None,
         hooks: HookManager,
         audit: AuditLogger | None = None,
         timeout_config: TimeoutConfig | None = None,
@@ -61,7 +62,8 @@ class Session:
 
         # 共享组件（由 Agent 注入）
         self._router = router
-        self._executor = executor
+        self._tool_manager = tool_manager
+        self._tool_executor = tool_executor
         self._hooks = hooks
         self._audit = audit
         self._state_store = state_store
@@ -85,8 +87,9 @@ class Session:
         self._loop = AgentLoop(
             provider_router=router,
             context=self._context,
-            executor=executor,
             hook=hooks,
+            tool_manager=tool_manager,
+            tool_executor=tool_executor,
             max_iterations=max_iterations,
             llm_timeout=tc.llm_generation,
             tool_batch_timeout=tc.tool_batch,

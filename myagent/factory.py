@@ -37,13 +37,12 @@ from myagent.safety.guard import SafetyGuard
 from myagent.safety.policy import PolicyEngine
 from myagent.safety.cli_fence import CLIFence
 from myagent.safety.content_rules import InputContentFilter, OutputContentFilter
-from myagent.tools.registry import ToolRegistry
+from myagent.tools.manager import ToolManager
 from myagent.runtime.sandbox import SubprocessSandbox
 from myagent.runtime.sandbox.subprocess_sandbox import ResourceLimits
 from myagent.tools.builtin.cli_tool import CLITool
 from myagent.tools.builtin.file_tools import FileReadTool, FileWriteTool
 from myagent.safety.secrets import SecretManager
-from myagent.tools.hot_reloader import HotReloader
 
 logger = get_logger(__name__)
 
@@ -130,17 +129,14 @@ class AgentFactory:
         # ── 6. 构建密钥管理 ──
         secret_manager = self._build_secret_manager()
 
-        # ── 7. 构建工具注册表 ──
-        tool_registry = self._build_tool_registry(sandbox)
+        # ── 7. 构建工具管理器 ──
+        tool_manager = self._build_tool_manager(sandbox)
 
-        # ── 8. 构建热加载器 ──
-        hot_reloader = self._build_hot_reloader(tool_registry)
-
-        # ── 9. 组装 Agent ──
+        # ── 8. 组装 Agent ──
         agent = Agent(
             provider_router=router,
             hooks=hooks,
-            tool_registry=tool_registry,
+            tool_manager=tool_manager,
             system_prompt=system_prompt,
             max_iterations=self._config_obj.max_iterations,
             safety_guard=safety_guard,
@@ -152,7 +148,6 @@ class AgentFactory:
             max_tokens_budget=self._config_obj.max_tokens_budget,
             context_window_size=self.context_window_size,
             tool_result_max_chars=self._config_obj.tool_result_max_chars,
-            hot_reloader=hot_reloader,
         )
 
         logger.info("Agent created")
@@ -278,40 +273,18 @@ class AgentFactory:
             sensitive_fields=secrets_cfg.get("sensitive_fields"),
         )
 
-    def _build_tool_registry(self, sandbox: SubprocessSandbox) -> ToolRegistry:
-        """构建工具注册表。
+    def _build_tool_manager(self, sandbox: SubprocessSandbox) -> ToolManager:
+        """构建工具管理器。
 
-        TODO: [MCP] 未来在此处注册 FastMCP 协议工具：
-          from myagent.tools.mcp_tool import MCPTool
-          mcp_tools = self._load_mcp_config()
-          for mcp_cfg in mcp_tools:
-              tool_registry.register(MCPTool(mcp_cfg))
+        注册内置工具到 ToolManager。
         """
-        tool_registry = ToolRegistry()
-        tool_registry.register(CLITool(sandbox))
-        tool_registry.register(FileReadTool())
-        tool_registry.register(FileWriteTool())
-        logger.info("Registered tools: cli_execute, file_read, file_write")
-        return tool_registry
-
-    def _build_hot_reloader(self, registry: ToolRegistry) -> HotReloader | None:
-        """构建工具热加载器。"""
         hr_cfg = self._config_obj.hot_reload
-        if not hr_cfg.enabled:
-            return None
+        tools_dir = hr_cfg.watch_dir if hr_cfg and hr_cfg.enabled else "myagent/tools/tools_store"
 
-        def _on_reload(tool, event: str) -> None:
-            logger.info(f"HotReload [{event}]: {tool.name} — {tool.description}")
+        manager = ToolManager(tools_dir=tools_dir)
+        manager.register(CLITool(sandbox))
+        manager.register(FileReadTool())
+        manager.register(FileWriteTool())
+        logger.info("Registered builtin tools: cli_execute, file_read, file_write")
+        return manager
 
-        reloader = HotReloader(
-            registry=registry,
-            watch_dir=hr_cfg.watch_dir,
-            poll_interval=hr_cfg.poll_interval,
-            on_reload=_on_reload,
-            safe_mode=hr_cfg.safe_mode,
-        )
-        logger.info(
-            f"HotReloader configured: watch_dir={hr_cfg.watch_dir}, "
-            f"interval={hr_cfg.poll_interval}s"
-        )
-        return reloader

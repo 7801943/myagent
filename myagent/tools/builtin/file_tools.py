@@ -6,7 +6,7 @@ FileReadTool / FileWriteTool：文件读写工具。
 """
 from pathlib import Path
 
-from myagent.tools.base import BaseTool, ToolResult
+from myagent.tools.api import ToolResult
 from myagent.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -31,10 +31,11 @@ def _check_path_safety(path: str, denied_paths: set[str] | None = None) -> str |
     return None
 
 
-class FileReadTool(BaseTool):
+class FileReadTool:
     """读取文件内容。"""
     name = "file_read"
     description = "读取指定路径的文件内容。支持文本文件，自动检测编码。"
+    meta = None
 
     parameters_schema = {
         "type": "object",
@@ -84,10 +85,11 @@ class FileReadTool(BaseTool):
             return ToolResult(content=f"读取文件失败: {e}", is_error=True)
 
 
-class FileWriteTool(BaseTool):
+class FileWriteTool:
     """写入文件内容。"""
     name = "file_write"
     description = "将内容写入指定路径的文件。如果文件不存在则创建，如果文件已存在则覆盖。"
+    meta = None
 
     parameters_schema = {
         "type": "object",

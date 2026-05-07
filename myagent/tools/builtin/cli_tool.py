@@ -7,14 +7,14 @@ CLITool：在安全沙盒中执行 CLI 命令。
 V2 变更：sandbox 参数改为可选，默认使用 SubprocessSandbox。
 这使得 CLITool 可以在子进程中无参实例化（JSON-RPC 统一执行路径）。
 """
-from myagent.tools.base import BaseTool, ToolResult
+from myagent.tools.api import ToolResult
 from myagent.runtime.sandbox.base import BaseSandbox
 from myagent.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
 
-class CLITool(BaseTool):
+class CLITool:
     """
     CLI 命令执行工具。
     通过 BaseSandbox 执行命令，前置安全检查由 ToolExecutor -> PolicyEngine 处理。
@@ -27,6 +27,7 @@ class CLITool(BaseTool):
         "可以执行常见的文件操作、Python 脚本、git 命令等。"
         "受到安全围栏限制，危险命令会被拦截。"
     )
+    meta = None
 
     parameters_schema = {
         "type": "object",

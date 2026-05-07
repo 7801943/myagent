@@ -38,7 +38,7 @@ from myagent.context.manager import ContextManager
 from myagent.context.message import ToolCall, ToolResult as MsgToolResult
 from myagent.core.hook import HookContext, HookManager
 from myagent.providers.base import StreamEvent
-from myagent.tools.executor import ToolExecutor
+from myagent.tools.manager import ToolManager
 from myagent.observability.audit_logger import AuditLogger
 from myagent.utils.logging import get_logger
 
@@ -369,7 +369,7 @@ class ToolTurn(BaseTurn):
     """
     工具批量执行 Turn。
     职责：
-    1. 并行执行 tool_calls（通过 ToolExecutor）
+    1. 并行执行 tool_calls（通过 tool_executor 回调）
     2. 分拣结果：已完成 vs 需审批（needs_approval）
     3. 写入已完成的 tool_results 到 context
     4. 决定下一步：
@@ -383,14 +383,14 @@ class ToolTurn(BaseTurn):
     def __init__(
         self,
         context: ContextManager,
-        executor: ToolExecutor,
+        tool_executor: Callable | None,
         hooks: HookManager,
         audit: AuditLogger | None,
         watchdog_timeout: float,
     ):
         super().__init__(hooks, audit, watchdog_timeout)
         self._context = context
-        self._executor = executor
+        self._tool_executor = tool_executor
 
     async def _do_execute(self, ctx: HookContext, input_data: Any = None, source: TurnKind | None = None) -> TurnResult:
         tool_calls = input_data  # ModelTurn 或 HumanTurn 传递的 tool_calls 列表
@@ -411,7 +411,14 @@ class ToolTurn(BaseTurn):
                 }, session_id=ctx.session_id)
 
         # 批量执行
-        tool_results = await self._executor.execute_batch(tool_calls, skip_safety=skip_safety)
+        if self._tool_executor:
+            tool_results = await self._tool_executor(tool_calls, skip_safety=skip_safety)
+        else:
+            # fallback: 直接调用 tool_manager
+            tool_results = []
+            for tc in tool_calls:
+                from myagent.tools.api import ToolResult as Tr
+                tool_results.append(Tr(content=f"Tool '{tc.name}' not available", is_error=True))
 
         # 分拣：已完成 vs 需审批
         pending = [(tc, tr) for tc, tr in zip(tool_calls, tool_results)
@@ -590,8 +597,9 @@ class AgentLoop:
         self,
         provider_router: ProviderRouter,
         context: ContextManager,
-        executor: ToolExecutor,
         hook: HookManager,
+        tool_manager: ToolManager | None = None,
+        tool_executor: Callable | None = None,
         max_iterations: int = 50,
         # ── 超时看门狗参数 ──
         llm_timeout: float = 120.0,
@@ -604,7 +612,8 @@ class AgentLoop:
     ):
         self._router = provider_router
         self._context = context
-        self._executor = executor
+        self._tool_manager = tool_manager
+        self._tool_executor = tool_executor
         self._hook = hook
         self._max_iterations = max_iterations
         self._llm_timeout = llm_timeout
@@ -615,12 +624,12 @@ class AgentLoop:
 
     def _create_turn(self, kind: TurnKind):
         """工厂方法：根据 TurnKind 创建对应的 Turn 实例。
-        每次动态获取 tool_schemas（通过 executor），支持运行时热加载工具。"""
+        每次动态获取 tool_schemas（通过 tool_manager），支持运行时热加载工具。"""
         if kind == TurnKind.MODEL:
             return ModelTurn(
                 provider_router=self._router,
                 context=self._context,
-                tool_schemas=self._executor.get_tools(),
+                tool_schemas=self._tool_manager.list_schemas() if self._tool_manager else None,
                 hooks=self._hook,
                 audit=self._audit,
                 watchdog_timeout=self._llm_timeout,
@@ -628,7 +637,7 @@ class AgentLoop:
         elif kind == TurnKind.TOOL:
             return ToolTurn(
                 context=self._context,
-                executor=self._executor,
+                tool_executor=self._tool_executor,
                 hooks=self._hook,
                 audit=self._audit,
                 watchdog_timeout=self._tool_batch_timeout,

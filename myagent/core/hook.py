@@ -14,7 +14,7 @@ from myagent.utils.logging import get_logger
 logger = get_logger(__name__)
 
 if TYPE_CHECKING:
-    from myagent.tools.base import ToolResult
+    from myagent.tools.api import ToolResult
 
 @dataclass
 class HookContext:
