@@ -133,15 +133,16 @@
             <div class="input-area-wrapper">
                 <!-- 上下文使用量进度条 -->
                 <div class="context-progress-container" id="contextProgressContainer">
+                    <span class="context-progress-left" id="contextProgressLeft">0</span>
                     <div class="context-progress-bar">
                         <div class="context-progress-fill" id="contextProgressFill"></div>
                     </div>
-                    <span class="context-progress-label" id="contextProgressLabel">0 / 0 tokens</span>
+                    <span class="context-progress-right" id="contextProgressRight">0</span>
                 </div>
                 <div class="input-fade-mask"></div>
                 <footer class="input-area">
                     <div class="input-wrapper">
-                        <textarea id="userInput" placeholder="输入消息... (Enter 发送, Shift+Enter 换行)" rows="1"
+                        <textarea id="userInput" placeholder="输入消息... (Enter 发送, Shift+Enter 换行)" rows="2"
                             autofocus></textarea>
                         <button id="sendBtn" class="send-btn" title="发送">
                             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"

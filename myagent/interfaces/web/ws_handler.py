@@ -186,7 +186,7 @@ class WebSocketHandler:
         logger.info(f"WebSocket client connected, session: {self._session_id}")
 
         # 发送连接确认（含上下文窗口大小）
-        context_window_size = self._factory.config.context_window_size
+        context_window_size = self._factory.context_window_size
         await self._send_json({
             "type": "connected",
             "session_id": self._session_id,

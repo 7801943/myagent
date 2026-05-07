@@ -17,6 +17,7 @@ agent:
       api_key: "YOUR_API_KEY_HERE"           # 支持环境变量引用，如 "${OPENAI_API_KEY}"
       api_base: "https://api.example.com/v1" # 可选，自定义 API 基地址
       priority: 1
+      context_window_size: 128000            # 该模型的上下文窗口大小（用于前端进度条计算）
 
     # - name: "openai-backup"
     #   type: "openai"
@@ -33,7 +34,6 @@ agent:
   # 上下文管理
   context:
     max_tokens_budget: 100000
-    context_window_size: 128000    # 模型上下文窗口大小（用于前端进度条计算）
     tool_result_max_chars: 4000
     recent_turns: 20
 

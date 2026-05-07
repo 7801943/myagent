@@ -78,6 +78,13 @@ class AgentFactory:
         self._config_obj = AgentConfig(**self._app_config)
 
     @property
+    def context_window_size(self) -> int:
+        """获取上下文窗口大小（从第一个 provider 配置中读取）。"""
+        if self._config_obj.providers:
+            return self._config_obj.providers[0].context_window_size
+        return 128000
+
+    @property
     def config(self) -> AgentConfig:
         """获取解析后的 Agent 配置。"""
         return self._config_obj
@@ -143,7 +150,7 @@ class AgentFactory:
             timeout_config=self._config_obj.timeout,
             state_store=self._state_store,
             max_tokens_budget=self._config_obj.max_tokens_budget,
-            context_window_size=self._config_obj.context_window_size,
+            context_window_size=self.context_window_size,
             tool_result_max_chars=self._config_obj.tool_result_max_chars,
             hot_reloader=hot_reloader,
         )

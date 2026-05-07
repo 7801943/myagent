@@ -51,17 +51,17 @@
     --code-bg: hsl(220, 20%, 14%);
     --scrollbar-thumb: hsl(220, 10%, 28%);
     --scrollbar-track: transparent;
-    --input-bg: rgba(255, 255, 255, 0.03);
-    --input-border: rgba(255, 255, 255, 0.06);
+    --input-bg: rgba(255, 255, 255, 0.08);
+    --input-border: rgba(255, 255, 255, 0.1);
     --divider: rgba(255, 255, 255, 0.06);
 }
 
 /* ── Light Theme ── */
 [data-theme="light"] {
-    --bg-primary: hsl(220, 20%, 97%);
-    --bg-secondary: hsl(220, 20%, 100%);
-    --bg-tertiary: hsl(220, 15%, 94%);
-    --bg-sidebar: hsl(220, 18%, 95%);
+    --bg-primary: hsl(220, 20%, 93%);
+    --bg-secondary: hsl(220, 20%, 96%);
+    --bg-tertiary: hsl(220, 15%, 90%);
+    --bg-sidebar: hsl(220, 18%, 91%);
     --bg-glass: rgba(255, 255, 255, 0.7);
     --bg-glass-hover: rgba(255, 255, 255, 0.85);
     --bg-glass-border: rgba(0, 0, 0, 0.06);
@@ -86,8 +86,8 @@
     --code-bg: hsl(220, 15%, 95%);
     --scrollbar-thumb: hsl(220, 10%, 78%);
     --scrollbar-track: transparent;
-    --input-bg: rgba(255, 255, 255, 0.5);
-    --input-border: rgba(0, 0, 0, 0.06);
+    --input-bg: rgba(255, 255, 255, 0.8);
+    --input-border: rgba(0, 0, 0, 0.1);
     --divider: rgba(0, 0, 0, 0.06);
 }
 
@@ -454,8 +454,10 @@ body {
 }
 
 .status-connected {
-    background: var(--success-soft);
+    background: transparent;
     color: var(--success);
+    font-size: 14px;
+    font-weight: 600;
 }
 
 .status-processing {
@@ -1070,7 +1072,6 @@ body {
 }
 
 /* ── Tools Section ── */
-.msg-tools-scroll {}
 
 /* ============================================================
    Input Area
@@ -1078,6 +1079,14 @@ body {
 .input-area-wrapper {
     position: relative;
     flex-shrink: 0;
+    opacity: 0.8;
+    transition: opacity var(--transition-normal);
+}
+
+.input-area-wrapper:hover,
+.input-area-wrapper:focus-within,
+.input-area-wrapper.has-content {
+    opacity: 1;
 }
 
 .input-fade-mask {
@@ -1100,14 +1109,17 @@ body {
 
 /* ── Context Progress Bar ── */
 .context-progress-container {
-    display: flex;
-    align-items: center;
-    gap: 10px;
+    display: block;
     max-width: 680px;
     margin: 0 auto;
-    padding: 0 24px;
+    padding: 0 0px;
     opacity: 0;
     transition: opacity var(--transition-normal);
+    position: absolute;
+    top: 0px;
+    left: 0;
+    right: 0;
+    z-index: 12;
 }
 
 .context-progress-container.visible {
@@ -1115,38 +1127,83 @@ body {
 }
 
 .context-progress-bar {
-    flex: 1;
-    height: 4px;
+    width: 100%;
+    height: 8px;
     background: var(--bg-tertiary);
-    border-radius: 2px;
+    border-radius: 1px;
     overflow: hidden;
+    position: relative;
 }
 
 .context-progress-fill {
     height: 100%;
     width: 0%;
-    border-radius: 2px;
-    background: hsl(210, 100%, 60%);
+    border-radius: 4px;
+    background: var(--success);
     transition: width 0.5s ease, background-color 0.5s ease;
+    position: relative;
 }
 
-.context-progress-label {
+.context-progress-fill.animating {
+    background-image: linear-gradient(45deg,
+            rgba(255, 255, 255, 0.15) 25%,
+            transparent 25%,
+            transparent 50%,
+            rgba(255, 255, 255, 0.15) 50%,
+            rgba(255, 255, 255, 0.15) 75%,
+            transparent 75%,
+            transparent);
+    background-size: 1rem 1rem;
+    animation: progress-bar-stripes 1s linear infinite;
+}
+
+@keyframes progress-bar-stripes {
+    from {
+        background-position: 1rem 0;
+    }
+
+    to {
+        background-position: 0 0;
+    }
+}
+
+.context-progress-left,
+.context-progress-right {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
     font-size: 11px;
     color: var(--text-tertiary);
     white-space: nowrap;
     font-family: var(--font-mono);
-    min-width: 100px;
+    opacity: 0;
+    transition: opacity 0.3s ease 0s;
+    pointer-events: none;
+}
+
+.context-progress-left {
+    left: -40px;
+}
+
+.context-progress-right {
+    right: -40px;
     text-align: right;
+}
+
+.context-progress-container:hover .context-progress-left,
+.context-progress-container:hover .context-progress-right {
+    opacity: 1;
+    transition-delay: 0.5s;
 }
 
 .input-wrapper {
     display: flex;
-    align-items: flex-end;
+    align-items: center;
     gap: 10px;
     max-width: 680px;
     margin: 0 auto;
-    padding: 8px 12px 8px 16px;
-    border-radius: var(--radius-xl);
+    padding: 8px 16px 8px 16px;
+    border-radius: 6px;
     border: 1px solid var(--input-border);
     background: var(--input-bg);
     transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
@@ -1168,6 +1225,8 @@ body {
     resize: none;
     outline: none;
     max-height: 120px;
+    min-height: 48px;
+    overflow-y: auto;
 }
 
 #userInput::placeholder {
@@ -1182,7 +1241,7 @@ body {
     align-items: center;
     justify-content: center;
     border: none;
-    border-radius: 50%;
+    border-radius: 6px;
     cursor: pointer;
     transition: all var(--transition-fast);
     flex-shrink: 0;

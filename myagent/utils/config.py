@@ -44,6 +44,7 @@ class ProviderConfig(BaseModel):
     priority: int = 1
     api_key: str = ""
     api_base: str | None = None        # 自定义 endpoint
+    context_window_size: int = 128000  # 该模型的上下文窗口大小
 
 class FailoverConfig(BaseModel):
     strategy: str = "priority"         # priority | round_robin | latency
@@ -81,7 +82,6 @@ class AgentConfig(BaseSettings):
     hot_reload: HotReloadConfig = Field(default_factory=HotReloadConfig)
     max_iterations: int = 25
     max_tokens_budget: int = 100000
-    context_window_size: int = 128000
     tool_result_max_chars: int = 4000
     system_prompt: str | None = None
     system_prompt_file: str | None = None
