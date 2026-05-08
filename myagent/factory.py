@@ -232,6 +232,13 @@ class AgentFactory:
         if Path(rules_path).exists():
             with open(rules_path) as f:
                 rules_cfg = yaml.safe_load(f) or {}
+            logger.info(f"Safety rules loaded from {rules_path}")
+        else:
+            logger.warning(
+                f"Safety rules file not found: {rules_path}. "
+                f"PolicyEngine and CLIFence will use empty config. "
+                f"Please check the path or create the file."
+            )
 
         policy_cfg = rules_cfg.get("policy_engine", {})
         policy_engine = PolicyEngine(
@@ -245,6 +252,7 @@ class AgentFactory:
         rules = [
             CLIFence(
                 allowed_commands=cli_fence_cfg.get("allowed_commands"),
+                approval_commands=cli_fence_cfg.get("approval_commands"),
                 denied_patterns=cli_fence_cfg.get("denied_patterns"),
                 denied_paths=cli_fence_cfg.get("denied_paths"),
             ),

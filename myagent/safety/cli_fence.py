@@ -19,8 +19,9 @@ class CLIFence(BaseRule):
     检查逻辑（按顺序执行，短路返回）：
     1. 黑名单模式匹配 -> DENY
     2. 路径检查 -> DENY
-    3. 白名单命令检查 -> DENY（如果命令不在白名单中）
-    4. 通过所有检查 -> ALLOW
+    3. 审批命令检查 -> REQUIRE_HITL（需要人工确认）
+    4. 白名单命令检查 -> DENY（如果命令不在白名单中）
+    5. 通过所有检查 -> ALLOW
     """
     name = "cli_fence"
     priority = 10  # 高优先级
@@ -28,10 +29,12 @@ class CLIFence(BaseRule):
     def __init__(
         self,
         allowed_commands: list[str] | None = None,
+        approval_commands: list[str] | None = None,
         denied_patterns: list[str] | None = None,
         denied_paths: list[str] | None = None,
     ):
         self._allowed_commands = set(allowed_commands or [])
+        self._approval_commands = set(approval_commands or [])
         self._denied_patterns = [
             re.compile(p, re.IGNORECASE) for p in (denied_patterns or [])
         ]
@@ -72,7 +75,18 @@ class CLIFence(BaseRule):
                     reason=f"命令涉及禁止路径: {denied_str}",
                 )
 
-        # 3. 白名单命令检查
+        # 3. 审批命令检查（需要人工确认才可执行）
+        if self._approval_commands:
+            base_cmd = self._extract_base_command(command)
+            if base_cmd and base_cmd in self._approval_commands:
+                logger.info(f"CLIFence REQUIRE_HITL (approval): {base_cmd}")
+                return GuardResult(
+                    decision=PolicyDecision.REQUIRE_HITL,
+                    rule_name=self.name,
+                    reason=f"命令 '{base_cmd}' 需要人工审批后方可执行",
+                )
+
+        # 4. 白名单命令检查
         if self._allowed_commands:
             base_cmd = self._extract_base_command(command)
             if base_cmd and base_cmd not in self._allowed_commands:
