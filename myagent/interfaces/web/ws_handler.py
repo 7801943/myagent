@@ -40,7 +40,7 @@ class WebSocketApprovalHandler:
     签名：async (tool_calls: list[ToolCall]) -> list[bool]
     
     工作流程：
-    1. HumanTurn 调用 __call__(tool_calls)
+    1. ToolTurn 调用 __call__(tool_calls)
     2. 向 WS 客户端发送批量审批请求
     3. 等待客户端逐个回复（通过 Future）
     4. 返回决策列表

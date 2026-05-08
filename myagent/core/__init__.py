@@ -1,6 +1,6 @@
 """MyAgent Core：ReAct 循环引擎 + Hook 体系 + 会话管理。"""
 from myagent.core.agent import Agent
-from myagent.core.loop import AgentLoop, StreamResult, TurnKind, TurnResult, ModelTurn, ToolTurn, HumanTurn
+from myagent.core.loop import AgentLoop, StreamResult, TurnKind, TurnResult, ModelTurn, ToolTurn, SystemTurn
 from myagent.core.hook import (
     HookContext,
     HookManager, HookHandle,
@@ -13,5 +13,5 @@ __all__ = [
     "HookManager", "HookHandle",
     "StreamResult",
     "Session",
-    "TurnKind", "TurnResult", "ModelTurn", "ToolTurn", "HumanTurn",
+    "TurnKind", "TurnResult", "ModelTurn", "ToolTurn", "SystemTurn",
 ]

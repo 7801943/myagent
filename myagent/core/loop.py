@@ -2,15 +2,13 @@
 AgentLoop + Turn 抽象层：ReAct 循环引擎与 Turn 执行单元。
 
 Turn 抽象：
-  BaseTurn  — 模板方法（看门狗 + 子类逻辑，取消由 asyncio 自动传播）
-  ModelTurn — LLM 流式生成（包含 StreamProcessor + Hook 分发 + context 写入）
-  ToolTurn  — 工具批量执行（包含安全分拣 + 结果分发 + context 写入）
-  HumanTurn — 人工审批（等待用户决策，继承看门狗 + 取消检查）
+  BaseTurn   — 模板方法（看门狗 + 生命周期钩子 + 统一异常处理）
+  SystemTurn — 系统指令检测（切换模型、新对话等）
+  ModelTurn  — LLM 流式生成（包含 StreamProcessor + Hook 分发 + context 写入）
+  ToolTurn   — 工具批量执行（包含安全分拣 + 人工审批 + 结果分发 + context 写入）
 
 状态机路由（由 AgentLoop dispatcher 驱动）：
-  MODEL → TOOL → MODEL（全部安全）
-  MODEL → TOOL → HUMAN → TOOL → MODEL（部分需审批）
-  MODEL → TOOL → HUMAN → MODEL（全部被拒绝）
+  SYSTEM → MODEL → TOOL → MODEL（系统指令 → LLM → 工具含审批 → LLM）
   MODEL → None（无工具调用，结束）
 
 设计决策：
@@ -27,6 +25,7 @@ AgentLoop 统一 catch 后写入取消消息并返回 StreamResult（不 re-rais
 使 Task 正常完成，支持后续恢复执行。
 """
 import asyncio
+import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -73,7 +72,8 @@ class TurnKind(Enum):
     """Turn 类型枚举。"""
     MODEL = auto()
     TOOL = auto()
-    HUMAN = auto()
+    SYSTEM = auto()
+    HUMAN = auto()  # 已废弃，保留以兼容序列化
 
 
 @dataclass
@@ -85,16 +85,6 @@ class TurnResult:
     stream_result: StreamResult | None = None  # ModelTurn 专用
     meta: dict = field(default_factory=dict)   # 执行元数据（elapsed_seconds, usage 等）
 
-    # NOTE: to_dict() 当前未被消费，暂注释保留。
-    # def to_dict(self) -> dict:
-    #     """序列化为可持久化的字典。"""
-    #     return {
-    #         "kind": self.kind.name,
-    #         "next_turn": self.next_turn.name if self.next_turn else None,
-    #         "has_stream_result": self.stream_result is not None,
-    #         "has_data": self.data is not None,
-    #     }
-
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Turn 基类与子类
@@ -103,8 +93,9 @@ class TurnResult:
 class BaseTurn(ABC):
     """
     Turn 基类，封装横切关注点：
+    - 生命周期钩子（turn_start / turn_end / turn_error）
+    - 统一异常处理（state_change→error, error hook, audit 日志）
     - 看门狗超时（Turn 执行期间）
-    - Turn 生命周期事件（turn_error 保留为调试点）
     - 清理（finally 中取消看门狗）
     - 取消由 asyncio.CancelledError 自动传播，无需手动检查
 
@@ -123,27 +114,33 @@ class BaseTurn(ABC):
 
     async def execute(self, ctx: HookContext, input_data: Any = None, source: TurnKind | None = None) -> TurnResult:
         """
-        模板方法：看门狗 → 子类逻辑 → 清理。
-        source: 上一个 Turn 的类型（用于 ToolTurn 判断是否来自 HumanTurn）。
-        异常路径：turn_error → raise。
+        模板方法：turn_start → 子类逻辑 → turn_end → 清理。
+        source: 上一个 Turn 的类型（保留接口兼容性，当前不再使用）。
+        异常路径：统一 emit state_change(error), error, turn_error → raise。
         取消路径：CancelledError 直接向上传播（由 AgentLoop 统一处理）。
         """
         start = time.monotonic()
         watchdog = asyncio.create_task(self._watchdog(ctx))
         try:
+            await self._hooks.emit(f"{self.kind.name.lower()}_turn_start", ctx)
+
             result = await self._do_execute(ctx, input_data, source)
             result.meta["elapsed_seconds"] = round(time.monotonic() - start, 3)
 
+            await self._hooks.emit(f"{self.kind.name.lower()}_turn_end", ctx, result=result)
             return result
 
         except asyncio.CancelledError:
-            # 取消不触发 turn_error，直接向上传播
             raise
 
         except Exception as e:
-            # 统一错误抛出时的基类 Hook 事件
-            turn_error_name = f"{self.kind.name.lower()}_turn_error"
-            await self._hooks.emit(turn_error_name, ctx, error=e)
+            await self._hooks.emit("state_change", ctx, state="error")
+            await self._hooks.emit("error", ctx, error=e)
+            await self._hooks.emit(f"{self.kind.name.lower()}_turn_error", ctx, error=e)
+            if self._audit:
+                await self._audit.log_event("error", {
+                    "error": str(e), "error_type": type(e).__name__,
+                }, session_id=ctx.session_id)
             raise
 
         finally:
@@ -179,6 +176,54 @@ class BaseTurn(ABC):
 
     @abstractmethod
     async def _do_execute(self, ctx: HookContext, input_data: Any, source: TurnKind | None) -> TurnResult: ...
+
+
+class SystemTurn(BaseTurn):
+    """
+    系统指令检测 Turn。
+    职责：
+    1. 检查用户最新消息中的系统控制指令（/model, /new, /clear 等）
+    2. 通过 system_command_handler 回调处理指令
+    3. 无指令时透传至 MODEL
+    """
+    kind = TurnKind.SYSTEM
+    _stage_name = "system_check"
+
+    _COMMAND_RE = re.compile(r"^\s*/(\S+)(?:\s+(.*))?")
+
+    def __init__(
+        self,
+        context: ContextManager,
+        hooks: HookManager,
+        audit: AuditLogger | None,
+        watchdog_timeout: float,
+        system_command_handler: Callable[[str, str, HookContext], Awaitable[None]] | None = None,
+    ):
+        super().__init__(hooks, audit, watchdog_timeout)
+        self._context = context
+        self._handler = system_command_handler
+
+    async def _do_execute(self, ctx: HookContext, input_data: Any = None, source: TurnKind | None = None) -> TurnResult:
+        await self._hooks.emit("state_change", ctx, state="system_check")
+
+        messages = self._context.get_messages()
+        user_msgs = [m for m in messages if getattr(m, "role", None) == "user"]
+        if user_msgs:
+            last_msg = user_msgs[-1]
+            content = (getattr(last_msg, "content", None) or "").strip()
+            m = self._COMMAND_RE.match(content)
+            if m:
+                cmd = m.group(1)
+                args = m.group(2) or ""
+                await self._hooks.emit("system_command", ctx, command=cmd, args=args)
+                if self._handler:
+                    await self._handler(cmd, args, ctx)
+                if self._audit:
+                    await self._audit.log_event("system_command", {
+                        "command": cmd, "args": args,
+                    }, session_id=ctx.session_id)
+
+        return TurnResult(kind=TurnKind.SYSTEM, next_turn=TurnKind.MODEL)
 
 
 class ModelTurn(BaseTurn):
@@ -221,65 +266,41 @@ class ModelTurn(BaseTurn):
         if self._audit:
             await self._audit.log_event("provider_call_start", ctx.snapshot(), session_id=ctx.session_id)
 
-        try:
-            messages = self._context.get_messages()
-            tools = self._tool_schemas
+        messages = self._context.get_messages()
+        tools = self._tool_schemas
 
-            # stream_start 信号
-            if self._hooks.wants_streaming():
-                await self._hooks.emit("stream_start", ctx)
+        if self._hooks.wants_streaming():
+            await self._hooks.emit("stream_start", ctx)
 
-            # 流式消费 + 聚合 + Hook 分发
-            content_started = False
-            async for event in self._router.stream(messages, tools):
-                # 聚合事件
-                self._accumulate(event)
+        content_started = False
+        async for event in self._router.stream(messages, tools):
+            self._accumulate(event)
 
-                # 状态追踪：首次文本输出时切换到 generating
-                if not content_started and event.type == "text_delta" and event.text:
-                    content_started = True
-                    await self._hooks.emit("state_change", ctx, state="generating")
+            if not content_started and event.type == "text_delta" and event.text:
+                content_started = True
+                await self._hooks.emit("state_change", ctx, state="generating")
 
-                # Hook 分发
-                await self._dispatch_event(event, ctx)
+            await self._dispatch_event(event, ctx)
 
-        except asyncio.CancelledError:
-            raise  # 向上传递取消
-        except Exception as e:
-            logger.error(f"Provider error in iteration {ctx.iteration}: {e}")
-            await self._hooks.emit("state_change", ctx, state="error")
-            await self._hooks.emit("error", ctx, error=e)
-            if self._audit:
-                await self._audit.log_event("error", {
-                    "error": str(e), "error_type": type(e).__name__,
-                }, session_id=ctx.session_id)
-            raise
-
-        # 构建聚合结果
         result = self._build_result()
 
-        # stream_end 信号（只发射一次，修复原 StreamProcessor + ModelTurn 重复发射的 bug）
         if self._hooks.wants_streaming():
             await self._hooks.emit("stream_end", ctx, resuming=bool(result.tool_calls))
 
-        # Provider 调用结束
         if self._audit:
             await self._audit.log_event("provider_call_end", {
                 "stop_reason": result.stop_reason or "",
                 "usage": result.usage,
             }, session_id=ctx.session_id)
 
-        # 更新上下文的 token 使用量
         if result.usage:
             self._context.update_usage(result.usage)
 
-        # 写入 assistant 消息到上下文
         self._context.add_assistant_message(
             content=result.text,
             tool_calls=result.tool_calls if result.tool_calls else None,
         )
 
-        # 决定下一步
         has_tools = bool(result.tool_calls)
         meta = {"usage": result.usage} if result.usage else {}
 
@@ -367,15 +388,13 @@ class ModelTurn(BaseTurn):
 
 class ToolTurn(BaseTurn):
     """
-    工具批量执行 Turn。
+    工具批量执行 Turn（含安全分拣 + 人工审批内联）。
     职责：
     1. 并行执行 tool_calls（通过 tool_executor 回调）
     2. 分拣结果：已完成 vs 需审批（needs_approval）
-    3. 写入已完成的 tool_results 到 context
-    4. 决定下一步：
-       - 全部完成 → MODEL
-       - 有待审批 → HUMAN
-    当 source=HUMAN 时（已审批的调用），跳过安全检查。
+    3. 内联人工审批：emit approval_needed → 等待 approval_handler → 执行/拒绝
+    4. 写入已完成/被拒绝的 tool_results 到 context
+    5. 下一步始终为 MODEL
     """
     kind = TurnKind.TOOL
     _stage_name = "tool_execution"
@@ -387,20 +406,18 @@ class ToolTurn(BaseTurn):
         hooks: HookManager,
         audit: AuditLogger | None,
         watchdog_timeout: float,
+        approval_handler: Callable[[list], Awaitable[list[bool]]] | None = None,
     ):
         super().__init__(hooks, audit, watchdog_timeout)
         self._context = context
         self._tool_executor = tool_executor
+        self._approval_handler = approval_handler
 
     async def _do_execute(self, ctx: HookContext, input_data: Any = None, source: TurnKind | None = None) -> TurnResult:
-        tool_calls = input_data  # ModelTurn 或 HumanTurn 传递的 tool_calls 列表
+        tool_calls = input_data  # ModelTurn 传递的 tool_calls 列表
 
         await self._hooks.emit("state_change", ctx, state="waiting_tool")
 
-        # 判断是否来自 HumanTurn（已审批的调用跳过安全检查）
-        skip_safety = (source == TurnKind.HUMAN)
-
-        # per-tool: tool_start
         for tc in tool_calls:
             await self._hooks.emit("tool_start",
                 ctx, tool_name=tc.name, args=tc.arguments, call_id=tc.id
@@ -410,139 +427,23 @@ class ToolTurn(BaseTurn):
                     "tool_name": tc.name, "call_id": tc.id,
                 }, session_id=ctx.session_id)
 
-        # 批量执行
         if self._tool_executor:
-            tool_results = await self._tool_executor(tool_calls, skip_safety=skip_safety)
+            tool_results = await self._tool_executor(tool_calls, skip_safety=False)
         else:
-            # fallback: 直接调用 tool_manager
-            tool_results = []
-            for tc in tool_calls:
-                from myagent.tools.api import ToolResult as Tr
-                tool_results.append(Tr(content=f"Tool '{tc.name}' not available", is_error=True))
+            from myagent.tools.api import ToolResult as Tr
+            tool_results = [Tr(content=f"Tool '{tc.name}' not available", is_error=True) for tc in tool_calls]
 
-        # 分拣：已完成 vs 需审批
         pending = [(tc, tr) for tc, tr in zip(tool_calls, tool_results)
                    if tr.metadata.get("needs_approval")]
         completed = [(tc, tr) for tc, tr in zip(tool_calls, tool_results)
                      if not tr.metadata.get("needs_approval")]
 
-        # 已完成的正常写入 context + 发射 hook 事件
         for tc, tr in completed:
-            latency = tr.metadata.get("latency_ms", 0)
-
-            msg_result = MsgToolResult(
-                tool_call_id=tc.id,
-                tool_name=tc.name,
-                content=tr.content,
-                metadata={"latency_ms": latency},
-            )
-            self._context.add_tool_result(tc.id, msg_result)
-            if tr.is_error:
-                if "denied_by" in tr.metadata:
-                    await self._hooks.emit("safety_blocked",
-                        ctx,
-                        rule=tr.metadata["denied_by"],
-                        reason=str(tr.content),
-                        action="deny",
-                        call_id=tc.id,
-                        tool_name=tc.name,
-                    )
-                    if self._audit:
-                        await self._audit.emit_safety(
-                            decision="deny",
-                            rule_name=tr.metadata["denied_by"],
-                            reason=str(tr.content),
-                            session_id=ctx.session_id,
-                        )
-                await self._hooks.emit("tool_error",
-                    ctx, tool_name=tc.name,
-                    error=Exception(tr.content), call_id=tc.id,
-                )
-                if self._audit:
-                    await self._audit.log_event("tool_error", {
-                        "tool_name": tc.name, "call_id": tc.id,
-                        "error": str(tr.content),
-                    }, session_id=ctx.session_id)
-            else:
-                await self._hooks.emit("tool_end",
-                    ctx, tool_name=tc.name, result=tr,
-                    call_id=tc.id, latency_ms=latency,
-                )
-                if self._audit:
-                    await self._audit.log_event("tool_end", {
-                        "tool_name": tc.name, "call_id": tc.id,
-                        "latency_ms": latency,
-                        "is_error": False,
-                    }, session_id=ctx.session_id)
+            await self._write_result(ctx, tc, tr)
 
         if pending:
-            # 有待审批 → 下一步走 HumanTurn
-            if self._audit:
-                await self._audit.log_event("approval_needed", {
-                    "pending_count": len(pending),
-                    "tool_names": [tc.name for tc, _ in pending],
-                }, session_id=ctx.session_id)
-            return TurnResult(
-                kind=TurnKind.TOOL,
-                next_turn=TurnKind.HUMAN,
-                data=[tc for tc, _ in pending],
-            )
-        else:
-            return TurnResult(
-                kind=TurnKind.TOOL,
-                next_turn=TurnKind.MODEL,
-                data=tool_results,
-            )
+            approved, rejected = await self._handle_approval(ctx, pending)
 
-
-class HumanTurn(BaseTurn):
-    """
-    人工审批 Turn。继承 BaseTurn 获得看门狗超时保护。
-    职责：
-    1. 通过 hook 事件 approval_needed 通知 UI 层
-    2. 等待 approval_handler 返回审批决策
-    3. 被拒绝的写入 context 让 LLM 知道
-    4. 决定下一步：有批准 → TOOL（执行），全部拒绝 → MODEL
-    """
-    kind = TurnKind.HUMAN
-    _stage_name = "human_approval"
-
-    def __init__(
-        self,
-        context: ContextManager,
-        hooks: HookManager,
-        audit: AuditLogger | None,
-        watchdog_timeout: float,
-        approval_handler: Callable[[list], Awaitable[list[bool]]] | None = None,
-    ):
-        super().__init__(hooks, audit, watchdog_timeout)
-        self._context = context
-        self._approval_handler = approval_handler  # async (tool_calls) -> list[bool]
-
-    async def _do_execute(self, ctx: HookContext, input_data: Any = None, source: TurnKind | None = None) -> TurnResult:
-        """input_data: list[ToolCall] 需要审批的工具调用"""
-        pending_calls = input_data
-
-        # 通过 hook 通知 UI 层
-        await self._hooks.emit("approval_needed", ctx, tool_calls=pending_calls)
-
-        if self._audit:
-            await self._audit.log_event("human_turn_start", {
-                "pending_count": len(pending_calls),
-                "tool_names": [tc.name for tc in pending_calls],
-            }, session_id=ctx.session_id)
-
-        if self._approval_handler:
-            decisions = await self._approval_handler(pending_calls)
-        else:
-            # 无 handler，默认全部拒绝
-            decisions = [False] * len(pending_calls)
-
-        approved = [tc for tc, ok in zip(pending_calls, decisions) if ok]
-        rejected = [tc for tc, ok in zip(pending_calls, decisions) if not ok]
-
-        # 被拒绝的写入 context 让 LLM 知道
-        if rejected:
             for tc in rejected:
                 msg_result = MsgToolResult(
                     tool_call_id=tc.id,
@@ -550,7 +451,6 @@ class HumanTurn(BaseTurn):
                     content=f"工具 '{tc.name}' 被用户拒绝执行",
                 )
                 self._context.add_tool_result(tc.id, msg_result)
-
                 await self._hooks.emit("tool_error",
                     ctx, tool_name=tc.name,
                     error=Exception(f"工具 '{tc.name}' 被用户拒绝执行"),
@@ -561,23 +461,84 @@ class HumanTurn(BaseTurn):
                         "tool_name": tc.name, "call_id": tc.id,
                     }, session_id=ctx.session_id)
 
+            if approved:
+                approved_results = await self._tool_executor(approved, skip_safety=True)
+                for tc, tr in zip(approved, approved_results):
+                    await self._write_result(ctx, tc, tr)
+
+        return TurnResult(kind=TurnKind.TOOL, next_turn=TurnKind.MODEL)
+
+    async def _handle_approval(self, ctx: HookContext, pending: list[tuple[ToolCall, Any]]) -> tuple[list[ToolCall], list[ToolCall]]:
+        """内联人工审批：emit hook → 等待 handler → 区分批准/拒绝。"""
+        pending_calls = [tc for tc, _ in pending]
+
+        await self._hooks.emit("approval_needed", ctx, tool_calls=pending_calls)
+
         if self._audit:
-            await self._audit.log_event("human_turn_end", {
-                "approved_count": len(approved),
-                "rejected_count": len(rejected),
+            await self._audit.log_event("approval_needed", {
+                "pending_count": len(pending_calls),
+                "tool_names": [tc.name for tc in pending_calls],
             }, session_id=ctx.session_id)
 
-        if approved:
-            return TurnResult(
-                kind=TurnKind.HUMAN,
-                next_turn=TurnKind.TOOL,
-                data=approved,
-            )
+        if self._approval_handler:
+            decisions = await self._approval_handler(pending_calls)
         else:
-            return TurnResult(
-                kind=TurnKind.HUMAN,
-                next_turn=TurnKind.MODEL,
+            decisions = [False] * len(pending_calls)
+
+        approved = [tc for tc, ok in zip(pending_calls, decisions) if ok]
+        rejected = [tc for tc, ok in zip(pending_calls, decisions) if not ok]
+
+        return approved, rejected
+
+    async def _write_result(self, ctx: HookContext, tc: ToolCall, tr: Any) -> None:
+        """将单个工具执行结果写入 context 并发射 hook 事件。"""
+        latency = tr.metadata.get("latency_ms", 0)
+
+        msg_result = MsgToolResult(
+            tool_call_id=tc.id,
+            tool_name=tc.name,
+            content=tr.content,
+            metadata={"latency_ms": latency},
+        )
+        self._context.add_tool_result(tc.id, msg_result)
+
+        if tr.is_error:
+            if "denied_by" in tr.metadata:
+                await self._hooks.emit("safety_blocked",
+                    ctx,
+                    rule=tr.metadata["denied_by"],
+                    reason=str(tr.content),
+                    action="deny",
+                    call_id=tc.id,
+                    tool_name=tc.name,
+                )
+                if self._audit:
+                    await self._audit.emit_safety(
+                        decision="deny",
+                        rule_name=tr.metadata["denied_by"],
+                        reason=str(tr.content),
+                        session_id=ctx.session_id,
+                    )
+            await self._hooks.emit("tool_error",
+                ctx, tool_name=tc.name,
+                error=Exception(tr.content), call_id=tc.id,
             )
+            if self._audit:
+                await self._audit.log_event("tool_error", {
+                    "tool_name": tc.name, "call_id": tc.id,
+                    "error": str(tr.content),
+                }, session_id=ctx.session_id)
+        else:
+            await self._hooks.emit("tool_end",
+                ctx, tool_name=tc.name, result=tr,
+                call_id=tc.id, latency_ms=latency,
+            )
+            if self._audit:
+                await self._audit.log_event("tool_end", {
+                    "tool_name": tc.name, "call_id": tc.id,
+                    "latency_ms": latency,
+                    "is_error": False,
+                }, session_id=ctx.session_id)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -587,11 +548,11 @@ class HumanTurn(BaseTurn):
 class AgentLoop:
     """
     ReAct 循环引擎（通用 Turn dispatcher 版）。
-    
+
     根据 TurnResult.next_turn 动态路由到下一个 Turn：
-    1. MODEL → LLM 生成，决定是否有 tool_calls
-    2. TOOL → 执行工具，分拣结果（完成 vs 需审批）
-    3. HUMAN → 等待人工审批（仅在有 needs_approval 时触发）
+    1. SYSTEM → 检测系统指令（/model, /new, /clear 等），透传至 MODEL
+    2. MODEL  → LLM 生成，决定是否有 tool_calls
+    3. TOOL   → 执行工具 + 安全分拣 + 内联人工审批，返回 MODEL
     """
 
     def __init__(
@@ -605,11 +566,14 @@ class AgentLoop:
         # ── 超时看门狗参数 ──
         llm_timeout: float = 120.0,
         tool_batch_timeout: float = 60.0,
-        human_approval_timeout: float = 300.0,
+        system_timeout: float = 30.0,
+        human_approval_timeout: float = 300.0,  # 已废弃，保留兼容
         # ── 审计日志（内联）──
         audit_logger: AuditLogger | None = None,
         # ── 人工审批 handler ──
         approval_handler: Callable[[list], Awaitable[list[bool]]] | None = None,
+        # ── 系统指令 handler ──
+        system_command_handler: Callable[[str, str, HookContext], Awaitable[None]] | None = None,
     ):
         self._router = provider_router
         self._context = context
@@ -619,9 +583,11 @@ class AgentLoop:
         self._max_iterations = max_iterations
         self._llm_timeout = llm_timeout
         self._tool_batch_timeout = tool_batch_timeout
+        self._system_timeout = system_timeout
         self._human_approval_timeout = human_approval_timeout
         self._audit = audit_logger
         self._approval_handler = approval_handler
+        self._system_command_handler = system_command_handler
 
     def _create_turn(self, kind: TurnKind):
         """工厂方法：根据 TurnKind 创建对应的 Turn 实例。
@@ -642,14 +608,15 @@ class AgentLoop:
                 hooks=self._hook,
                 audit=self._audit,
                 watchdog_timeout=self._tool_batch_timeout,
+                approval_handler=self._approval_handler,
             )
-        elif kind == TurnKind.HUMAN:
-            return HumanTurn(
+        elif kind == TurnKind.SYSTEM:
+            return SystemTurn(
                 context=self._context,
                 hooks=self._hook,
                 audit=self._audit,
-                watchdog_timeout=self._human_approval_timeout,
-                approval_handler=self._approval_handler,
+                watchdog_timeout=self._system_timeout,
+                system_command_handler=self._system_command_handler,
             )
         else:
             raise ValueError(f"Unknown TurnKind: {kind}")
@@ -658,9 +625,10 @@ class AgentLoop:
         """
         执行完整的 ReAct 循环，返回最终的 StreamResult。
         通用 dispatcher：根据 TurnResult.next_turn 动态路由。
+        流程：SYSTEM → MODEL → TOOL → MODEL → TOOL → ... → 结束。
         """
         final_result: StreamResult | None = None
-        current_kind = TurnKind.MODEL
+        current_kind = TurnKind.SYSTEM
         current_data = None
         previous_kind: TurnKind | None = None
 
@@ -668,33 +636,27 @@ class AgentLoop:
             for iteration in range(self._max_iterations):
                 ctx.iteration = iteration + 1
 
-                # → iteration_start 留在 dispatcher 层
                 if self._audit:
                     await self._audit.log_event("iteration_start", ctx.snapshot(), session_id=ctx.session_id)
 
-                # 创建并执行当前 Turn
                 turn = self._create_turn(current_kind)
                 result: TurnResult = await turn.execute(ctx, current_data, source=previous_kind)
 
                 if result.next_turn is None:
-                    # 循环结束
                     final_result = result.stream_result
                     await self._hook.emit("state_change", ctx, state="idle")
                     if self._audit:
                         await self._audit.log_event("iteration_end", ctx.snapshot(), session_id=ctx.session_id)
                     break
 
-                # 路由到下一个 Turn
                 previous_kind = result.kind
                 current_kind = result.next_turn
                 current_data = result.data
 
-                # → iteration_end 留在 dispatcher 层
                 if self._audit:
                     await self._audit.log_event("iteration_end", ctx.snapshot(), session_id=ctx.session_id)
 
             else:
-                # for-else: 达到 max_iterations
                 logger.warning(f"AgentLoop reached max iterations ({self._max_iterations})")
                 final_result = StreamResult(
                     text="达到最大迭代次数限制，终止执行。",
@@ -702,8 +664,6 @@ class AgentLoop:
                 )
 
         except asyncio.CancelledError:
-            # → cancelled 处理留在 dispatcher 层
-            # CancelledError 被 catch 且正常返回，Task 不会进入 cancelled 终态
             cancel_msg = "[系统] 操作已取消"
             logger.info(f"AgentLoop cancelled at iteration {ctx.iteration}")
 
