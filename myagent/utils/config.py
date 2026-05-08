@@ -78,9 +78,11 @@ class AgentConfig(BaseSettings):
     providers: list[ProviderConfig] = Field(default_factory=list)
     failover: FailoverConfig = Field(default_factory=FailoverConfig)
     audit: AuditConfig = Field(default_factory=AuditConfig)
-    timeout: TimeoutConfig = Field(default_factory=TimeoutConfig)
     hot_reload: HotReloadConfig = Field(default_factory=HotReloadConfig)
-    max_iterations: int = 25
+    max_iterations: int = 50
+    # ── 超时参数（分散在各分类中，此处直接声明）──
+    llm_timeout: float = 120.0          # LLM 流式生成超时（秒），对应 agent.llm_timeout
+    # ── 上下文 ──
     max_tokens_budget: int = 100000
     tool_result_max_chars: int = 4000
     system_prompt: str | None = None

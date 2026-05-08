@@ -428,14 +428,15 @@ class ToolTurn(BaseTurn):
 
         # 已完成的正常写入 context + 发射 hook 事件
         for tc, tr in completed:
+            latency = tr.metadata.get("latency_ms", 0)
+
             msg_result = MsgToolResult(
                 tool_call_id=tc.id,
                 tool_name=tc.name,
                 content=tr.content,
+                metadata={"latency_ms": latency},
             )
             self._context.add_tool_result(tc.id, msg_result)
-
-            latency = tr.metadata.get("latency_ms", 0)
             if tr.is_error:
                 if "denied_by" in tr.metadata:
                     await self._hooks.emit("safety_blocked",

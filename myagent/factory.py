@@ -26,7 +26,7 @@ import yaml
 
 from myagent.core.agent import Agent
 from myagent.core.hook import HookManager
-from myagent.utils.config import load_yaml_config, AgentConfig
+from myagent.utils.config import load_yaml_config, AgentConfig, TimeoutConfig
 from myagent.utils.logging import get_logger
 from myagent.providers.openai_provider import OpenAIProvider
 from myagent.providers.anthropic_provider import AnthropicProvider
@@ -132,7 +132,16 @@ class AgentFactory:
         # ── 7. 构建工具管理器 ──
         tool_manager = self._build_tool_manager(sandbox)
 
-        # ── 8. 组装 Agent ──
+        # ── 8. 从分散配置构建 TimeoutConfig ──
+        tools_cfg = self._app_config.get("tools", {})
+        hitl_cfg = self._app_config.get("hitl", {})
+        timeout_config = TimeoutConfig(
+            llm_generation=self._config_obj.llm_timeout,
+            tool_batch=tools_cfg.get("batch_timeout", 60.0),
+            human_approval=hitl_cfg.get("approval_timeout", 300.0),
+        )
+
+        # ── 9. 组装 Agent ──
         agent = Agent(
             provider_router=router,
             hooks=hooks,
@@ -143,7 +152,7 @@ class AgentFactory:
             secret_manager=secret_manager,
             approval_handler=approval_handler,
             audit_logger=audit_logger,
-            timeout_config=self._config_obj.timeout,
+            timeout_config=timeout_config,
             state_store=self._state_store,
             max_tokens_budget=self._config_obj.max_tokens_budget,
             context_window_size=self.context_window_size,

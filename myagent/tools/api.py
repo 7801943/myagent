@@ -8,6 +8,7 @@ MyAgent 工具 API 层 V3。
 - @tool: 工具声明装饰器
 - generate_schema: 函数自省 → JSON Schema
 """
+import inspect
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol, runtime_checkable
 
@@ -21,7 +22,17 @@ from pydantic import BaseModel, Field
 
 @dataclass
 class ToolResult:
-    """工具执行结果。统一替代 base.py:ToolResult 和 message.py:ToolResult。"""
+    """
+    工具执行结果封装。
+    
+    统一替代旧版本中的 base.py:ToolResult 和 message.py:ToolResult，
+    提供一个标准化的返回结构供 Agent 和 LLM 使用。
+    
+    Attributes:
+        content (str): 工具执行返回的文本内容，将直接喂给大模型。
+        is_error (bool): 标识工具执行是否发生错误，默认为 False。
+        metadata (dict): 附加的元数据信息（如执行耗时、原始数据等），不会直接展示给模型。
+    """
 
     content: str
     is_error: bool = False
@@ -34,7 +45,21 @@ class ToolResult:
 
 
 class ToolMeta(BaseModel):
-    """工具元数据。Pydantic 严格类型，替代旧 setattr 模式。"""
+    """
+    工具元数据配置。
+    
+    使用 Pydantic 实现严格的类型检查和默认值管理，
+    替代旧版本中直接使用 getattr/setattr 注入元数据的模式。
+    
+    Attributes:
+        category (str): 工具的分类，默认为 "custom"。
+        permission (str): 工具需要的权限级别，默认为 "standard"。
+        source (str): 工具的来源，例如 "local" 或 "mcp"。
+        timeout (float): 工具执行的超时时间（秒），默认 30.0 秒。
+        requires_network (bool): 是否需要网络连接。
+        requires_sandbox (bool): 是否需要在安全沙箱中运行。
+        extra (dict): 其他动态扩展配置项。
+    """
 
     category: str = "custom"
     permission: str = "standard"
@@ -63,7 +88,19 @@ class ToolMeta(BaseModel):
 
 @runtime_checkable
 class ToolLike(Protocol):
-    """工具的最小化协议。兼容现有 BaseTool 子类直接注册。"""
+    """
+    工具的最小化协议 (Protocol)。
+    
+    基于“鸭子类型”设计，只要对象实现了这里定义的属性和方法，
+    就可以作为工具直接被调度系统注册和使用，无需显式继承 BaseTool。
+    这极大提高了框架的灵活性，使得普通的 async 函数或第三方类可以轻松接入。
+    
+    Attributes:
+        name (str): 工具的唯一标识名称（建议仅包含字母、数字、下划线）。
+        description (str): 工具的详细描述，大模型严重依赖此描述判断何时及如何调用。
+        parameters_schema (dict): 符合 JSON Schema 规范的参数定义（对应 MCP 的 inputSchema）。
+        meta (ToolMeta | None): 附加的工具配置元数据。
+    """
 
     name: str
     description: str
@@ -87,13 +124,23 @@ def tool(
     """
     工具声明装饰器。
 
+    用于将普通的 async 函数快速包装并打上自定义的工具标签。
+    配合 generate_schema，可以将纯函数无缝转变为符合协议的工具。
+
+    Args:
+        name: 可选，覆盖函数原本的名称作为工具名。
+        description: 可选，覆盖函数原本的 docstring 作为工具描述。
+        timeout: 可选，设置该工具的执行超时时间。
+        permission: 可选，设置该工具的权限级别。
+
     用法:
         @tool(name="query_weather", timeout=15)
         async def query_weather(city: str = "Beijing") -> str:
-            '''查询天气'''
+            '''查询指定城市的天气情况'''
             ...
 
-    兼容性: 不加 @tool 的纯 async def 函数也会被 ToolManager 自动发现注册。
+    兼容性: 即使不显式添加 @tool 装饰器，符合规范的纯 async def 函数
+    也会被 ToolManager 等管理系统自动发现并注册为工具。
     """
 
     def decorator(func: Callable) -> Callable:
@@ -129,9 +176,18 @@ _TYPE_MAP: dict[type, str] = {
 
 
 def generate_schema(func: Callable) -> dict:
-    """从函数签名自动生成 JSON Schema。"""
-    import inspect
-
+    """
+    从函数签名自动生成 JSON Schema。
+    
+    通过自省 (introspect) 传入函数的参数列表、类型注解和默认值，
+    自动构建出大模型 API（或 MCP 协议等）所需的参数描述字典。
+    
+    Args:
+        func (Callable): 需要提取 Schema 的目标函数。
+        
+    Returns:
+        dict: 符合 JSON Schema 规范的字典对象。
+    """
     sig = inspect.signature(func)
     hints = _safe_get_type_hints(func) or {}
 
@@ -161,10 +217,12 @@ def generate_schema(func: Callable) -> dict:
 
 
 def extract_description(func: Callable) -> str:
-    """从 docstring 提取第一行作为简短描述。"""
+    """从 docstring 提取描述"""
     if not func.__doc__:
         return ""
-    return func.__doc__.strip().split("\n")[0].strip()
+    # return func.__doc__.strip().split("\n")[0].strip()
+    # 使用 inspect.cleandoc 可以自动处理掉代码缩进带来的多余空格，并保留所有行
+    return inspect.cleandoc(func.__doc__)
 
 
 def _safe_get_type_hints(func: Callable) -> dict | None:
