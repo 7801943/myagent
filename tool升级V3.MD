@@ -60,6 +60,7 @@ import time
 from typing import Any
 
 _MAX_CONCURRENT = 10               # 最大并发执行数
+_DEFAULT_MAX_OUTPUT_BYTES = 102400  # 默认最大输出字节数 (100KB)
 
 
 class ExecutionEngine:
@@ -69,16 +70,28 @@ class ExecutionEngine:
     在任意环境（subprocess/docker/remote）中行为一致。
     对于 CLI 命令使用排他锁串行执行，避免状态冲突；
     对于函数工具使用 asyncio.Semaphore 限制最大并发数。
+
+    输出截断长度（max_output_bytes）为实例属性，支持运行时动态修改。
     """
 
-    def __init__(self, sandbox_backend: str = "subprocess"):
+    def __init__(self, sandbox_backend: str = "subprocess", max_output_bytes: int = _DEFAULT_MAX_OUTPUT_BYTES):
         self._backend = sandbox_backend
         self._tool_cache: dict[str, tuple[Any, float]] = {}  # key → (module, mtime)
-        
+        self._max_output_bytes = max_output_bytes  # 运行时可修改
+
         # 函数工具允许并发，但限制最大并发数
         self._semaphore = asyncio.Semaphore(_MAX_CONCURRENT)
         # CLI 工具必须完全串行执行
         self._cli_lock = asyncio.Lock()
+
+    def set_max_output_bytes(self, max_bytes: int) -> None:
+        """运行时修改输出截断长度。供 JsonRpcServer 远程调用。"""
+        self._max_output_bytes = max_bytes
+
+    @property
+    def max_output_bytes(self) -> int:
+        """当前输出截断长度。"""
+        return self._max_output_bytes
 
     # ── CLI 命令 ──
 
@@ -240,8 +253,9 @@ class ExecutionEngine:
 
     # ── 输出截断 ──
 
-    def _truncate_output(self, data: bytes, max_bytes: int = 102400) -> str:
-        """截断超长输出 (100KB)。"""
+    def _truncate_output(self, data: bytes) -> str:
+        """截断超长输出。使用 self._max_output_bytes 作为阈值（运行时可修改）。"""
+        max_bytes = self._max_output_bytes
         if len(data) > max_bytes:
             truncated = data[:max_bytes]
             text = truncated.decode("utf-8", errors="replace")
@@ -259,6 +273,7 @@ class ExecutionEngine:
 import asyncio
 import json
 import logging
+import os
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -357,6 +372,12 @@ class JsonRpcProxy:
             "timeout": timeout or self._default_timeout,
             "cwd": cwd or os.getcwd(),
         }, timeout=timeout or self._default_timeout)
+
+    # ── 远程配置 ──
+
+    async def set_truncation(self, max_bytes: int) -> None:
+        """远程设置服务端输出截断长度（运行时动态修改）。"""
+        await self._send("set_truncation", {"max_bytes": max_bytes}, timeout=10.0)
 
     # ── 内部：请求/响应管理 ──
 
@@ -515,6 +536,11 @@ class JsonRpcServer:
         if method == "ping":
             return {"jsonrpc": "2.0", "result": "pong", "id": req_id}
 
+        if method == "set_truncation":
+            max_bytes = params.get("max_bytes", 102400)
+            self._engine.set_max_output_bytes(max_bytes)
+            return {"jsonrpc": "2.0", "result": {"max_output_bytes": max_bytes}, "id": req_id}
+
         if method == "execute":
             return await self._handle_execute(params, req_id)
 
@@ -655,15 +681,16 @@ class SubprocessTransport(Transport):
         self._register_exit_hooks()
 
         # 从管道构造 StreamReader / StreamWriter
+        loop = asyncio.get_running_loop()
         self._reader = asyncio.StreamReader()
         protocol = asyncio.StreamReaderProtocol(self._reader)
-        await asyncio.get_event_loop().connect_read_pipe(
+        await loop.connect_read_pipe(
             lambda: protocol, self._proc.stdout)
 
-        transport, _ = await asyncio.get_event_loop().connect_write_pipe(
+        transport, _ = await loop.connect_write_pipe(
             asyncio.streams.FlowControlMixin, self._proc.stdin)
         self._writer = asyncio.StreamWriter(
-            transport, None, self._reader, asyncio.get_event_loop())
+            transport, None, self._reader, loop)
 
         # 后台消费 stderr（防止缓冲区满死锁）
         self._drain_task = asyncio.create_task(self._drain_stderr())
@@ -680,7 +707,7 @@ class SubprocessTransport(Transport):
 
         atexit.register(_cleanup)
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             try:
                 loop.add_signal_handler(sig, _cleanup)
@@ -867,14 +894,15 @@ async def _pipe_main() -> None:
     engine = ExecutionEngine(sandbox_backend=backend)
     server = JsonRpcServer(engine)
 
+    loop = asyncio.get_running_loop()
     reader = asyncio.StreamReader()
     protocol = asyncio.StreamReaderProtocol(reader)
-    await asyncio.get_event_loop().connect_read_pipe(lambda: protocol, sys.stdin)
+    await loop.connect_read_pipe(lambda: protocol, sys.stdin)
 
-    transport, _ = await asyncio.get_event_loop().connect_write_pipe(
+    transport, _ = await loop.connect_write_pipe(
         asyncio.streams.FlowControlMixin, sys.stdout
     )
-    writer = asyncio.StreamWriter(transport, None, reader, asyncio.get_event_loop())
+    writer = asyncio.StreamWriter(transport, None, reader, loop)
 
     await server.serve(reader, writer)
 
@@ -955,33 +983,24 @@ async def execute(self, name: str, **args: Any) -> ToolResult:
     timeout = record.meta.timeout
 
     try:
-        # 代理尚未启动（ToolManager.start() 未调用）
-        if self._proxy is None:
-            # 文件工具和 MCP 可以不经过 proxy
-            if record.source == "mcp" and record.mcp_client:
-                return await self._execute_mcp(record, args)
-            if record.fn is not None:
-                return await self._execute_inprocess(record, args, timeout)
-            return ToolResult(
-                content="ToolManager not started: proxy unavailable for subprocess tools",
-                is_error=True,
-            )
-
-        # MCP 路径不变
+        # MCP 路径：独立通道，不经过 proxy
         if record.source == "mcp" and record.mcp_client:
             return await self._execute_mcp(record, args)
+
+        # 代理尚未启动（ToolManager.start() 未调用）
+        if self._proxy is None:
+            return ToolResult(
+                content="ToolManager not started: proxy unavailable",
+                is_error=True,
+            )
 
         # CLI 命令 → JsonRpcProxy.execute_cli()
         if record.name == "cli_execute":
             return await self._execute_proxy_cli(record, args, timeout)
 
-        # 函数工具 → JsonRpcProxy.execute_function()
+        # 所有函数工具（含内置 FileReadTool/FileWriteTool）→ JsonRpcProxy.execute_function()
         if record.file_path and record.fn_name:
             return await self._execute_proxy_function(record, args, timeout)
-
-        # 内置工具（FileReadTool/FileWriteTool）→ 进程中直接调用
-        if record.fn is not None:
-            return await self._execute_inprocess(record, args, timeout)
 
         return ToolResult(
             content=f"Tool '{name}' has no execution path configured",

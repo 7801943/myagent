@@ -6,12 +6,11 @@ AgentFactory：统一的 Agent 构建工厂。
 1. 加载配置文件（config.yaml）
 2. 构建 ProviderRouter（多模型路由）
 3. 构建安全系统（SafetyGuard + PolicyEngine + 规则链）
-4. 构建沙盒（SubprocessSandbox / DockerSandbox）
-5. 构建密钥管理（SecretManager）
-6. 构建工具注册表（CLITool + FileTools + MCP Tools）
-7. 构建审计日志器（AuditLogger）
-8. 加载系统提示词
-9. 组装 Agent 实例
+4. 构建密钥管理（SecretManager）
+5. 构建工具管理器（ToolManager）
+6. 构建审计日志器（AuditLogger）
+7. 加载系统提示词
+8. 组装 Agent 实例
 
 注意：
 - hooks 和 approval_handler 由调用方提供（CLI/WebSocket 的回调方式不同）
@@ -38,10 +37,6 @@ from myagent.safety.policy import PolicyEngine
 from myagent.safety.cli_fence import CLIFence
 from myagent.safety.content_rules import InputContentFilter, OutputContentFilter
 from myagent.tools.manager import ToolManager
-from myagent.runtime.sandbox import SubprocessSandbox
-from myagent.runtime.sandbox.subprocess_sandbox import ResourceLimits
-from myagent.tools.builtin.cli_tool import CLITool
-from myagent.tools.builtin.file_tools import FileReadTool, FileWriteTool
 from myagent.safety.secrets import SecretManager
 
 logger = get_logger(__name__)
@@ -123,14 +118,11 @@ class AgentFactory:
         # ── 4. 构建安全系统 ──
         safety_guard = self._build_safety_guard(no_safety=no_safety)
 
-        # ── 5. 构建沙盒 ──
-        sandbox = self._build_sandbox()
-
-        # ── 6. 构建密钥管理 ──
+        # ── 5. 构建密钥管理 ──
         secret_manager = self._build_secret_manager()
 
-        # ── 7. 构建工具管理器 ──
-        tool_manager = self._build_tool_manager(sandbox)
+        # ── 6. 构建工具管理器 ──
+        tool_manager = self._build_tool_manager()
 
         # ── 8. 从分散配置构建 TimeoutConfig ──
         tools_cfg = self._app_config.get("tools", {})
@@ -267,21 +259,6 @@ class AgentFactory:
         logger.info("SafetyGuard enabled with PolicyEngine + 3 rules")
         return safety_guard
 
-    def _build_sandbox(self) -> SubprocessSandbox:
-        """构建沙盒环境。
-
-        TODO: [MCP] FastMCP 协议支持后，MCP 工具的沙盒可能需要不同的隔离策略。
-        """
-        sandbox_cfg = self._app_config.get("sandbox", {})
-        return SubprocessSandbox(
-            limits=ResourceLimits(
-                max_cpu_seconds=sandbox_cfg.get("max_cpu_seconds", 30),
-                max_memory_mb=sandbox_cfg.get("max_memory_mb", 512),
-                max_output_bytes=sandbox_cfg.get("max_output_bytes", 102400),
-                timeout_seconds=sandbox_cfg.get("timeout_seconds", 60.0),
-            )
-        )
-
     def _build_secret_manager(self) -> SecretManager:
         """构建密钥管理器。"""
         secrets_cfg = self._app_config.get("secrets", {})
@@ -290,18 +267,18 @@ class AgentFactory:
             sensitive_fields=secrets_cfg.get("sensitive_fields"),
         )
 
-    def _build_tool_manager(self, sandbox: SubprocessSandbox) -> ToolManager:
-        """构建工具管理器。
-
-        注册内置工具到 ToolManager。
-        """
+    def _build_tool_manager(self) -> ToolManager:
         hr_cfg = self._config_obj.hot_reload
-        tools_dir = hr_cfg.watch_dir if hr_cfg and hr_cfg.enabled else "myagent/tools/tools_store"
+        tools_dir = (hr_cfg.watch_dir
+                     if hr_cfg and hr_cfg.enabled
+                     else "myagent/tools/tools_store")
 
-        manager = ToolManager(tools_dir=tools_dir)
-        manager.register(CLITool(sandbox))
-        manager.register(FileReadTool())
-        manager.register(FileWriteTool())
-        logger.info("Registered builtin tools: cli_execute, file_read, file_write")
+        runner_cfg = self._app_config.get("sandbox", {})
+
+        manager = ToolManager(tools_dir=tools_dir,
+                              runner_config=runner_cfg)
+        manager._register_builtin_tools()
+        logger.info(
+            "Registered builtin tools: cli_execute, file_read, file_write")
         return manager
 
