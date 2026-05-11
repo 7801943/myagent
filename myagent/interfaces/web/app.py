@@ -33,7 +33,7 @@ from myagent.interfaces.web.dependencies import (
     init_services,
     startup,
     shutdown,
-    get_agent_factory,
+    get_session_manager,
     get_state_store,
 )
 from myagent.interfaces.web.ws_handler import WebSocketHandler
@@ -92,9 +92,9 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
     @app.websocket("/ws")
     async def websocket_endpoint(ws: WebSocket):
         """WebSocket 端点：Agent 实时交互。"""
-        factory = get_agent_factory()
+        session_manager = get_session_manager()
         store = get_state_store()
-        handler = WebSocketHandler(ws, factory, store)
+        handler = WebSocketHandler(ws, session_manager, store)
         await handler.run()
 
     # ── 静态文件挂载（必须放在最后，否则会拦截所有路由）──

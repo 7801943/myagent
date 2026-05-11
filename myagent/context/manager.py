@@ -2,11 +2,23 @@
 ContextManager：管理消息历史，预留 TokenBudget 三层控制（V3 核心）。
 三层结构：[System Prompt] + [Summary Memory] + [Recent N 轮原话]
 Phase 1 实现基础的消息管理 + Token 估算 + 工具结果强截断。
+
+Phase 1 重构：
+  - add_* 方法改为 async，每条消息添加时实时写入数据库
+  - 调用端无需考虑批量 flush，吞吐优化由 DB 层负责
 """
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from myagent.context.message import Message, ContentBlock, ToolResult
 from myagent.utils.logging import get_logger
 
+if TYPE_CHECKING:
+    from myagent.context.state import StateStore
+
 logger = get_logger(__name__)
+
 
 class ContextManager:
     def __init__(
@@ -15,6 +27,8 @@ class ContextManager:
         context_window_size: int = 200000,
         tool_result_max_chars: int = 200000,
         recent_turns: int = 20,
+        state_store: "StateStore | None" = None,
+        session_id: str | None = None,
     ):
         self._messages: list[Message] = []
         self._system_prompt: str | None = None
@@ -23,6 +37,9 @@ class ContextManager:
         self._tool_result_max_chars = tool_result_max_chars
         self._recent_turns = recent_turns
         self._last_usage_input_tokens: int = 0
+        # 实时持久化
+        self._state_store = state_store
+        self._session_id = session_id
 
     @property
     def messages(self) -> list[Message]:
@@ -50,17 +67,22 @@ class ContextManager:
         self._messages = [m for m in self._messages if m.role != "system"]
         self._messages.insert(0, Message(role="system", content=prompt))
 
-    def add_user_message(self, content: str | list[ContentBlock]) -> None:
+    async def add_user_message(self, content: str | list[ContentBlock]) -> None:
+        """添加用户消息 + 实时持久化。"""
         self._messages.append(Message(role="user", content=content))
+        await self._persist_messages()
 
-    def add_assistant_message(self, content: str, tool_calls=None) -> None:
+    async def add_assistant_message(self, content: str, tool_calls=None) -> None:
+        """添加助手消息 + 实时持久化。"""
         self._messages.append(Message(
             role="assistant", content=content, tool_calls=tool_calls
         ))
+        await self._persist_messages()
 
-    def add_tool_result(self, tool_call_id: str, result: ToolResult) -> None:
+    async def add_tool_result(self, tool_call_id: str, result: ToolResult) -> None:
         """
-        添加工具结果。V3 关键：强制截断超长工具输出，防止上下文爆窗。
+        添加工具结果 + 实时持久化。
+        V3 关键：强制截断超长工具输出，防止上下文爆窗。
         支持 str 和 list[ContentBlock] 两种 content 类型。
         """
         content = result.content
@@ -97,6 +119,7 @@ class ContextManager:
             content=content,
             tool_call_id=tool_call_id,
         ))
+        await self._persist_messages()
 
     def get_messages(self) -> list[Message]:
         """
@@ -138,3 +161,12 @@ class ContextManager:
             if msg.role == "system":
                 self._system_prompt = msg.content if isinstance(msg.content, str) else None
                 break
+
+    async def _persist_messages(self) -> None:
+        """实时写入数据库。调用端无需关心。"""
+        if self._state_store and self._session_id:
+            await self._state_store.save_messages(self._session_id, self._messages)
+
+    async def flush(self) -> None:
+        """强制刷新（供 Session 在状态变更时调用）。"""
+        await self._persist_messages()

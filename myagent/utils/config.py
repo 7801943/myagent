@@ -1,6 +1,11 @@
 """
 配置加载：YAML 文件 + 环境变量覆盖。
 环境变量用 ${VAR_NAME} 语法在 YAML 中引用。
+
+Phase 1 重构：
+  - 删除 AuditConfig（审计功能由标准 logger 替代）
+  - 删除 TimeoutConfig（超时简化为模块级常量）
+  - AgentConfig 中删除 audit 字段
 """
 import os
 import re
@@ -51,21 +56,6 @@ class FailoverConfig(BaseModel):
     circuit_breaker_failure_threshold: int = 3
     circuit_breaker_recovery_seconds: int = 60
 
-class AuditConfig(BaseModel):
-    enabled: bool = True
-    level: str = "standard"
-    environment: str = "dev"
-    queue_size: int = 2000
-    jsonl_log_dir: str = "./audit_logs"
-    jsonl_retention_days: int = 90
-
-class TimeoutConfig(BaseModel):
-    """超时配置。"""
-    llm_generation: float = 120.0      # LLM 流式生成超时（秒）
-    tool_batch: float = 60.0           # 工具批量执行超时（秒）
-    iteration: float = 300.0           # 单次 ReAct 迭代超时（秒）
-    human_approval: float = 300.0      # 人工审批等待超时（秒）
-
 class HotReloadConfig(BaseModel):
     """工具热加载配置。"""
     enabled: bool = False
@@ -77,11 +67,10 @@ class AgentConfig(BaseSettings):
     """Agent 全局配置，支持 YAML 文件加载和环境变量覆盖。"""
     providers: list[ProviderConfig] = Field(default_factory=list)
     failover: FailoverConfig = Field(default_factory=FailoverConfig)
-    audit: AuditConfig = Field(default_factory=AuditConfig)
     hot_reload: HotReloadConfig = Field(default_factory=HotReloadConfig)
     max_iterations: int = 50
-    # ── 超时参数（分散在各分类中，此处直接声明）──
-    llm_timeout: float = 120.0          # LLM 流式生成超时（秒），对应 agent.llm_timeout
+    # ── 超时参数 ──
+    llm_timeout: float = 120.0          # LLM 流式生成超时（秒）
     # ── 上下文 ──
     max_tokens_budget: int = 100000
     tool_result_max_chars: int = 4000

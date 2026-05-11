@@ -1,8 +1,12 @@
 """
 CLI 主入口：交互式 ReAct 循环。
-User Input → Agent.run() → Stream → UI 渲染。
+User Input → Session.chat() → Stream → UI 渲染。
 
-重构：使用 AgentFactory 替代手动构建 Agent，消除与 WebSocket 的重复代码。
+Phase 1 变更：
+  - 导入路径 myagent.factory → myagent.core.factory
+  - 使用 SessionManager/UserContext 创建会话
+  - agent.run(text) → session.chat(text)
+  - agent.create_session() → session_manager.create_session()
 """
 from __future__ import annotations
 
@@ -11,8 +15,9 @@ import click
 import sys
 from pathlib import Path
 
-from myagent.core.agent import Agent
-from myagent.factory import AgentFactory
+from myagent.core.factory import AgentFactory
+from myagent.core.session_manager import SessionManager, UserContext
+from myagent.core.session import Session
 from myagent.core.hook import HookManager
 from myagent.context.message import ToolCall
 from myagent.interfaces.cli.ui import CliUI, print_warning
@@ -44,12 +49,14 @@ def chat(ctx, message, session_id, system_prompt, show_tools, image, no_safety):
     asyncio.run(_chat(ctx.obj["config_path"], message, session_id, system_prompt, show_tools, image, no_safety))
 
 
-async def interactive_loop(agent: Agent) -> None:
+async def interactive_loop(session: Session) -> None:
     """启动交互式 CLI 循环。支持 @image <path> 语法附带图像。"""
     ui = CliUI()
     ui.print("🤖 MyAgent CLI — 输入 'exit' 或 'quit' 退出")
     ui.print("   💡 附带图像: 在消息中使用 @image <文件路径>")
     ui.print("   💡 示例: 描述这张图片 @image photo.jpg @image diagram.png\n")
+
+    agent = session._agent
 
     while True:
         try:
@@ -100,44 +107,31 @@ async def interactive_loop(agent: Agent) -> None:
 
                 ui.print(f"  → 共加载 {loaded} 张图像，正在发送...\n")
                 ui.print("🤖 Assistant: ")
-                response = await agent.run(content_blocks)
+                response = await session.chat(content_blocks)
             else:
                 # 纯文本模式
                 ui.print("\n🤖 Assistant: ")
-                response = await agent.run(text)
+                response = await session.chat(text)
 
             ui.print(f"\n\n{response}\n")
         except Exception as e:
             ui.print_error(f"执行出错: {e}")
-            logger.exception("Agent run failed")
+            logger.exception("Session chat failed")
 
 
 def _parse_image_refs(user_input: str) -> tuple[str, list[str]]:
     """
     从用户输入中解析 @image <path> 引用。
-
-    Args:
-        user_input: 原始用户输入
-
-    Returns:
-        (纯文本部分, 图像路径列表)
-
-    示例:
-        "描述这张图 @image photo.jpg" -> ("描述这张图", ["photo.jpg"])
-        "对比 @image a.png @image b.png" -> ("对比", ["a.png", "b.png"])
     """
     import re
     image_paths: list[str] = []
 
-    # 匹配 @image 后跟路径（支持空格路径用引号包裹）
     pattern = r'@image\s+(?:"([^"]+)"|\'([^\']+)\'|(\S+))'
     for match in re.finditer(pattern, user_input):
         path = match.group(1) or match.group(2) or match.group(3)
         image_paths.append(path)
 
-    # 移除所有 @image 引用，留下纯文本
     text = re.sub(pattern, '', user_input).strip()
-    # 清理多余空格
     text = re.sub(r'\s+', ' ', text).strip()
 
     return text, image_paths
@@ -147,7 +141,7 @@ async def _chat(
     config_path: str, message: str | None, session_id: str | None, system_prompt: str | None,
     show_tools: bool = False, images: tuple = (), no_safety: bool = False
 ):
-    # 使用 AgentFactory 构建 Agent（共享构建逻辑）
+    # 使用 AgentFactory（从 core/factory.py）
     factory = AgentFactory(config_path=config_path)
 
     # 准备 Hooks（CLI 特有的终端打印回调）
@@ -192,19 +186,28 @@ async def _chat(
             return decisions
         approval_handler = _cli_approval_handler
 
-    # 通过工厂创建 Agent
-    agent = factory.create_agent(
+    # 创建默认用户上下文
+    user = UserContext(user_id="cli_default", username="CLI User")
+
+    # 创建 SessionManager 并创建会话
+    session_manager = SessionManager(factory=factory)
+    session = session_manager.create_session(
+        user=user,
+        session_id=session_id,
         hooks=hooks,
         approval_handler=approval_handler,
         no_safety=no_safety,
+        system_prompt=system_prompt,
+        context_window_size=factory.context_window_size,
     )
 
-    # 创建会话（如果指定了 session_id）
-    session = agent.create_session(session_id=session_id)
+    agent = session._agent
 
-    # 覆盖系统提示词（如果命令行指定了）
-    if system_prompt:
-        session.context.set_system(system_prompt)
+    # 启动工具热加载
+    try:
+        await agent.start_hot_reload()
+    except Exception as e:
+        logger.warning(f"Hot reload start failed (non-fatal): {e}")
 
     try:
         if images:
@@ -221,24 +224,23 @@ async def _chat(
             for img_path in images:
                 block = await handler.prepare(img_path, provider_type=provider_type)
                 content_blocks.append(block)
-            
-            session.context.add_user_message(content_blocks)
+
             try:
-                response = await agent.run("")
+                response = await session.chat(content_blocks)
                 ui.print(f"\n\n🤖 Assistant: {response}\n")
             except asyncio.CancelledError:
                 ui.print("\n\n⚠ 操作已取消\n")
             except Exception as e:
-                logger.error(f"Agent run error: {e}")
+                logger.error(f"Session chat error: {e}")
                 ui.print_error(f"执行出错: {e}")
         elif message:
             try:
-                response = await agent.run(message)
+                response = await session.chat(message)
                 ui.print(f"\n\n🤖 Assistant: {response}\n")
             except asyncio.CancelledError:
                 ui.print("\n\n⚠ 操作已取消\n")
         else:
-            await interactive_loop(agent)
+            await interactive_loop(session)
     finally:
         # 清理：停止热加载器
         await agent.stop_hot_reload()

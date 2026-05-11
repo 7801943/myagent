@@ -1,37 +1,26 @@
 """
 AgentFactory：统一的 Agent 构建工厂。
-从 CLI 和 WebSocket 的重复构建逻辑中抽取，确保两个接口共享相同的组件初始化流程。
+从 myagent/factory.py 移入 core/，Phase 1 简化。
 
-职责：
-1. 加载配置文件（config.yaml）
-2. 构建 ProviderRouter（多模型路由）
-3. 构建安全系统（SafetyGuard + PolicyEngine + 规则链）
-4. 构建密钥管理（SecretManager）
-5. 构建工具管理器（ToolManager）
-6. 构建审计日志器（AuditLogger）
-7. 加载系统提示词
-8. 组装 Agent 实例
-
-注意：
-- hooks 和 approval_handler 由调用方提供（CLI/WebSocket 的回调方式不同）
-- 未来扩展：
-  - [AUTH] 用户鉴权后可按用户维度隔离 Agent 实例
-  - [MCP] FastMCP 协议工具将在此处注册到 ToolRegistry
+Phase 1 变更：
+  - 删除 audit_logger 相关代码
+  - 删除 TimeoutConfig（超时简化为模块级常量）
+  - 删除 state_store 参数（Session 层面管理）
+  - 返回纯 Agent（无 session 管理）
 """
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Awaitable
 
 import yaml
 
 from myagent.core.agent import Agent
 from myagent.core.hook import HookManager
-from myagent.utils.config import load_yaml_config, AgentConfig, TimeoutConfig
+from myagent.core.hook import HookContext
+from myagent.utils.config import load_yaml_config, AgentConfig
 from myagent.utils.logging import get_logger
 from myagent.providers.openai_provider import OpenAIProvider
 from myagent.providers.anthropic_provider import AnthropicProvider
 from myagent.providers.router import ProviderRouter
-from myagent.observability.audit_logger import AuditLogger
-from myagent.observability.backends.jsonl_backend import JsonlAuditBackend
 from myagent.safety.guard import SafetyGuard
 from myagent.safety.policy import PolicyEngine
 from myagent.safety.cli_fence import CLIFence
@@ -54,22 +43,22 @@ class AgentFactory:
     def __init__(
         self,
         config_path: str = "config.yaml",
-        state_store=None,
     ):
         """
         初始化工厂，加载并缓存配置。
 
         Args:
             config_path: YAML 配置文件路径
-            state_store: 可选的 StateStore 实例（用于会话持久化）
         """
         self._config_path = config_path
-        self._state_store = state_store
 
         # 加载配置（只加载一次）
         self._raw = load_yaml_config(config_path)
         self._app_config = self._raw.get("agent", self._raw) if self._raw else {}
         self._config_obj = AgentConfig(**self._app_config)
+
+        # 预加载系统提示词（供外部通过 factory.system_prompt 获取）
+        self._system_prompt: str = self._load_system_prompt()
 
     @property
     def context_window_size(self) -> int:
@@ -77,6 +66,11 @@ class AgentFactory:
         if self._config_obj.providers:
             return self._config_obj.providers[0].context_window_size
         return 128000
+
+    @property
+    def system_prompt(self) -> str:
+        """获取系统提示词。"""
+        return self._system_prompt
 
     @property
     def config(self) -> AgentConfig:
@@ -92,16 +86,16 @@ class AgentFactory:
         self,
         *,
         hooks: HookManager,
-        approval_handler=None,
+        approval_handler: Callable[[list], Awaitable[list[bool]]] | None = None,
         no_safety: bool = False,
     ) -> Agent:
         """
-        创建完整的 Agent 实例。
+        创建纯 Agent 实例（无 session 管理）。
 
         Args:
-            hooks: 由调用方构建的 HookManager（CLI 用终端打印，WebSocket 用 JSON 推送）
-            approval_handler: 可选的人工审批回调 async (tool_calls) -> list[bool]
-            no_safety: 是否禁用安全检查（仅 CLI 调试用）
+            hooks: 由调用方构建的 HookManager
+            approval_handler: 可选的人工审批回调
+            no_safety: 是否禁用安全检查
 
         Returns:
             完全配置好的 Agent 实例
@@ -109,46 +103,28 @@ class AgentFactory:
         # ── 1. 构建 ProviderRouter ──
         router = self._build_router()
 
-        # ── 2. 构建审计日志器 ──
-        audit_logger = self._build_audit_logger()
-
-        # ── 3. 加载系统提示词 ──
+        # ── 2. 加载系统提示词 ──
         system_prompt = self._load_system_prompt()
+        self._system_prompt = system_prompt  # 缓存供外部获取
 
-        # ── 4. 构建安全系统 ──
+        # ── 3. 构建安全系统 ──
         safety_guard = self._build_safety_guard(no_safety=no_safety)
 
-        # ── 5. 构建密钥管理 ──
+        # ── 4. 构建密钥管理 ──
         secret_manager = self._build_secret_manager()
 
-        # ── 6. 构建工具管理器 ──
+        # ── 5. 构建工具管理器 ──
         tool_manager = self._build_tool_manager()
 
-        # ── 8. 从分散配置构建 TimeoutConfig ──
-        tools_cfg = self._app_config.get("tools", {})
-        hitl_cfg = self._app_config.get("hitl", {})
-        timeout_config = TimeoutConfig(
-            llm_generation=self._config_obj.llm_timeout,
-            tool_batch=tools_cfg.get("batch_timeout", 60.0),
-            human_approval=hitl_cfg.get("approval_timeout", 300.0),
-        )
-
-        # ── 9. 组装 Agent ──
+        # ── 6. 组装 Agent ──
         agent = Agent(
             provider_router=router,
             hooks=hooks,
             tool_manager=tool_manager,
-            system_prompt=system_prompt,
-            max_iterations=self._config_obj.max_iterations,
             safety_guard=safety_guard,
             secret_manager=secret_manager,
+            max_iterations=self._config_obj.max_iterations,
             approval_handler=approval_handler,
-            audit_logger=audit_logger,
-            timeout_config=timeout_config,
-            state_store=self._state_store,
-            max_tokens_budget=self._config_obj.max_tokens_budget,
-            context_window_size=self.context_window_size,
-            tool_result_max_chars=self._config_obj.tool_result_max_chars,
         )
 
         logger.info("Agent created")
@@ -176,18 +152,6 @@ class AgentFactory:
             raise RuntimeError("未配置任何 Provider，请检查 config.yaml")
 
         return ProviderRouter(providers)
-
-    def _build_audit_logger(self) -> AuditLogger | None:
-        """构建审计日志器。"""
-        if not self._config_obj.audit.enabled:
-            return None
-
-        audit_dir = Path(self._config_obj.audit.jsonl_log_dir)
-        audit_dir.mkdir(parents=True, exist_ok=True)
-        jsonl_backend = JsonlAuditBackend(
-            file_path=f"{self._config_obj.audit.jsonl_log_dir}/audit.jsonl"
-        )
-        return AuditLogger(backend=jsonl_backend)
 
     def _load_system_prompt(self) -> str:
         """加载系统提示词（从配置或文件）。"""
@@ -281,4 +245,3 @@ class AgentFactory:
         logger.info(
             "Registered builtin tools: cli_execute, file_read, file_write")
         return manager
-

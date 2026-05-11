@@ -2,8 +2,13 @@
 StateStore：会话状态持久化。
 V3 核心变更 —— 显式状态机的持久化保障，使得断线恢复成为可能。
 
+Phase 1 重构：
+  - AgentState 重命名为 AgentRunState（Agent 运行时状态）
+  - 新增 SessionState（会话生命周期状态：active/suspended/closed）
+  - sessions 表新增 session_state 列
+
 表结构：
-  - sessions: session_id, agent_state(枚举), metadata(JSON), updated_at
+  - sessions: session_id, agent_state(枚举), session_state(枚举), metadata(JSON), updated_at
   - messages: session_id, seq, message_json, created_at
   - pending_tool_calls: session_id, tool_call_id, tool_call_json, status, result_json
 """
@@ -20,9 +25,17 @@ from myagent.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-class AgentState(str, Enum):
+
+class SessionState(str, Enum):
+    """会话生命周期状态。"""
+    ACTIVE = "active"           # 活跃
+    SUSPENDED = "suspended"     # 挂起（用户离线但保留状态）
+    CLOSED = "closed"           # 已关闭
+
+
+class AgentRunState(str, Enum):
     """
-    V3 显式状态机的核心枚举。
+    Agent 运行时状态（原 AgentState，重命名以区分 SessionState）。
     AgentLoop 的每一次状态变迁都必须先持久化到 StateStore，
     再执行实际操作——这是断电恢复的基石。
     """
@@ -33,6 +46,9 @@ class AgentState(str, Enum):
     WAITING_HITL = "waiting_hitl"    # 等待人工审批（Phase 2 预留）
     ERROR = "error"                  # 发生错误
 
+
+# 向后兼容别名
+AgentState = AgentRunState
 
 # ── 旧状态值迁移映射 ──
 # 精简重构时移除了 RUNNING / FINISHED，但旧数据库中可能仍存储了这些值。
@@ -46,10 +62,10 @@ class StateStore(ABC):
     """状态持久化抽象接口。"""
 
     @abstractmethod
-    async def save_state(self, session_id: str, state: AgentState, metadata: dict | None = None) -> None: ...
+    async def save_state(self, session_id: str, state: AgentRunState, metadata: dict | None = None) -> None: ...
 
     @abstractmethod
-    async def load_state(self, session_id: str) -> tuple[AgentState, dict]:
+    async def load_state(self, session_id: str) -> tuple[AgentRunState, dict]:
         """返回 (当前状态, metadata)。不存在时返回 (IDLE, {})。"""
         ...
 
@@ -120,11 +136,18 @@ class SQLiteStateStore(StateStore):
         """)
         await self._db.commit()
 
+        # 安全添加 session_state 列（Phase 1 新增，已存在则忽略）
+        try:
+            await self._db.execute("ALTER TABLE sessions ADD COLUMN session_state TEXT DEFAULT 'active'")
+            await self._db.commit()
+        except Exception:
+            pass  # 列已存在
+
     async def close(self) -> None:
         if self._db:
             await self._db.close()
 
-    async def save_state(self, session_id: str, state: AgentState, metadata: dict | None = None) -> None:
+    async def save_state(self, session_id: str, state: AgentRunState, metadata: dict | None = None) -> None:
         now = datetime.now(timezone.utc).isoformat()
         meta_json = json.dumps(metadata or {}, ensure_ascii=False)
         await self._db.execute(
@@ -139,17 +162,31 @@ class SQLiteStateStore(StateStore):
         await self._db.commit()
         logger.debug(f"State saved: session={session_id}, state={state.value}")
 
-    async def load_state(self, session_id: str) -> tuple[AgentState, dict]:
+    async def load_state(self, session_id: str) -> tuple[AgentRunState, dict]:
         async with self._db.execute(
             "SELECT agent_state, metadata FROM sessions WHERE session_id = ?",
             (session_id,),
         ) as cursor:
             row = await cursor.fetchone()
             if row is None:
-                return AgentState.IDLE, {}
+                return AgentRunState.IDLE, {}
             # 兼容旧数据库中的已废弃状态值（running / finished）
             state_str = _LEGACY_STATE_MAP.get(row[0], row[0])
-            return AgentState(state_str), json.loads(row[1])
+            return AgentRunState(state_str), json.loads(row[1])
+
+    async def save_session_state(self, session_id: str, session_state: SessionState) -> None:
+        """保存会话生命周期状态。"""
+        now = datetime.now(timezone.utc).isoformat()
+        # 确保会话行存在
+        await self._db.execute(
+            """INSERT INTO sessions (session_id, agent_state, session_state, metadata, updated_at)
+               VALUES (?, 'idle', ?, '{}', ?)
+               ON CONFLICT(session_id) DO UPDATE SET
+                 session_state = excluded.session_state,
+                 updated_at = excluded.updated_at""",
+            (session_id, session_state.value, now),
+        )
+        await self._db.commit()
 
     async def save_messages(self, session_id: str, messages: list[Message]) -> None:
         now = datetime.now(timezone.utc).isoformat()
@@ -208,7 +245,7 @@ class SQLiteStateStore(StateStore):
     async def list_all_sessions(self) -> list[dict]:
         """返回所有会话的摘要信息列表，按更新时间倒序。"""
         async with self._db.execute(
-            "SELECT session_id, agent_state, metadata, updated_at FROM sessions ORDER BY updated_at DESC"
+            "SELECT session_id, agent_state, metadata, updated_at, session_state FROM sessions ORDER BY updated_at DESC"
         ) as cursor:
             rows = await cursor.fetchall()
             result = []
@@ -221,6 +258,7 @@ class SQLiteStateStore(StateStore):
                     "agent_state": state_str,
                     "metadata": meta,
                     "updated_at": row[3],
+                    "session_state": row[4] or "active",
                 })
             return result
 

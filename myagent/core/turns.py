@@ -1,5 +1,10 @@
 """
-AgentLoop + Turn 抽象层：ReAct 循环引擎与 Turn 执行单元。
+Turn 抽象层：ReAct 循环的执行单元。
+
+从 loop.py 提取，Phase 1 简化：
+  - 删除 audit 参数，改用标准 logger
+  - 看门狗简化为模块级常量
+  - context.add_* 调用加 await（ContextManager 异步化）
 
 Turn 抽象：
   BaseTurn   — 模板方法（看门狗 + 生命周期钩子 + 统一异常处理）
@@ -7,22 +12,9 @@ Turn 抽象：
   ModelTurn  — LLM 流式生成（包含 StreamProcessor + Hook 分发 + context 写入）
   ToolTurn   — 工具批量执行（包含安全分拣 + 人工审批 + 结果分发 + context 写入）
 
-状态机路由（由 AgentLoop dispatcher 驱动）：
+状态机路由（由 Agent.run() dispatcher 驱动）：
   SYSTEM → MODEL → TOOL → MODEL（系统指令 → LLM → 工具含审批 → LLM）
   MODEL → None（无工具调用，结束）
-
-设计决策：
-- Turn 是一次性执行器
-- Turn 自己声明下一步（状态机模式）
-- Hook 旁路分发（保持现有流式消费模式）
-
-保留在 dispatcher 层的职责：
-- cancelled 异常处理（asyncio.CancelledError，跨 Turn 的全局事件）
-- max_iterations 控制
-
-取消机制：由 asyncio.Task.cancel() 驱动，CancelledError 在 await 点自动抛出，
-AgentLoop 统一 catch 后写入取消消息并返回 StreamResult（不 re-raise），
-使 Task 正常完成，支持后续恢复执行。
 """
 import asyncio
 import re
@@ -37,11 +29,12 @@ from myagent.context.manager import ContextManager
 from myagent.context.message import ToolCall, ToolResult as MsgToolResult, ContentBlock
 from myagent.core.hook import HookContext, HookManager
 from myagent.providers.base import StreamEvent
-from myagent.tools.manager import ToolManager
-from myagent.observability.audit_logger import AuditLogger
 from myagent.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+# ── 看门狗默认超时常量（秒）──
+_DEFAULT_TIMEOUT = 120.0
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -94,7 +87,7 @@ class BaseTurn(ABC):
     """
     Turn 基类，封装横切关注点：
     - 生命周期钩子（turn_start / turn_end / turn_error）
-    - 统一异常处理（state_change→error, error hook, audit 日志）
+    - 统一异常处理（state_change→error, error hook, logger）
     - 看门狗超时（Turn 执行期间）
     - 清理（finally 中取消看门狗）
     - 取消由 asyncio.CancelledError 自动传播，无需手动检查
@@ -105,19 +98,17 @@ class BaseTurn(ABC):
     def __init__(
         self,
         hooks: HookManager,
-        audit: AuditLogger | None,
-        watchdog_timeout: float,
+        timeout: float = _DEFAULT_TIMEOUT,
     ):
         self._hooks = hooks
-        self._audit = audit
-        self._timeout = watchdog_timeout
+        self._timeout = timeout
 
     async def execute(self, ctx: HookContext, input_data: Any = None, source: TurnKind | None = None) -> TurnResult:
         """
         模板方法：turn_start → 子类逻辑 → turn_end → 清理。
         source: 上一个 Turn 的类型（保留接口兼容性，当前不再使用）。
         异常路径：统一 emit state_change(error), error, turn_error → raise。
-        取消路径：CancelledError 直接向上传播（由 AgentLoop 统一处理）。
+        取消路径：CancelledError 直接向上传播（由 Agent 统一处理）。
         """
         start = time.monotonic()
         watchdog = asyncio.create_task(self._watchdog(ctx))
@@ -137,10 +128,7 @@ class BaseTurn(ABC):
             await self._hooks.emit("state_change", ctx, state="error")
             await self._hooks.emit("error", ctx, error=e)
             await self._hooks.emit(f"{self.kind.name.lower()}_turn_error", ctx, error=e)
-            if self._audit:
-                await self._audit.log_event("error", {
-                    "error": str(e), "error_type": type(e).__name__,
-                }, session_id=ctx.session_id)
+            logger.error(f"{self._stage_name} error: {e}", exc_info=True)
             raise
 
         finally:
@@ -158,13 +146,7 @@ class BaseTurn(ABC):
             timeout_seconds=self._timeout,
             message=f"{self._stage_name} 已超过 {self._timeout}s，您可以选择继续等待或取消操作",
         )
-        if self._audit:
-            await self._audit.emit_timeout(
-                stage=self._stage_name,
-                timeout_seconds=self._timeout,
-                session_id=ctx.session_id,
-                iteration=ctx.iteration,
-            )
+        logger.warning(f"Timeout warning: {self._stage_name} exceeded {self._timeout}s")
 
     @property
     @abstractmethod
@@ -197,11 +179,10 @@ class SystemTurn(BaseTurn):
         self,
         context: ContextManager,
         hooks: HookManager,
-        audit: AuditLogger | None,
-        watchdog_timeout: float,
+        timeout: float = 30.0,
         system_command_handler: Callable[[str, str, HookContext], Awaitable[None]] | None = None,
     ):
-        super().__init__(hooks, audit, watchdog_timeout)
+        super().__init__(hooks, timeout)
         self._context = context
         self._handler = system_command_handler
 
@@ -220,10 +201,7 @@ class SystemTurn(BaseTurn):
                 await self._hooks.emit("system_command", ctx, command=cmd, args=args)
                 if self._handler:
                     await self._handler(cmd, args, ctx)
-                if self._audit:
-                    await self._audit.log_event("system_command", {
-                        "command": cmd, "args": args,
-                    }, session_id=ctx.session_id)
+                logger.info(f"System command: /{cmd} {args}")
 
         return TurnResult(kind=TurnKind.SYSTEM, next_turn=TurnKind.MODEL)
 
@@ -233,7 +211,7 @@ class ModelTurn(BaseTurn):
     LLM 流式生成 Turn。
     职责：
     1. 流式调用 Provider → 事件聚合 → Hook 分发（原 StreamProcessor 已溶解到此类）
-    2. 写入 assistant 消息到 context
+    2. 写入 assistant 消息到 context（await）
     3. 决定下一步：有 tool_calls → TOOL，无 → None（结束）
     """
     kind = TurnKind.MODEL
@@ -245,10 +223,9 @@ class ModelTurn(BaseTurn):
         context: ContextManager,
         tool_schemas: list | None,
         hooks: HookManager,
-        audit: AuditLogger | None,
-        watchdog_timeout: float,
+        timeout: float = _DEFAULT_TIMEOUT,
     ):
-        super().__init__(hooks, audit, watchdog_timeout)
+        super().__init__(hooks, timeout)
         self._router = provider_router
         self._context = context
         self._tool_schemas = tool_schemas
@@ -265,8 +242,7 @@ class ModelTurn(BaseTurn):
 
         await self._hooks.emit("state_change", ctx, state="thinking")
 
-        if self._audit:
-            await self._audit.log_event("provider_call_start", ctx.snapshot(), session_id=ctx.session_id)
+        logger.debug(f"Provider call start: session={ctx.session_id}")
 
         messages = self._context.get_messages()
         tools = self._tool_schemas
@@ -289,16 +265,13 @@ class ModelTurn(BaseTurn):
         if self._hooks.wants_streaming():
             await self._hooks.emit("stream_end", ctx, resuming=bool(result.tool_calls))
 
-        if self._audit:
-            await self._audit.log_event("provider_call_end", {
-                "stop_reason": result.stop_reason or "",
-                "usage": result.usage,
-            }, session_id=ctx.session_id)
+        logger.debug(f"Provider call end: stop_reason={result.stop_reason}, usage={result.usage}")
 
         if result.usage:
             self._context.update_usage(result.usage)
 
-        self._context.add_assistant_message(
+        # context.add_* 方法现在是 async
+        await self._context.add_assistant_message(
             content=result.text,
             tool_calls=result.tool_calls if result.tool_calls else None,
         )
@@ -322,7 +295,7 @@ class ModelTurn(BaseTurn):
                 meta=meta,
             )
 
-    # ── 流式聚合方法────
+    # ── 流式聚合方法 ──
 
     def _accumulate(self, event: StreamEvent) -> None:
         """将 StreamEvent 累积到内部缓冲区。"""
@@ -358,7 +331,7 @@ class ModelTurn(BaseTurn):
                 self._usage = event.usage
 
     async def _dispatch_event(self, event: StreamEvent, ctx: HookContext) -> None:
-        """将关键事件通过 HookManager 广播给 UI/审计等订阅方。"""
+        """将关键事件通过 HookManager 广播给 UI 等订阅方。"""
         try:
             if event.type == "text_delta" and event.text:
                 await self._hooks.emit("stream", ctx, delta=event.text)
@@ -396,7 +369,7 @@ class ToolTurn(BaseTurn):
     1. 并行执行 tool_calls（通过 tool_executor 回调）
     2. 分拣结果：已完成 vs 需审批（needs_approval）
     3. 内联人工审批：emit approval_needed → 等待 approval_handler → 执行/拒绝
-    4. 写入已完成/被拒绝的 tool_results 到 context
+    4. 写入已完成/被拒绝的 tool_results 到 context（await）
     5. 下一步始终为 MODEL
     """
     kind = TurnKind.TOOL
@@ -407,11 +380,10 @@ class ToolTurn(BaseTurn):
         context: ContextManager,
         tool_executor: Callable | None,
         hooks: HookManager,
-        audit: AuditLogger | None,
-        watchdog_timeout: float,
+        timeout: float = 60.0,
         approval_handler: Callable[[list], Awaitable[list[bool]]] | None = None,
     ):
-        super().__init__(hooks, audit, watchdog_timeout)
+        super().__init__(hooks, timeout)
         self._context = context
         self._tool_executor = tool_executor
         self._approval_handler = approval_handler
@@ -425,10 +397,7 @@ class ToolTurn(BaseTurn):
             await self._hooks.emit("tool_start",
                 ctx, tool_name=tc.name, args=tc.arguments, call_id=tc.id
             )
-            if self._audit:
-                await self._audit.log_event("tool_start", {
-                    "tool_name": tc.name, "call_id": tc.id,
-                }, session_id=ctx.session_id)
+            logger.debug(f"Tool start: {tc.name} (call_id={tc.id})")
 
         if self._tool_executor:
             tool_results = await self._tool_executor(tool_calls, skip_safety=False)
@@ -453,16 +422,14 @@ class ToolTurn(BaseTurn):
                     tool_name=tc.name,
                     content=f"工具 '{tc.name}' 被用户拒绝执行",
                 )
-                self._context.add_tool_result(tc.id, msg_result)
+                # context.add_tool_result 现在是 async
+                await self._context.add_tool_result(tc.id, msg_result)
                 await self._hooks.emit("tool_error",
                     ctx, tool_name=tc.name,
                     error=Exception(f"工具 '{tc.name}' 被用户拒绝执行"),
                     call_id=tc.id,
                 )
-                if self._audit:
-                    await self._audit.log_event("tool_rejected", {
-                        "tool_name": tc.name, "call_id": tc.id,
-                    }, session_id=ctx.session_id)
+                logger.info(f"Tool rejected: {tc.name} (call_id={tc.id})")
 
             if approved:
                 approved_results = await self._tool_executor(approved, skip_safety=True)
@@ -476,12 +443,7 @@ class ToolTurn(BaseTurn):
         pending_calls = [tc for tc, _ in pending]
 
         await self._hooks.emit("approval_needed", ctx, tool_calls=pending_calls)
-
-        if self._audit:
-            await self._audit.log_event("approval_needed", {
-                "pending_count": len(pending_calls),
-                "tool_names": [tc.name for tc in pending_calls],
-            }, session_id=ctx.session_id)
+        logger.info(f"Approval needed for {len(pending_calls)} tools: {[tc.name for tc in pending_calls]}")
 
         if self._approval_handler:
             decisions = await self._approval_handler(pending_calls)
@@ -521,7 +483,8 @@ class ToolTurn(BaseTurn):
                 content=tr.content,
                 metadata={"latency_ms": latency},
             )
-        self._context.add_tool_result(tc.id, msg_result)
+        # context.add_tool_result 现在是 async
+        await self._context.add_tool_result(tc.id, msg_result)
 
         if tr.is_error:
             if "denied_by" in tr.metadata:
@@ -533,181 +496,15 @@ class ToolTurn(BaseTurn):
                     call_id=tc.id,
                     tool_name=tc.name,
                 )
-                if self._audit:
-                    await self._audit.emit_safety(
-                        decision="deny",
-                        rule_name=tr.metadata["denied_by"],
-                        reason=str(tr.content),
-                        session_id=ctx.session_id,
-                    )
+                logger.info(f"Safety blocked: {tc.name} by {tr.metadata['denied_by']}")
             await self._hooks.emit("tool_error",
                 ctx, tool_name=tc.name,
                 error=Exception(tr.content), call_id=tc.id,
             )
-            if self._audit:
-                await self._audit.log_event("tool_error", {
-                    "tool_name": tc.name, "call_id": tc.id,
-                    "error": str(tr.content),
-                }, session_id=ctx.session_id)
+            logger.debug(f"Tool error: {tc.name} (call_id={tc.id}): {tr.content}")
         else:
             await self._hooks.emit("tool_end",
                 ctx, tool_name=tc.name, result=tr,
                 call_id=tc.id, latency_ms=latency,
             )
-            if self._audit:
-                await self._audit.log_event("tool_end", {
-                    "tool_name": tc.name, "call_id": tc.id,
-                    "latency_ms": latency,
-                    "is_error": False,
-                }, session_id=ctx.session_id)
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# AgentLoop：ReAct 循环引擎（Turn dispatcher）
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-class AgentLoop:
-    """
-    ReAct 循环引擎（通用 Turn dispatcher 版）。
-
-    根据 TurnResult.next_turn 动态路由到下一个 Turn：
-    1. SYSTEM → 检测系统指令（/model, /new, /clear 等），透传至 MODEL
-    2. MODEL  → LLM 生成，决定是否有 tool_calls
-    3. TOOL   → 执行工具 + 安全分拣 + 内联人工审批，返回 MODEL
-    """
-
-    def __init__(
-        self,
-        provider_router: ProviderRouter,
-        context: ContextManager,
-        hook: HookManager,
-        tool_manager: ToolManager | None = None,
-        tool_executor: Callable | None = None,
-        max_iterations: int = 50,
-        # ── 超时看门狗参数 ──
-        llm_timeout: float = 120.0,
-        tool_batch_timeout: float = 60.0,
-        system_timeout: float = 30.0,
-        human_approval_timeout: float = 300.0,  # 已废弃，保留兼容
-        # ── 审计日志（内联）──
-        audit_logger: AuditLogger | None = None,
-        # ── 人工审批 handler ──
-        approval_handler: Callable[[list], Awaitable[list[bool]]] | None = None,
-        # ── 系统指令 handler ──
-        system_command_handler: Callable[[str, str, HookContext], Awaitable[None]] | None = None,
-    ):
-        self._router = provider_router
-        self._context = context
-        self._tool_manager = tool_manager
-        self._tool_executor = tool_executor
-        self._hook = hook
-        self._max_iterations = max_iterations
-        self._llm_timeout = llm_timeout
-        self._tool_batch_timeout = tool_batch_timeout
-        self._system_timeout = system_timeout
-        self._human_approval_timeout = human_approval_timeout
-        self._audit = audit_logger
-        self._approval_handler = approval_handler
-        self._system_command_handler = system_command_handler
-
-    def _create_turn(self, kind: TurnKind):
-        """工厂方法：根据 TurnKind 创建对应的 Turn 实例。
-        每次动态获取 tool_schemas（通过 tool_manager），支持运行时热加载工具。"""
-        if kind == TurnKind.MODEL:
-            return ModelTurn(
-                provider_router=self._router,
-                context=self._context,
-                tool_schemas=self._tool_manager.list_schemas() if self._tool_manager else None,
-                hooks=self._hook,
-                audit=self._audit,
-                watchdog_timeout=self._llm_timeout,
-            )
-        elif kind == TurnKind.TOOL:
-            return ToolTurn(
-                context=self._context,
-                tool_executor=self._tool_executor,
-                hooks=self._hook,
-                audit=self._audit,
-                watchdog_timeout=self._tool_batch_timeout,
-                approval_handler=self._approval_handler,
-            )
-        elif kind == TurnKind.SYSTEM:
-            return SystemTurn(
-                context=self._context,
-                hooks=self._hook,
-                audit=self._audit,
-                watchdog_timeout=self._system_timeout,
-                system_command_handler=self._system_command_handler,
-            )
-        else:
-            raise ValueError(f"Unknown TurnKind: {kind}")
-
-    async def run(self, ctx: HookContext) -> StreamResult:
-        """
-        执行完整的 ReAct 循环，返回最终的 StreamResult。
-        通用 dispatcher：根据 TurnResult.next_turn 动态路由。
-        流程：SYSTEM → MODEL → TOOL → MODEL → TOOL → ... → 结束。
-        """
-        final_result: StreamResult | None = None
-        current_kind = TurnKind.SYSTEM
-        current_data = None
-        previous_kind: TurnKind | None = None
-
-        try:
-            for iteration in range(self._max_iterations):
-                ctx.iteration = iteration + 1
-
-                if self._audit:
-                    await self._audit.log_event("iteration_start", ctx.snapshot(), session_id=ctx.session_id)
-
-                turn = self._create_turn(current_kind)
-                result: TurnResult = await turn.execute(ctx, current_data, source=previous_kind)
-
-                if result.next_turn is None:
-                    final_result = result.stream_result
-                    await self._hook.emit("state_change", ctx, state="idle")
-                    if self._audit:
-                        await self._audit.log_event("iteration_end", ctx.snapshot(), session_id=ctx.session_id)
-                    break
-
-                previous_kind = result.kind
-                current_kind = result.next_turn
-                current_data = result.data
-
-                if self._audit:
-                    await self._audit.log_event("iteration_end", ctx.snapshot(), session_id=ctx.session_id)
-
-            else:
-                logger.warning(f"AgentLoop reached max iterations ({self._max_iterations})")
-                final_result = StreamResult(
-                    text="达到最大迭代次数限制，终止执行。",
-                    stop_reason="max_iterations",
-                )
-
-        except asyncio.CancelledError:
-            cancel_msg = "[系统] 操作已取消"
-            logger.info(f"AgentLoop cancelled at iteration {ctx.iteration}")
-
-            self._context.add_assistant_message(
-                content=cancel_msg, tool_calls=None
-            )
-
-            if self._audit:
-                try:
-                    await asyncio.shield(
-                        self._audit.emit_cancelled(
-                            reason="user_cancelled",
-                            detail="",
-                            session_id=ctx.session_id,
-                            iteration=ctx.iteration,
-                        )
-                    )
-                except Exception:
-                    pass
-
-            return StreamResult(
-                text=cancel_msg,
-                stop_reason="cancelled",
-            )
-
-        return final_result or StreamResult(stop_reason="unknown")
+            logger.debug(f"Tool end: {tc.name} (call_id={tc.id}), latency={latency}ms")
