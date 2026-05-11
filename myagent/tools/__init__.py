@@ -1,20 +1,46 @@
-"""MyAgent Tools：工具注册与执行。"""
-from myagent.tools.base import BaseTool, ToolResult
-from myagent.tools.registry import ToolRegistry
-from myagent.tools.executor import ToolExecutor
-from myagent.tools.idempotency import IdempotencyCache
-from myagent.tools.cli_tool import CLITool
-from myagent.tools.file_tools import FileReadTool, FileWriteTool
-from myagent.tools.secrets import SecretManager
+"""
+MyAgent 工具系统 V3。
+
+核心模块:
+- api: ToolResult, ToolMeta, ToolLike, tool, generate_schema
+- manager: ToolManager (唯一对外接口)
+- engine: ExecutionEngine (纯执行逻辑)
+- json_rpc: JsonRpcProxy + JsonRpcServer (JSON-RPC 协议层)
+- transport: SubprocessTransport + TcpTransport (传输层)
+- mcp_client: MCPClient (MCP 协议客户端)
+- runner: 子进程/服务器入口点
+"""
+from myagent.tools.api import (
+    ToolResult,
+    ToolMeta,
+    ToolLike,
+    tool,
+    generate_schema,
+    extract_description,
+)
+from myagent.tools.manager import ToolManager
+from myagent.tools.engine import ExecutionEngine
+from myagent.tools.json_rpc import JsonRpcProxy, JsonRpcServer, JsonRpcError
+from myagent.tools.transport import (
+    Transport, SubprocessTransport, TcpTransport, try_create_transport,
+)
+from myagent.tools.mcp_client import MCPClient
 
 __all__ = [
-    "BaseTool",
     "ToolResult",
-    "ToolRegistry",
-    "ToolExecutor",
-    "IdempotencyCache",
-    "CLITool",
-    "FileReadTool",
-    "FileWriteTool",
-    "SecretManager",
+    "ToolMeta",
+    "ToolLike",
+    "tool",
+    "generate_schema",
+    "extract_description",
+    "ToolManager",
+    "ExecutionEngine",
+    "JsonRpcProxy",
+    "JsonRpcServer",
+    "JsonRpcError",
+    "Transport",
+    "SubprocessTransport",
+    "TcpTransport",
+    "try_create_transport",
+    "MCPClient",
 ]

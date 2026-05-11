@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import click
 import sys
+from pathlib import Path
 
 from myagent.core.agent import Agent
 from myagent.factory import AgentFactory
@@ -44,9 +45,11 @@ def chat(ctx, message, session_id, system_prompt, show_tools, image, no_safety):
 
 
 async def interactive_loop(agent: Agent) -> None:
-    """启动交互式 CLI 循环。"""
+    """启动交互式 CLI 循环。支持 @image <path> 语法附带图像。"""
     ui = CliUI()
-    ui.print("🤖 MyAgent CLI — 输入 'exit' 或 'quit' 退出\n")
+    ui.print("🤖 MyAgent CLI — 输入 'exit' 或 'quit' 退出")
+    ui.print("   💡 附带图像: 在消息中使用 @image <文件路径>")
+    ui.print("   💡 示例: 描述这张图片 @image photo.jpg @image diagram.png\n")
 
     while True:
         try:
@@ -62,12 +65,82 @@ async def interactive_loop(agent: Agent) -> None:
             break
 
         try:
-            ui.print("\n🤖 Assistant: ")
-            response = await agent.run(user_input)
+            # 解析 @image 指令
+            text_parts, image_paths = _parse_image_refs(user_input)
+            text = text_parts.strip()
+
+            if image_paths:
+                # 多模态模式
+                from myagent.vision.image_handler import ImageHandler
+                from myagent.context.message import ContentBlock
+
+                provider = agent._router.current_provider
+                provider_type = "anthropic" if provider and "anthropic" in provider.name else "openai"
+                handler = ImageHandler(capabilities=provider.capabilities if provider else None)
+
+                content_blocks: list[ContentBlock] = []
+                if text:
+                    content_blocks.append(ContentBlock(type="text", text=text))
+
+                loaded = 0
+                for img_path in image_paths:
+                    p = Path(img_path)
+                    if not p.exists():
+                        ui.print(f"  ⚠ 图像文件不存在: {img_path}")
+                        continue
+                    size_kb = p.stat().st_size / 1024
+                    block = await handler.prepare(img_path, provider_type=provider_type)
+                    content_blocks.append(block)
+                    loaded += 1
+                    ui.print(f"  📎 已加载: {p.name} ({size_kb:.0f}KB)")
+
+                if loaded == 0:
+                    ui.print("  ❌ 没有成功加载任何图像")
+                    continue
+
+                ui.print(f"  → 共加载 {loaded} 张图像，正在发送...\n")
+                ui.print("🤖 Assistant: ")
+                response = await agent.run(content_blocks)
+            else:
+                # 纯文本模式
+                ui.print("\n🤖 Assistant: ")
+                response = await agent.run(text)
+
             ui.print(f"\n\n{response}\n")
         except Exception as e:
             ui.print_error(f"执行出错: {e}")
             logger.exception("Agent run failed")
+
+
+def _parse_image_refs(user_input: str) -> tuple[str, list[str]]:
+    """
+    从用户输入中解析 @image <path> 引用。
+
+    Args:
+        user_input: 原始用户输入
+
+    Returns:
+        (纯文本部分, 图像路径列表)
+
+    示例:
+        "描述这张图 @image photo.jpg" -> ("描述这张图", ["photo.jpg"])
+        "对比 @image a.png @image b.png" -> ("对比", ["a.png", "b.png"])
+    """
+    import re
+    image_paths: list[str] = []
+
+    # 匹配 @image 后跟路径（支持空格路径用引号包裹）
+    pattern = r'@image\s+(?:"([^"]+)"|\'([^\']+)\'|(\S+))'
+    for match in re.finditer(pattern, user_input):
+        path = match.group(1) or match.group(2) or match.group(3)
+        image_paths.append(path)
+
+    # 移除所有 @image 引用，留下纯文本
+    text = re.sub(pattern, '', user_input).strip()
+    # 清理多余空格
+    text = re.sub(r'\s+', ' ', text).strip()
+
+    return text, image_paths
 
 
 async def _chat(
@@ -133,38 +206,42 @@ async def _chat(
     if system_prompt:
         session.context.set_system(system_prompt)
 
-    if images:
-        from myagent.vision.image_handler import ImageHandler
-        from myagent.context.message import ContentBlock
+    try:
+        if images:
+            from myagent.vision.image_handler import ImageHandler
+            from myagent.context.message import ContentBlock
 
-        provider = agent._router.current_provider
-        provider_type = "anthropic" if provider and "anthropic" in provider.name else "openai"
-        handler = ImageHandler(capabilities=provider.capabilities if provider else None)
+            provider = agent._router.current_provider
+            provider_type = "anthropic" if provider and "anthropic" in provider.name else "openai"
+            handler = ImageHandler(capabilities=provider.capabilities if provider else None)
 
-        content_blocks = []
-        if message:
-            content_blocks.append(ContentBlock(type="text", text=message))
-        for img_path in images:
-            block = await handler.prepare(img_path, provider_type=provider_type)
-            content_blocks.append(block)
-        
-        session.context.add_user_message(content_blocks)
-        try:
-            response = await agent.run("")
-            ui.print(f"\n\n🤖 Assistant: {response}\n")
-        except asyncio.CancelledError:
-            ui.print("\n\n⚠ 操作已取消\n")
-        except Exception as e:
-            logger.error(f"Agent run error: {e}")
-            ui.print_error(f"执行出错: {e}")
-    elif message:
-        try:
-            response = await agent.run(message)
-            ui.print(f"\n\n🤖 Assistant: {response}\n")
-        except asyncio.CancelledError:
-            ui.print("\n\n⚠ 操作已取消\n")
-    else:
-        await interactive_loop(agent)
+            content_blocks = []
+            if message:
+                content_blocks.append(ContentBlock(type="text", text=message))
+            for img_path in images:
+                block = await handler.prepare(img_path, provider_type=provider_type)
+                content_blocks.append(block)
+            
+            session.context.add_user_message(content_blocks)
+            try:
+                response = await agent.run("")
+                ui.print(f"\n\n🤖 Assistant: {response}\n")
+            except asyncio.CancelledError:
+                ui.print("\n\n⚠ 操作已取消\n")
+            except Exception as e:
+                logger.error(f"Agent run error: {e}")
+                ui.print_error(f"执行出错: {e}")
+        elif message:
+            try:
+                response = await agent.run(message)
+                ui.print(f"\n\n🤖 Assistant: {response}\n")
+            except asyncio.CancelledError:
+                ui.print("\n\n⚠ 操作已取消\n")
+        else:
+            await interactive_loop(agent)
+    finally:
+        # 清理：停止热加载器
+        await agent.stop_hot_reload()
 
 if __name__ == "__main__":
     cli()

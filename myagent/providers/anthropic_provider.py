@@ -31,9 +31,33 @@ class AnthropicProvider(BaseProvider):
     def format_messages(self, messages: list) -> list[dict]:
         """
         Anthropic API 要求 system 消息从 messages 中分离。
-        返回 (system_prompt, messages_list)。
+        tool result 必须包装为 role=user 的 tool_result content block。
+        Anthropic 的 tool_result 原生支持图片 content blocks。
         """
-        return [msg.to_anthropic_dict() for msg in messages]
+        formatted = []
+        for msg in messages:
+            msg_dict = msg.to_anthropic_dict()
+
+            if msg_dict.get("role") == "tool":
+                # Anthropic 不支持 role="tool"，必须转为 tool_result content block
+                # to_anthropic_dict() 不输出 tool_call_id，需要从原始 msg 对象获取
+                tool_use_id = getattr(msg, "tool_call_id", "") or ""
+                content = msg_dict.get("content", "")
+
+                formatted.append({
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": content,
+                        # content 可以是 string 或 list[content_block]（含图片），
+                        # Anthropic 原生支持在 tool_result 中嵌入图片
+                    }]
+                })
+            else:
+                formatted.append(msg_dict)
+
+        return formatted
 
     def format_tools(self, tools: list) -> list[dict]:
         """将 BaseTool 列表转为 Anthropic tool_use 格式。"""

@@ -26,7 +26,8 @@
     // Context progress bar elements
     const contextProgressContainer = $("#contextProgressContainer");
     const contextProgressFill = $("#contextProgressFill");
-    const contextProgressLabel = $("#contextProgressLabel");
+    const contextProgressLeft = $("#contextProgressLeft");
+    const contextProgressRight = $("#contextProgressRight");
 
     // Sidebar elements
     const sidebar = $(".sidebar");
@@ -558,6 +559,15 @@
 
         statusIndicator.className = "status-badge " + info.css;
         statusIndicator.textContent = info.text;
+
+        // Progress bar animation
+        if (contextProgressFill) {
+            if (state === "thinking" || state === "generating" || state === "waiting_tool") {
+                contextProgressFill.classList.add("animating");
+            } else {
+                contextProgressFill.classList.remove("animating");
+            }
+        }
     }
 
     // ── DOM 操作函数 ──
@@ -1054,6 +1064,16 @@
     function autoResizeInput() {
         userInput.style.height = "auto";
         userInput.style.height = Math.min(userInput.scrollHeight, 120) + "px";
+
+        // Handle opacity toggle
+        const wrapper = userInput.closest(".input-area-wrapper");
+        if (wrapper) {
+            if (userInput.value.length > 0) {
+                wrapper.classList.add("has-content");
+            } else {
+                wrapper.classList.remove("has-content");
+            }
+        }
     }
 
     userInput.addEventListener("input", autoResizeInput);
@@ -1138,16 +1158,19 @@
         // Update fill width
         if (contextProgressFill) {
             contextProgressFill.style.width = (pct * 100).toFixed(1) + "%";
-            // Color: blue (hsl 210) → orange (hsl 30) based on percentage
-            const hue = Math.round(210 - pct * 180); // 210 → 30
-            contextProgressFill.style.backgroundColor = "hsl(" + hue + ", 100%, 55%)";
+            // Color: green (hsl 152) → orange (hsl 30) based on percentage
+            const hue = Math.round(152 - pct * 122); // 152 → 30
+            contextProgressFill.style.backgroundColor = "hsl(" + hue + ", 72%, 48%)";
         }
 
-        // Update label
-        if (contextProgressLabel) {
+        // Update labels
+        if (contextProgressLeft) {
             const usedK = used >= 1000 ? (used / 1000).toFixed(1) + "K" : used;
+            contextProgressLeft.textContent = usedK;
+        }
+        if (contextProgressRight) {
             const totalK = total >= 1000 ? (total / 1000).toFixed(0) + "K" : total;
-            contextProgressLabel.textContent = usedK + " / " + totalK + " tokens";
+            contextProgressRight.textContent = totalK;
         }
     }
 

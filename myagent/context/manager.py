@@ -61,14 +61,37 @@ class ContextManager:
     def add_tool_result(self, tool_call_id: str, result: ToolResult) -> None:
         """
         添加工具结果。V3 关键：强制截断超长工具输出，防止上下文爆窗。
+        支持 str 和 list[ContentBlock] 两种 content 类型。
         """
         content = result.content
-        if len(content) > self._tool_result_max_chars:
-            content = content[:self._tool_result_max_chars] + f"\n...[截断：原文 {len(result.content)} 字符，已截断至 {self._tool_result_max_chars} 字符]"
-            logger.warning(
-                f"Tool result truncated: {result.tool_call_id}, "
-                f"{len(result.content)} -> {self._tool_result_max_chars} chars"
-            )
+
+        if isinstance(content, str):
+            if len(content) > self._tool_result_max_chars:
+                content = content[:self._tool_result_max_chars] + (
+                    f"\n...[截断：原文 {len(result.content)} 字符，"
+                    f"已截断至 {self._tool_result_max_chars} 字符]"
+                )
+                logger.warning(
+                    f"Tool result truncated: {result.tool_call_id}, "
+                    f"{len(result.content)} -> {self._tool_result_max_chars} chars"
+                )
+        else:
+            # list[ContentBlock] — 截断文本块，保留其他块
+            truncated_blocks = []
+            for block in content:
+                if block.text and len(block.text) > self._tool_result_max_chars:
+                    truncated_text = block.text[:self._tool_result_max_chars] + (
+                        f"\n...[截断：原文 {len(block.text)} 字符]"
+                    )
+                    from myagent.context.message import ContentBlock as CB
+                    truncated_blocks.append(CB(type="text", text=truncated_text))
+                    logger.warning(
+                        f"Tool result text block truncated: {result.tool_call_id}"
+                    )
+                else:
+                    truncated_blocks.append(block)
+            content = truncated_blocks
+
         self._messages.append(Message(
             role="tool",
             content=content,
@@ -83,17 +106,25 @@ class ContextManager:
         """
         return list(self._messages)
 
+    # 每张图像的保守默认 token 估算（约 1024×1024 high detail）
+    _IMAGE_TOKEN_ESTIMATE = 765
+
     def estimate_tokens(self) -> int:
         """
-        粗略估算总 Token 数（1 中文字 ≈ 2 token，1 英文单词 ≈ 1 token）。
+        粗略估算总 Token 数。
+        - 文本：1 中文字 ≈ 2 token，1 英文单词 ≈ 1 token（简化为字符数）
+        - 图像：每张按保守默认值估算（约 765 tokens）
         """
         total = 0
         for msg in self._messages:
-            text = msg.content if isinstance(msg.content, str) else " ".join(
-                b.text or "" for b in msg.content if b.text
-            )
-            # 粗略估算：中文按字符数×2，英文按词数
-            total += len(text)  # 简化估算
+            if isinstance(msg.content, str):
+                total += len(msg.content)
+            elif isinstance(msg.content, list):
+                for block in msg.content:
+                    if block.type == "text" and block.text:
+                        total += len(block.text)
+                    elif block.type in ("image_url", "image_base64"):
+                        total += self._IMAGE_TOKEN_ESTIMATE
         return total
 
     def is_over_budget(self) -> bool:

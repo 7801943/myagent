@@ -6,12 +6,11 @@ AgentFactory：统一的 Agent 构建工厂。
 1. 加载配置文件（config.yaml）
 2. 构建 ProviderRouter（多模型路由）
 3. 构建安全系统（SafetyGuard + PolicyEngine + 规则链）
-4. 构建沙盒（SubprocessSandbox / DockerSandbox）
-5. 构建密钥管理（SecretManager）
-6. 构建工具注册表（CLITool + FileTools + MCP Tools）
-7. 构建审计日志器（AuditLogger）
-8. 加载系统提示词
-9. 组装 Agent 实例
+4. 构建密钥管理（SecretManager）
+5. 构建工具管理器（ToolManager）
+6. 构建审计日志器（AuditLogger）
+7. 加载系统提示词
+8. 组装 Agent 实例
 
 注意：
 - hooks 和 approval_handler 由调用方提供（CLI/WebSocket 的回调方式不同）
@@ -26,7 +25,7 @@ import yaml
 
 from myagent.core.agent import Agent
 from myagent.core.hook import HookManager
-from myagent.utils.config import load_yaml_config, AgentConfig
+from myagent.utils.config import load_yaml_config, AgentConfig, TimeoutConfig
 from myagent.utils.logging import get_logger
 from myagent.providers.openai_provider import OpenAIProvider
 from myagent.providers.anthropic_provider import AnthropicProvider
@@ -37,12 +36,8 @@ from myagent.safety.guard import SafetyGuard
 from myagent.safety.policy import PolicyEngine
 from myagent.safety.cli_fence import CLIFence
 from myagent.safety.content_rules import InputContentFilter, OutputContentFilter
-from myagent.tools.registry import ToolRegistry
-from myagent.tools.sandbox import SubprocessSandbox
-from myagent.tools.sandbox.subprocess_sandbox import ResourceLimits
-from myagent.tools.cli_tool import CLITool
-from myagent.tools.file_tools import FileReadTool, FileWriteTool
-from myagent.tools.secrets import SecretManager
+from myagent.tools.manager import ToolManager
+from myagent.safety.secrets import SecretManager
 
 logger = get_logger(__name__)
 
@@ -75,6 +70,13 @@ class AgentFactory:
         self._raw = load_yaml_config(config_path)
         self._app_config = self._raw.get("agent", self._raw) if self._raw else {}
         self._config_obj = AgentConfig(**self._app_config)
+
+    @property
+    def context_window_size(self) -> int:
+        """获取上下文窗口大小（从第一个 provider 配置中读取）。"""
+        if self._config_obj.providers:
+            return self._config_obj.providers[0].context_window_size
+        return 128000
 
     @property
     def config(self) -> AgentConfig:
@@ -116,34 +118,40 @@ class AgentFactory:
         # ── 4. 构建安全系统 ──
         safety_guard = self._build_safety_guard(no_safety=no_safety)
 
-        # ── 5. 构建沙盒 ──
-        sandbox = self._build_sandbox()
-
-        # ── 6. 构建密钥管理 ──
+        # ── 5. 构建密钥管理 ──
         secret_manager = self._build_secret_manager()
 
-        # ── 7. 构建工具注册表 ──
-        tool_registry = self._build_tool_registry(sandbox)
+        # ── 6. 构建工具管理器 ──
+        tool_manager = self._build_tool_manager()
 
-        # ── 8. 组装 Agent ──
+        # ── 8. 从分散配置构建 TimeoutConfig ──
+        tools_cfg = self._app_config.get("tools", {})
+        hitl_cfg = self._app_config.get("hitl", {})
+        timeout_config = TimeoutConfig(
+            llm_generation=self._config_obj.llm_timeout,
+            tool_batch=tools_cfg.get("batch_timeout", 60.0),
+            human_approval=hitl_cfg.get("approval_timeout", 300.0),
+        )
+
+        # ── 9. 组装 Agent ──
         agent = Agent(
             provider_router=router,
             hooks=hooks,
-            tool_registry=tool_registry,
+            tool_manager=tool_manager,
             system_prompt=system_prompt,
             max_iterations=self._config_obj.max_iterations,
             safety_guard=safety_guard,
             secret_manager=secret_manager,
             approval_handler=approval_handler,
             audit_logger=audit_logger,
-            timeout_config=self._config_obj.timeout,
+            timeout_config=timeout_config,
             state_store=self._state_store,
             max_tokens_budget=self._config_obj.max_tokens_budget,
-            context_window_size=self._config_obj.context_window_size,
+            context_window_size=self.context_window_size,
             tool_result_max_chars=self._config_obj.tool_result_max_chars,
         )
 
-        logger.info(f"Agent created")
+        logger.info("Agent created")
         return agent
 
     def _build_router(self) -> ProviderRouter:
@@ -216,6 +224,13 @@ class AgentFactory:
         if Path(rules_path).exists():
             with open(rules_path) as f:
                 rules_cfg = yaml.safe_load(f) or {}
+            logger.info(f"Safety rules loaded from {rules_path}")
+        else:
+            logger.warning(
+                f"Safety rules file not found: {rules_path}. "
+                f"PolicyEngine and CLIFence will use empty config. "
+                f"Please check the path or create the file."
+            )
 
         policy_cfg = rules_cfg.get("policy_engine", {})
         policy_engine = PolicyEngine(
@@ -229,6 +244,7 @@ class AgentFactory:
         rules = [
             CLIFence(
                 allowed_commands=cli_fence_cfg.get("allowed_commands"),
+                approval_commands=cli_fence_cfg.get("approval_commands"),
                 denied_patterns=cli_fence_cfg.get("denied_patterns"),
                 denied_paths=cli_fence_cfg.get("denied_paths"),
             ),
@@ -243,21 +259,6 @@ class AgentFactory:
         logger.info("SafetyGuard enabled with PolicyEngine + 3 rules")
         return safety_guard
 
-    def _build_sandbox(self) -> SubprocessSandbox:
-        """构建沙盒环境。
-
-        TODO: [MCP] FastMCP 协议支持后，MCP 工具的沙盒可能需要不同的隔离策略。
-        """
-        sandbox_cfg = self._app_config.get("sandbox", {})
-        return SubprocessSandbox(
-            limits=ResourceLimits(
-                max_cpu_seconds=sandbox_cfg.get("max_cpu_seconds", 30),
-                max_memory_mb=sandbox_cfg.get("max_memory_mb", 512),
-                max_output_bytes=sandbox_cfg.get("max_output_bytes", 102400),
-                timeout_seconds=sandbox_cfg.get("timeout_seconds", 60.0),
-            )
-        )
-
     def _build_secret_manager(self) -> SecretManager:
         """构建密钥管理器。"""
         secrets_cfg = self._app_config.get("secrets", {})
@@ -266,18 +267,18 @@ class AgentFactory:
             sensitive_fields=secrets_cfg.get("sensitive_fields"),
         )
 
-    def _build_tool_registry(self, sandbox: SubprocessSandbox) -> ToolRegistry:
-        """构建工具注册表。
+    def _build_tool_manager(self) -> ToolManager:
+        hr_cfg = self._config_obj.hot_reload
+        tools_dir = (hr_cfg.watch_dir
+                     if hr_cfg and hr_cfg.enabled
+                     else "myagent/tools/tools_store")
 
-        TODO: [MCP] 未来在此处注册 FastMCP 协议工具：
-          from myagent.tools.mcp_tool import MCPTool
-          mcp_tools = self._load_mcp_config()
-          for mcp_cfg in mcp_tools:
-              tool_registry.register(MCPTool(mcp_cfg))
-        """
-        tool_registry = ToolRegistry()
-        tool_registry.register(CLITool(sandbox))
-        tool_registry.register(FileReadTool())
-        tool_registry.register(FileWriteTool())
-        logger.info("Registered tools: cli_execute, file_read, file_write")
-        return tool_registry
+        runner_cfg = self._app_config.get("sandbox", {})
+
+        manager = ToolManager(tools_dir=tools_dir,
+                              runner_config=runner_cfg)
+        manager._register_builtin_tools()
+        logger.info(
+            "Registered builtin tools: cli_execute, file_read, file_write")
+        return manager
+

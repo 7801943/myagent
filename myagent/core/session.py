@@ -12,10 +12,10 @@ from uuid import uuid4
 from myagent.providers.router import ProviderRouter
 from myagent.context.manager import ContextManager
 from myagent.context.state import AgentState
-from myagent.context.message import Message
+from myagent.context.message import Message, ContentBlock
 from myagent.core.hook import HookContext, HookManager
 from myagent.core.loop import AgentLoop, StreamResult
-from myagent.tools.executor import ToolExecutor
+from myagent.tools.manager import ToolManager
 from myagent.observability.audit_logger import AuditLogger
 from myagent.utils.config import TimeoutConfig
 from myagent.utils.logging import get_logger
@@ -41,7 +41,8 @@ class Session:
         *,
         session_id: str | None = None,
         router: ProviderRouter,
-        executor: ToolExecutor,
+        tool_manager: ToolManager,
+        tool_executor: Callable | None = None,
         hooks: HookManager,
         audit: AuditLogger | None = None,
         timeout_config: TimeoutConfig | None = None,
@@ -61,7 +62,8 @@ class Session:
 
         # 共享组件（由 Agent 注入）
         self._router = router
-        self._executor = executor
+        self._tool_manager = tool_manager
+        self._tool_executor = tool_executor
         self._hooks = hooks
         self._audit = audit
         self._state_store = state_store
@@ -80,16 +82,14 @@ class Session:
         # 超时配置
         tc = timeout_config or TimeoutConfig()
 
-        # 预计算工具 schema（供 ModelTurn 使用，避免 Turn 内部访问 executor 私有成员）
-        self._tool_schemas = executor.get_tool_schemas()
-
         # Loop（每会话独立，但引用共享组件）
+        # tool_schemas 由 AgentLoop 每次创建 ModelTurn 时通过 executor 动态获取，支持热加载
         self._loop = AgentLoop(
             provider_router=router,
             context=self._context,
-            executor=executor,
             hook=hooks,
-            tool_schemas=self._tool_schemas,
+            tool_manager=tool_manager,
+            tool_executor=tool_executor,
             max_iterations=max_iterations,
             llm_timeout=tc.llm_generation,
             tool_batch_timeout=tc.tool_batch,
@@ -115,8 +115,15 @@ class Session:
         except ValueError:
             pass
 
-    async def run(self, user_input: str) -> str:
-        """在此会话中执行一轮用户交互。"""
+    async def run(self, user_input: str | list[ContentBlock]) -> str:
+        """在此会话中执行一轮用户交互。
+
+        Args:
+            user_input: 用户输入，支持三种形式：
+                - str: 纯文本消息
+                - list[ContentBlock]: 多模态内容（文本 + 图像混合）
+                - 空字符串 "": 跳过添加用户消息（用于已预注入 context 的场景）
+        """
         self._running_task = asyncio.current_task()
         self._cancel_reason = ""
         self._cancel_detail = ""
@@ -128,8 +135,11 @@ class Session:
             await self._audit.log_event("session_start", ctx.snapshot(), session_id=ctx.session_id)
 
         try:
-            # 写入用户消息
-            self._context.add_user_message(user_input)
+            # 写入用户消息（空字符串跳过，支持预注入场景）
+            if isinstance(user_input, list):
+                self._context.add_user_message(user_input)
+            elif user_input:
+                self._context.add_user_message(user_input)
 
             if self._audit:
                 await self._audit.log_event("turn_start", ctx.snapshot(), session_id=ctx.session_id)

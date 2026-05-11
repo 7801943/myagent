@@ -44,6 +44,7 @@ class ProviderConfig(BaseModel):
     priority: int = 1
     api_key: str = ""
     api_base: str | None = None        # 自定义 endpoint
+    context_window_size: int = 128000  # 该模型的上下文窗口大小
 
 class FailoverConfig(BaseModel):
     strategy: str = "priority"         # priority | round_robin | latency
@@ -65,15 +66,24 @@ class TimeoutConfig(BaseModel):
     iteration: float = 300.0           # 单次 ReAct 迭代超时（秒）
     human_approval: float = 300.0      # 人工审批等待超时（秒）
 
+class HotReloadConfig(BaseModel):
+    """工具热加载配置。"""
+    enabled: bool = False
+    watch_dir: str = "myagent/tools/tools_store"
+    poll_interval: float = 60.0
+    safe_mode: bool = False
+
 class AgentConfig(BaseSettings):
     """Agent 全局配置，支持 YAML 文件加载和环境变量覆盖。"""
     providers: list[ProviderConfig] = Field(default_factory=list)
     failover: FailoverConfig = Field(default_factory=FailoverConfig)
     audit: AuditConfig = Field(default_factory=AuditConfig)
-    timeout: TimeoutConfig = Field(default_factory=TimeoutConfig)
-    max_iterations: int = 25
+    hot_reload: HotReloadConfig = Field(default_factory=HotReloadConfig)
+    max_iterations: int = 50
+    # ── 超时参数（分散在各分类中，此处直接声明）──
+    llm_timeout: float = 120.0          # LLM 流式生成超时（秒），对应 agent.llm_timeout
+    # ── 上下文 ──
     max_tokens_budget: int = 100000
-    context_window_size: int = 128000
     tool_result_max_chars: int = 4000
     system_prompt: str | None = None
     system_prompt_file: str | None = None

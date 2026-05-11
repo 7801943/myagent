@@ -9,6 +9,9 @@ agent:
   # 最大 ReAct 迭代次数
   max_iterations: 50
 
+  # LLM 流式生成超时（秒）
+  llm_timeout: 120.0
+
   # Provider 配置（支持多路冗余）
   providers:
     - name: "openai-primary"
@@ -17,6 +20,7 @@ agent:
       api_key: "YOUR_API_KEY_HERE"           # 支持环境变量引用，如 "${OPENAI_API_KEY}"
       api_base: "https://api.example.com/v1" # 可选，自定义 API 基地址
       priority: 1
+      context_window_size: 128000            # 该模型的上下文窗口大小（用于前端进度条计算）
 
     # - name: "openai-backup"
     #   type: "openai"
@@ -33,13 +37,13 @@ agent:
   # 上下文管理
   context:
     max_tokens_budget: 100000
-    context_window_size: 128000    # 模型上下文窗口大小（用于前端进度条计算）
     tool_result_max_chars: 4000
     recent_turns: 20
 
   # 工具执行
   tools:
     default_timeout: 30.0
+    batch_timeout: 60.0            # 工具批量执行超时（秒）
 
   # ── Phase 2: 安全系统 ──
   safety:
@@ -58,7 +62,7 @@ agent:
   # ── Phase 2: 人在回路 ──
   hitl:
     enabled: true                    # 是否启用 HITL 审批
-    timeout: 120                     # 审批超时（秒）
+    approval_timeout: 300.0          # 人工审批等待超时（秒）
 
   # ── Phase 2: 密钥管理 ──
   secrets:
@@ -77,6 +81,13 @@ agent:
     audit_path: "./logs/audit.jsonl"
     # audit_path: "./logs/audit.db"
     log_level: "INFO"
+
+  # ── 工具热加载 ──
+  hot_reload:
+    enabled: true                          # 是否启用工具热加载
+    watch_dir: "myagent/tools/tools_store" # 监控的工具脚本目录
+    poll_interval: 60.0                    # 扫描间隔（秒）
+    safe_mode: false                       # AST 安全检查（动态工具可能用到 urllib 等，建议关闭）
 
   # 状态持久化
   state:

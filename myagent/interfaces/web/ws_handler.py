@@ -40,7 +40,7 @@ class WebSocketApprovalHandler:
     签名：async (tool_calls: list[ToolCall]) -> list[bool]
     
     工作流程：
-    1. HumanTurn 调用 __call__(tool_calls)
+    1. ToolTurn 调用 __call__(tool_calls)
     2. 向 WS 客户端发送批量审批请求
     3. 等待客户端逐个回复（通过 Future）
     4. 返回决策列表
@@ -186,7 +186,7 @@ class WebSocketHandler:
         logger.info(f"WebSocket client connected, session: {self._session_id}")
 
         # 发送连接确认（含上下文窗口大小）
-        context_window_size = self._factory.config.context_window_size
+        context_window_size = self._factory.context_window_size
         await self._send_json({
             "type": "connected",
             "session_id": self._session_id,
@@ -216,6 +216,9 @@ class WebSocketHandler:
         except Exception as e:
             logger.error(f"WebSocket connection error: {e}")
         finally:
+            # 清理：停止热加载器
+            if self._agent:
+                await self._agent.stop_hot_reload()
             self._cleanup()
 
     def _build_agent(self) -> Agent:

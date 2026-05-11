@@ -1,5 +1,5 @@
 """MyAgent Utils：配置、日志、重试、超时、解析等通用工具。"""
-from myagent.utils.config import load_yaml_config, AgentConfig, ProviderConfig, FailoverConfig, AuditConfig
+from myagent.utils.config import load_yaml_config, AgentConfig, ProviderConfig, FailoverConfig, AuditConfig, HotReloadConfig
 from myagent.utils.logging import get_logger, setup_logging
 from myagent.utils.retry import async_retry, ExponentialBackoff
 from myagent.utils.timeout import with_timeout, TimeoutConfig, TimeoutError
@@ -12,6 +12,7 @@ __all__ = [
     "ProviderConfig",
     "FailoverConfig",
     "AuditConfig",
+    "HotReloadConfig",
     # logging
     "get_logger",
     "setup_logging",
