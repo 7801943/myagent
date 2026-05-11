@@ -185,6 +185,8 @@ class SystemTurn(BaseTurn):
     1. 检查用户最新消息中的系统控制指令（/model, /new, /clear 等）
     2. 通过 system_command_handler 回调处理指令
     3. 无指令时透传至 MODEL
+    4. 未来预留检查query的合法性
+    5. 若有多模态输入或文件上传，启动相应检查处理后，透传至 MODEL
     """
     kind = TurnKind.SYSTEM
     _stage_name = "system_check"
