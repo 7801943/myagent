@@ -29,7 +29,68 @@ class OpenAIProvider(BaseProvider):
         return self._client
 
     def format_messages(self, messages: list) -> list[dict]:
-        return [msg.to_openai_dict() for msg in messages]
+        formatted = []
+        for msg in messages:
+            msg_dict = msg.to_openai_dict()
+
+            # OpenAI API 规范要求 role="tool" 的 content 必须是纯文本，
+            # 直接发多模态数组会被丢弃或报错。
+            # Hack 方案：在这里进行拦截，如果工具结果里有图片，就把它"一分为二"
+            if msg_dict.get("role") == "tool" and isinstance(msg_dict.get("content"), list):
+                # 检查是否存在图片
+                has_image = any(
+                    part.get("type") == "image_url"
+                    for part in msg_dict["content"]
+                )
+
+                if has_image:
+                    # 获取原本的纯文本总结（例如："已渲染第 1-3 页..."）
+                    text_parts = [
+                        part.get("text", "")
+                        for part in msg_dict["content"]
+                        if part.get("type") == "text"
+                    ]
+                    tool_text = "\n".join(text_parts) if text_parts else "图片已生成。"
+
+                    # 第 1 步：构造一条纯文本的 tool 消息
+                    tool_msg = {
+                        "role": "tool",
+                        "content": tool_text,
+                    }
+                    if "tool_call_id" in msg_dict:
+                        tool_msg["tool_call_id"] = msg_dict["tool_call_id"]
+                    formatted.append(tool_msg)
+
+                    # 第 2 步：构造一条紧随其后的 user 消息，专门用来提交图片
+                    user_parts = []
+                    tool_name = getattr(msg, "tool_name", None)
+                    prompt_text = (
+                        f"[系统提示: 以下是工具 '{tool_name}' 渲染出的图片内容]"
+                        if tool_name
+                        else "[系统提示: 以下是工具产生的图片内容]"
+                    )
+                    user_parts.append({"type": "text", "text": prompt_text})
+
+                    # 把原本在 tool message 里的图片全都挪到这里来
+                    for part in msg_dict["content"]:
+                        if part.get("type") == "image_url":
+                            user_parts.append(part)
+
+                    formatted.append({"role": "user", "content": user_parts})
+                    continue
+                else:
+                    # 如果工具结果里没有图片，只是个纯文本的 list，
+                    # 为了符合 OpenAI 规范也要把它拍平成普通的 string
+                    text_parts = [
+                        part.get("text", "")
+                        for part in msg_dict["content"]
+                        if part.get("type") == "text"
+                    ]
+                    msg_dict["content"] = "\n".join(text_parts)
+
+            formatted.append(msg_dict)
+
+        return formatted
 
     def format_tools(self, tools: list) -> list[dict]:
         """将 BaseTool 列表转为 OpenAI function calling 格式。"""
@@ -62,6 +123,7 @@ class OpenAIProvider(BaseProvider):
                 "model": self.model,
                 "messages": messages,
                 "stream": True,
+                "stream_options": {"include_usage": True},  # ✅ 修复：请求返回 token 用量
             }
             if tools:
                 create_kwargs["tools"] = tools
@@ -74,6 +136,17 @@ class OpenAIProvider(BaseProvider):
 
             async for chunk in stream:
                 if not chunk.choices:
+                    # OpenAI stream_options={"include_usage": True} 时，
+                    # 最后一个 chunk 没有 choices 但携带 usage 数据
+                    if hasattr(chunk, "usage") and chunk.usage:
+                        yield StreamEvent(
+                            type="message_end",
+                            stop_reason=None,
+                            usage={
+                                "input_tokens": chunk.usage.prompt_tokens or 0,
+                                "output_tokens": chunk.usage.completion_tokens or 0,
+                            },
+                        )
                     continue
                 choice = chunk.choices[0]
                 delta = choice.delta

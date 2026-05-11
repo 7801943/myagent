@@ -32,11 +32,15 @@ class ToolResult:
         content (str): 工具执行返回的文本内容，将直接喂给大模型。
         is_error (bool): 标识工具执行是否发生错误，默认为 False。
         metadata (dict): 附加的元数据信息（如执行耗时、原始数据等），不会直接展示给模型。
+        content_blocks (list | None): 多模态内容块列表，如图片 base64 等。
+            每个元素为 dict: {"type": "image_base64", "data": "...", "media_type": "image/png"}
+            当此字段非空时，下游会将 content 和 content_blocks 一起组装为多模态消息。
     """
 
     content: str
     is_error: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
+    content_blocks: list[dict[str, Any]] | None = None
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

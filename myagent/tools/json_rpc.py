@@ -109,13 +109,37 @@ class JsonRpcProxy:
             raise
 
     async def _read_loop(self) -> None:
+        consecutive_errors = 0
+        max_consecutive_errors = 5
+
         try:
             while True:
-                line = await self._transport.reader.readline()
+                try:
+                    line = await self._transport.reader.readline()
+                except ValueError as e:
+                    # readline() 缓冲区溢出（单行 JSON 超过 limit）
+                    # 跳过此条损坏的响应，尝试继续读取后续数据
+                    consecutive_errors += 1
+                    logger.error(
+                        f"JsonRpcProxy readline buffer overflow ({consecutive_errors}/{max_consecutive_errors}): {e}"
+                    )
+                    if consecutive_errors >= max_consecutive_errors:
+                        logger.error("Too many consecutive read errors, failing all pending requests")
+                        self._fail_all_pending(e)
+                        break
+                    # 尝试排空残留数据直到下一个换行符
+                    try:
+                        await self._transport.reader.readuntil(b"\n")
+                    except Exception:
+                        pass
+                    continue
+
                 if not line:
                     logger.warning("Transport stream closed (EOF)")
                     self._fail_all_pending(RuntimeError("Transport disconnected"))
                     break
+
+                consecutive_errors = 0  # 重置错误计数
 
                 try:
                     response = json.loads(line.decode())

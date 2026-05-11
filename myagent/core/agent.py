@@ -172,7 +172,12 @@ class Agent:
         self._active = session
         return session
 
-    async def run(self, user_input: str) -> str:
+    async def run(self, user_input: str | list) -> str:
+        """执行一轮用户交互。
+
+        Args:
+            user_input: 纯文本字符串或 list[ContentBlock] 多模态内容。
+        """
         if not self._active:
             self.create_session()
 

@@ -12,7 +12,7 @@ from uuid import uuid4
 from myagent.providers.router import ProviderRouter
 from myagent.context.manager import ContextManager
 from myagent.context.state import AgentState
-from myagent.context.message import Message
+from myagent.context.message import Message, ContentBlock
 from myagent.core.hook import HookContext, HookManager
 from myagent.core.loop import AgentLoop, StreamResult
 from myagent.tools.manager import ToolManager
@@ -115,8 +115,15 @@ class Session:
         except ValueError:
             pass
 
-    async def run(self, user_input: str) -> str:
-        """在此会话中执行一轮用户交互。"""
+    async def run(self, user_input: str | list[ContentBlock]) -> str:
+        """在此会话中执行一轮用户交互。
+
+        Args:
+            user_input: 用户输入，支持三种形式：
+                - str: 纯文本消息
+                - list[ContentBlock]: 多模态内容（文本 + 图像混合）
+                - 空字符串 "": 跳过添加用户消息（用于已预注入 context 的场景）
+        """
         self._running_task = asyncio.current_task()
         self._cancel_reason = ""
         self._cancel_detail = ""
@@ -128,8 +135,11 @@ class Session:
             await self._audit.log_event("session_start", ctx.snapshot(), session_id=ctx.session_id)
 
         try:
-            # 写入用户消息
-            self._context.add_user_message(user_input)
+            # 写入用户消息（空字符串跳过，支持预注入场景）
+            if isinstance(user_input, list):
+                self._context.add_user_message(user_input)
+            elif user_input:
+                self._context.add_user_message(user_input)
 
             if self._audit:
                 await self._audit.log_event("turn_start", ctx.snapshot(), session_id=ctx.session_id)

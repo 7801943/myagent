@@ -113,11 +113,15 @@ class ExecutionEngine:
                 result = await asyncio.wait_for(fn(**args), timeout=timeout)
 
                 if hasattr(result, "content") and hasattr(result, "is_error"):
-                    return {
+                    ret: dict[str, Any] = {
                         "content": str(result.content),
                         "is_error": result.is_error,
                         "metadata": getattr(result, "metadata", {}),
                     }
+                    content_blocks = getattr(result, "content_blocks", None)
+                    if content_blocks:
+                        ret["content_blocks"] = content_blocks
+                    return ret
                 else:
                     return {"content": str(result), "is_error": False, "metadata": {}}
 

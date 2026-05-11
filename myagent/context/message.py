@@ -26,7 +26,7 @@ class ToolResult(BaseModel):
     """工具执行结果。"""
     tool_call_id: str
     tool_name: str | None = None
-    content: str
+    content: str | list[ContentBlock]
     is_error: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -47,7 +47,22 @@ class Message(BaseModel):
         if isinstance(self.content, str):
             msg["content"] = self.content
         else:
-            msg["content"] = [block.model_dump(exclude_none=True) for block in self.content]
+            parts = []
+            for block in self.content:
+                if block.type == "text":
+                    parts.append({"type": "text", "text": block.text or ""})
+                elif block.type == "image_url":
+                    parts.append({
+                        "type": "image_url",
+                        "image_url": {"url": block.url},
+                    })
+                elif block.type == "image_base64":
+                    data_uri = f"data:{block.media_type or 'image/png'};base64,{block.base64_data}"
+                    parts.append({
+                        "type": "image_url",
+                        "image_url": {"url": data_uri},
+                    })
+            msg["content"] = parts
         if self.tool_calls:
             msg["tool_calls"] = [
                 {
@@ -70,14 +85,22 @@ class Message(BaseModel):
             blocks = []
             for block in self.content:
                 if block.type == "text":
-                    blocks.append({"type": "text", "text": block.text})
+                    blocks.append({"type": "text", "text": block.text or ""})
                 elif block.type == "image_base64":
                     blocks.append({
                         "type": "image",
                         "source": {
                             "type": "base64",
-                            "media_type": block.media_type,
+                            "media_type": block.media_type or "image/png",
                             "data": block.base64_data,
+                        }
+                    })
+                elif block.type == "image_url":
+                    blocks.append({
+                        "type": "image",
+                        "source": {
+                            "type": "url",
+                            "url": block.url,
                         }
                     })
             msg["content"] = blocks

@@ -34,7 +34,7 @@ from typing import Any, Callable, Awaitable
 
 from myagent.providers.router import ProviderRouter
 from myagent.context.manager import ContextManager
-from myagent.context.message import ToolCall, ToolResult as MsgToolResult
+from myagent.context.message import ToolCall, ToolResult as MsgToolResult, ContentBlock
 from myagent.core.hook import HookContext, HookManager
 from myagent.providers.base import StreamEvent
 from myagent.tools.manager import ToolManager
@@ -350,7 +350,8 @@ class ModelTurn(BaseTurn):
             self._tool_call_buffers.pop(event.tool_call_id, None)
 
         elif event.type == "message_end":
-            self._stop_reason = event.stop_reason
+            if event.stop_reason:
+                self._stop_reason = event.stop_reason
             if event.usage:
                 self._usage = event.usage
 
@@ -494,12 +495,30 @@ class ToolTurn(BaseTurn):
         """将单个工具执行结果写入 context 并发射 hook 事件。"""
         latency = tr.metadata.get("latency_ms", 0)
 
-        msg_result = MsgToolResult(
-            tool_call_id=tc.id,
-            tool_name=tc.name,
-            content=tr.content,
-            metadata={"latency_ms": latency},
-        )
+        # 构建 content：如果有 content_blocks（如图片 base64），组装为多模态消息
+        content_blocks = getattr(tr, "content_blocks", None)
+        if content_blocks:
+            blocks: list[ContentBlock] = [ContentBlock(type="text", text=tr.content)]
+            for cb in content_blocks:
+                if cb.get("type") == "image_base64":
+                    blocks.append(ContentBlock(
+                        type="image_base64",
+                        base64_data=cb["data"],
+                        media_type=cb.get("media_type", "image/png"),
+                    ))
+            msg_result = MsgToolResult(
+                tool_call_id=tc.id,
+                tool_name=tc.name,
+                content=blocks,
+                metadata={"latency_ms": latency},
+            )
+        else:
+            msg_result = MsgToolResult(
+                tool_call_id=tc.id,
+                tool_name=tc.name,
+                content=tr.content,
+                metadata={"latency_ms": latency},
+            )
         self._context.add_tool_result(tc.id, msg_result)
 
         if tr.is_error:

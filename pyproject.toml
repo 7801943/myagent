@@ -30,6 +30,13 @@ dependencies = [
     # 审计日志
     "aiofiles>=23.0",
     "aiosqlite>=0.20",
+
+    # 文件解析（file_read 多格式支持）
+    "pdfplumber>=0.10",
+    "PyMuPDF>=1.24",
+    "openpyxl>=3.1",
+    "python-docx>=1.1",
+    "chardet>=5.0",
 ]
 
 [project.optional-dependencies]

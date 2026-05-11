@@ -230,6 +230,7 @@ class ToolManager:
             content=result_dict["content"],
             is_error=result_dict.get("is_error", False),
             metadata=result_dict.get("metadata", {}),
+            content_blocks=result_dict.get("content_blocks"),
         )
 
     async def _execute_mcp(self, record: _ToolRecord,

@@ -48,6 +48,9 @@ class SubprocessTransport(Transport):
     注册信号和 atexit，确保主进程退出时子进程被 kill。
     """
 
+    # 100MB — 允许大型工具结果（如 PDF 渲染为 base64）通过 JSON-RPC 管道
+    _READER_LIMIT = 100 * 1024 * 1024
+
     def __init__(self, *, cwd: str | None = None, env: dict | None = None,
                  max_output_bytes: int = 102400):
         self._cwd = cwd or os.getcwd()
@@ -78,6 +81,7 @@ class SubprocessTransport(Transport):
             stderr=asyncio.subprocess.PIPE,
             cwd=self._cwd,
             env=self._env,
+            limit=self._READER_LIMIT,
         )
         logger.info(f"SubprocessTransport started: PID={self._proc.pid}")
 
@@ -107,7 +111,13 @@ class SubprocessTransport(Transport):
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             try:
-                loop.add_signal_handler(sig, _cleanup)
+                def _signal_handler(s=sig):
+                    _cleanup()
+                    # 移除自定义 handler，恢复默认行为，让进程能正常退出
+                    loop.remove_signal_handler(s)
+                    # 向自身重新发送信号，触发默认处理（KeyboardInterrupt / 终止）
+                    os.kill(os.getpid(), s)
+                loop.add_signal_handler(sig, _signal_handler)
             except NotImplementedError:
                 pass
 
@@ -143,7 +153,7 @@ class SubprocessTransport(Transport):
                 line = await self._proc.stderr.readline()
                 if not line:
                     break
-                logger.debug(f"[child stderr] {line.decode().rstrip()}")
+                logger.info(f"[child] {line.decode().rstrip()}")
         except Exception:
             pass
 
@@ -174,7 +184,9 @@ class TcpTransport(Transport):
 
     async def start(self) -> None:
         self._reader, self._writer = await asyncio.open_connection(
-            self._host, self._port)
+            self._host, self._port,
+            limit=SubprocessTransport._READER_LIMIT,
+        )
         logger.info(f"TcpTransport connected: {self._host}:{self._port}")
 
     async def stop(self) -> None:

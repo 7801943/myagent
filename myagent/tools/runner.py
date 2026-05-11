@@ -30,11 +30,19 @@ Docker 独立部署：
 """
 import argparse
 import asyncio
+import logging
 import os
 import sys
 
 from myagent.tools.engine import ExecutionEngine
 from myagent.tools.json_rpc import JsonRpcServer
+
+# 子进程日志配置：输出到 stderr，主进程的 _drain_stderr 会捕获并转发
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
+    stream=sys.stderr,
+)
 
 
 async def _pipe_main() -> None:
@@ -50,9 +58,9 @@ async def _pipe_main() -> None:
     protocol = asyncio.StreamReaderProtocol(reader)
     await loop.connect_read_pipe(lambda: protocol, sys.stdin)
 
-    transport, _ = await loop.connect_write_pipe(
+    transport, protocol = await loop.connect_write_pipe(
         asyncio.streams.FlowControlMixin, sys.stdout)
-    writer = asyncio.StreamWriter(transport, None, reader, loop)
+    writer = asyncio.StreamWriter(transport, protocol, reader, loop)
 
     await server.serve(reader, writer)
 
