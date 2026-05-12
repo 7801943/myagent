@@ -6,8 +6,8 @@ Phase 1 变更：
   - AgentFactory 不再接受 state_store 参数
 """
 from myagent.context.state import SQLiteStateStore
-from myagent.core.factory import AgentFactory
-from myagent.core.session_manager import SessionManager, UserContext
+from myagent.core.agent import AgentFactory
+from myagent.core.session import SessionManager, UserContext
 
 
 # ── 全局单例（由 app.py lifespan 管理生命周期）──

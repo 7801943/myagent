@@ -9,9 +9,8 @@ Phase 1 重构：
 """
 from myagent.core.agent import Agent
 from myagent.core.hook import HookContext, HookManager, HookHandle
-from myagent.core.session import Session
-from myagent.core.session_manager import SessionManager, UserContext
-from myagent.core.factory import AgentFactory
+from myagent.core.session import Session, SessionManager, UserContext
+from myagent.core.agent import AgentFactory
 from myagent.core.turns import BaseTurn, TurnKind, TurnResult, StreamResult
 
 __all__ = [

@@ -14,11 +14,9 @@ from uuid import uuid4
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from myagent.core.agent import Agent
-from myagent.core.factory import AgentFactory
+from myagent.core.agent import Agent, AgentFactory
 from myagent.core.hook import HookManager
-from myagent.core.session import Session
-from myagent.core.session_manager import SessionManager, UserContext
+from myagent.core.session import Session, SessionManager, UserContext
 from myagent.context.message import ToolCall
 from myagent.context.state import StateStore
 from myagent.interfaces.websocket.lock import WebSocketLock

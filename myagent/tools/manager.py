@@ -3,6 +3,7 @@ MyAgent 工具管理器 V3。
 
 唯一对外接口。负责工具发现、注册、调用、热加载。
 执行路径统一经过 JsonRpcProxy（JSON-RPC 2.0）。
+集成幂等缓存（IdempotencyCache），防止同一 tool_call_id 被重复执行。
 """
 import asyncio
 import importlib.util
@@ -10,6 +11,7 @@ import inspect
 import logging
 import os
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -28,6 +30,42 @@ from myagent.tools.transport import try_create_transport
 from myagent.tools.mcp_client import MCPClient
 
 logger = logging.getLogger(__name__)
+
+
+class IdempotencyCache:
+    """幂等缓存：防止同一 tool_call_id 被重复执行。
+
+    集成在 ToolManager 中，使工具执行天然具备幂等性。
+    调用方通过 tool_call_id 参数（可选）启用缓存。
+    """
+
+    def __init__(self, max_size: int = 1000, ttl_seconds: float = 3600):
+        self._max_size = max_size
+        self._ttl_seconds = ttl_seconds
+        self._cache: OrderedDict[str, tuple[ToolResult, float]] = OrderedDict()
+        self._lock = asyncio.Lock()
+
+    async def get(self, tool_call_id: str) -> ToolResult | None:
+        async with self._lock:
+            if tool_call_id not in self._cache:
+                return None
+            result, ts = self._cache[tool_call_id]
+            if time.monotonic() - ts > self._ttl_seconds:
+                del self._cache[tool_call_id]
+                return None
+            self._cache.move_to_end(tool_call_id)
+            return result
+
+    async def store(self, tool_call_id: str, result: ToolResult) -> None:
+        async with self._lock:
+            self._cache[tool_call_id] = (result, time.monotonic())
+            self._cache.move_to_end(tool_call_id)
+            while len(self._cache) > self._max_size:
+                self._cache.popitem(last=False)
+
+    async def clear(self) -> None:
+        async with self._lock:
+            self._cache.clear()
 
 
 @dataclass
@@ -82,6 +120,7 @@ class ToolManager:
 
         self._on_register: list[Callable[[str, str], None]] = []
         self._on_unregister: list[Callable[[str], None]] = []
+        self._idempotency = IdempotencyCache()
 
     def on_register(self, callback: Callable[[str, str], None]) -> None:
         self._on_register.append(callback)
@@ -162,7 +201,23 @@ class ToolManager:
 
     # ── 执行 ──
 
-    async def execute(self, name: str, **args: Any) -> ToolResult:
+    async def execute(self, name: str, tool_call_id: str | None = None,
+                      **args: Any) -> ToolResult:
+        """执行工具，支持幂等缓存。
+
+        Args:
+            name: 工具名称。
+            tool_call_id: 可选的工具调用 ID。传入时启用幂等缓存，
+                同一 ID 不会重复执行。
+            **args: 工具参数。
+        """
+        # 幂等缓存检查
+        if tool_call_id:
+            cached = await self._idempotency.get(tool_call_id)
+            if cached is not None:
+                logger.info(f"IdempotencyCache hit for {name} (call_id={tool_call_id})")
+                return cached
+
         record = self._tools.get(name)
         if record is None:
             return ToolResult(
@@ -176,25 +231,33 @@ class ToolManager:
 
         try:
             if record.source == "mcp" and record.mcp_client:
-                return await self._execute_mcp(record, args)
-
-            if self._proxy is None:
+                result = await self._execute_mcp(record, args)
+            elif self._proxy is None:
                 return ToolResult(
                     content="ToolManager not started: proxy unavailable",
                     is_error=True,
                 )
-
-            if record.name == "cli_execute":
-                return await self._execute_proxy_cli(record, args, timeout)
-
-            if record.file_path and record.fn_name:
-                return await self._execute_proxy_function(
+            elif record.name == "cli_execute":
+                result = await self._execute_proxy_cli(record, args, timeout)
+            elif record.file_path and record.fn_name:
+                result = await self._execute_proxy_function(
                     record, args, timeout)
+            else:
+                return ToolResult(
+                    content=f"Tool '{name}' has no execution path configured",
+                    is_error=True,
+                )
 
-            return ToolResult(
-                content=f"Tool '{name}' has no execution path configured",
-                is_error=True,
-            )
+            latency_ms = int((time.monotonic() - start) * 1000)
+            result.metadata["latency_ms"] = latency_ms
+            if tool_call_id:
+                result.metadata["tool_call_id"] = tool_call_id
+
+            # 缓存成功执行的结果
+            if tool_call_id:
+                await self._idempotency.store(tool_call_id, result)
+
+            return result
 
         except Exception as e:
             logger.error(f"Tool execution error ({name}): {e}")
