@@ -1,5 +1,5 @@
-# MyAgent 配置文件示例
-# 复制为 config.yaml 并填入实际值
+# MyAgent 配置文件
+# API Key 等敏感信息请自行填入
 
 agent:
   # System Prompt
@@ -16,42 +16,62 @@ agent:
   providers:
     - name: "openai-primary"
       type: "openai"
-      model: "your-model-name"
-      api_key: "YOUR_API_KEY_HERE"           # 支持环境变量引用，如 "${OPENAI_API_KEY}"
-      api_base: "https://api.example.com/v1" # 可选，自定义 API 基地址
+      model: "glm-5.1"
+      api_key: "4d1d17ae5953451e872f0efcf9c4ffe2.WILVHXpssYeAPLQD"                        # TODO: 填入你的 API Key
+      api_base: "https://open.bigmodel.cn/api/coding/paas/v4"
       priority: 1
-      context_window_size: 128000            # 该模型的上下文窗口大小（用于前端进度条计算）
 
-    # - name: "openai-backup"
-    #   type: "openai"
-    #   model: "backup-model-name"
-    #   api_key: "YOUR_BACKUP_API_KEY"
-    #   api_base: "http://127.0.0.1:8000/v1"
-    #   priority: 2
+    - name: "openai-backup"
+      type: "openai"
+      model: "gpt-4o-mini"
+      api_key: "${OPENAI_API_KEY}"       # 从环境变量读取
+      priority: 2
 
     # - name: "anthropic"
     #   type: "anthropic"
     #   model: "claude-sonnet-4-20250514"
     #   api_key: "${ANTHROPIC_API_KEY}"
 
+  # ── 故障转移配置 ──
+  failover:
+    strategy: "priority"                           # priority | round_robin | latency
+    circuit_breaker_failure_threshold: 3
+    circuit_breaker_recovery_seconds: 60
+
   # 上下文管理
   context:
-    max_tokens_budget: 100000
-    tool_result_max_chars: 4000
+    max_tokens_budget: 200000
+    tool_result_max_chars: 200000
     recent_turns: 20
 
   # 工具执行
   tools:
     default_timeout: 30.0
-    batch_timeout: 60.0            # 工具批量执行超时（秒）
+    batch_timeout: 60.0                            # 工具批量执行超时（秒）
 
-  # ── Phase 2: 安全系统 ──
+  # ── 审计日志 ──
+  audit:
+    enabled: true
+    level: "standard"                              # standard | minimal | verbose
+    environment: "dev"
+    queue_size: 2000
+    jsonl_log_dir: "./audit_logs"
+    jsonl_retention_days: 90
+
+  # ── 工具热加载 ──
+  hot_reload:
+    enabled: false
+    watch_dir: "myagent/tools/tools_store"
+    poll_interval: 60.0
+    safe_mode: false
+
+  # ── 安全系统 ──
   safety:
     enabled: true
     rules_path: "./config/safety_rules.yaml"
     default_action: "allow"          # allow | deny
 
-  # ── Phase 2: 沙盒配置 ──
+  # ── 沙盒配置 ──
   sandbox:
     backend: "subprocess"            # subprocess | docker (预留)
     max_cpu_seconds: 30
@@ -59,12 +79,13 @@ agent:
     max_output_bytes: 102400         # 100KB
     timeout_seconds: 60.0
 
-  # ── Phase 2: 人在回路 ──
+  # ── 人在回路 ──
   hitl:
     enabled: true                    # 是否启用 HITL 审批
+    timeout: 120                     # 审批超时（秒）
     approval_timeout: 300.0          # 人工审批等待超时（秒）
 
-  # ── Phase 2: 密钥管理 ──
+  # ── 密钥管理 ──
   secrets:
     env_prefix: "MYAGENT_SECRET_"
     sensitive_fields:
@@ -75,19 +96,11 @@ agent:
       - "access_key"
       - "secret_key"
 
-  # 可观测性
+  # 可观测性（遗留配置，审计日志已迁移到 audit 段）
   observability:
     audit_backend: "jsonl"    # jsonl | sqlite
     audit_path: "./logs/audit.jsonl"
-    # audit_path: "./logs/audit.db"
     log_level: "INFO"
-
-  # ── 工具热加载 ──
-  hot_reload:
-    enabled: true                          # 是否启用工具热加载
-    watch_dir: "myagent/tools/tools_store" # 监控的工具脚本目录
-    poll_interval: 60.0                    # 扫描间隔（秒）
-    safe_mode: false                       # AST 安全检查（动态工具可能用到 urllib 等，建议关闭）
 
   # 状态持久化
   state:
