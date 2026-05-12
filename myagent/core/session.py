@@ -7,10 +7,18 @@ Phase 1 重构：
   - 新增 SessionManager 管理 Session 的 CRUD
   - 每用户维护一个 Agent 实例
   - 会话持久化（StateStore 集成）
+
+Phase 2 重构：
+  - WorkspaceManager 集成（工作空间状态容器）
+  - system_command_handler 扩展（/workspace 指令）
+  - Session TTL 过期清理
+  - 权限检查集成
+  - ws_notify 前端推送回调
 """
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -20,11 +28,13 @@ from myagent.context.manager import ContextManager
 from myagent.context.state import SessionState, AgentRunState
 from myagent.context.message import ContentBlock
 from myagent.core.hook import HookContext
+from myagent.core.permissions import check_permission, PermissionDenied
 from myagent.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from myagent.core.agent import Agent, AgentFactory
     from myagent.core.hook import HookManager
+    from myagent.core.workspace import WorkspaceManager, WorkspaceState
     from myagent.context.state import StateStore
 
 logger = get_logger(__name__)
@@ -54,6 +64,7 @@ class Session:
     3. 提供 chat(user_input) 执行一轮交互
     4. 管理生命周期：取消、持久化、恢复
     5. 维护 session_state 和 agent_run_state
+    6. 持有 WorkspaceManager（工作空间状态容器）
     """
 
     def __init__(
@@ -67,6 +78,7 @@ class Session:
         max_tokens_budget: int = 100000,
         context_window_size: int = 128000,
         tool_result_max_chars: int = 100000,
+        workspace_root: str | None = None,
     ):
         self.id: str = session_id or uuid4().hex[:16]
         self.created_at: datetime = datetime.now(timezone.utc)
@@ -74,6 +86,7 @@ class Session:
         self.session_state: SessionState = SessionState.ACTIVE
         self.agent_run_state: AgentRunState = AgentRunState.IDLE
         self.metadata: dict = {}
+        self.last_active_at: datetime = datetime.now(timezone.utc)
 
         # 共享 Agent 引用
         self._agent = agent
@@ -91,6 +104,16 @@ class Session:
         self._running_task: asyncio.Task | None = None
         self._cancel_reason: str = ""
         self._cancel_detail: str = ""
+
+        # 前端通知回调（由 ws_handler 注入）
+        self._ws_notify = None
+
+        # WorkspaceManager（工作空间状态容器，不做文件 I/O）
+        self.workspace: "WorkspaceManager | None" = None
+        if workspace_root:
+            from myagent.core.workspace import WorkspaceManager
+            self.workspace = WorkspaceManager(workspace_root)
+            self.workspace.set_on_change(self._on_workspace_change)
 
         if system_prompt:
             self._context.set_system(system_prompt)
@@ -127,15 +150,40 @@ class Session:
         Returns:
             Agent 的最终回复文本
         """
+        self.last_active_at = datetime.now(timezone.utc)
         self._running_task = asyncio.current_task()
         self._cancel_reason = ""
         self._cancel_detail = ""
 
-        ctx = HookContext(session_id=self.id)
+        # 权限检查
+        if not check_permission(self.user.permissions, "chat"):
+            raise PermissionDenied("chat", self.user.user_id)
+
+        # 构建 HookContext，注入 workspace 和权限信息
+        workspace_root = self.workspace.root_path if self.workspace else None
+        active_file_path = self.workspace.get_active_file_path() if self.workspace else None
+        ctx = HookContext(
+            session_id=self.id,
+            workspace_root=workspace_root,
+            active_file_path=active_file_path,
+            user_permissions=self.user.permissions,
+        )
+
+        # 将 workspace 信息注入 Agent（供 HookContext 使用）
+        if self.workspace:
+            self._agent._workspace_root = self.workspace.root_path
+            self._agent._active_file_path = self.workspace.get_active_file_path()
 
         logger.info(f"Session chat start: {self.id}")
 
         try:
+            # 注入 workspace 上下文（文件列表摘要）到用户消息前
+            if self.workspace:
+                workspace_text = self.workspace.get_file_list_text()
+                if workspace_text:
+                    # 临时注入一条系统注释，告知 LLM 当前工作空间文件列表
+                    self._context.add_system_note(workspace_text)
+
             # 写入用户消息（空字符串跳过，支持预注入场景）
             if isinstance(user_input, list):
                 await self._context.add_user_message(user_input)
@@ -219,6 +267,12 @@ class Session:
                 self.id, self.agent_run_state, self.metadata, self.session_state
             )
             await self._state_store.save_messages(self.id, self._context.messages)
+            # 持久化 workspace 状态
+            if self.workspace:
+                import json as _json
+                from myagent.core.workspace import WorkspaceState
+                ws_json = _json.dumps(self.workspace.snapshot().to_dict(), ensure_ascii=False)
+                await self._state_store.save_workspace(self.id, ws_json)
 
     async def load_messages(self) -> list:
         """加载该会话的全部消息历史。"""
@@ -233,27 +287,103 @@ class Session:
         处理 /new、/model、/workspace 等系统指令。
         必须在 Session 创建后、首次 chat 前调用。
         """
-        from myagent.core.hook import HookContext
+        session = self
 
         async def _system_command_handler(cmd: str, args: str, ctx: HookContext) -> None:
             """系统指令处理回调。"""
             if cmd == "new":
-                logger.info(f"System command: /new — clearing context for session {self.id}")
-                self._context.clear()
+                logger.info(f"System command: /new — clearing context for session {session.id}")
+                session._context.clear()
             elif cmd == "model":
                 provider_name = args.strip()
-                if provider_name and hasattr(self._agent, '_router'):
+                if provider_name and hasattr(session._agent, '_router'):
                     try:
-                        self._agent._router.set_provider(provider_name)
+                        session._agent._router.set_provider(provider_name)
                         logger.info(f"System command: /model → {provider_name}")
                     except Exception as e:
                         logger.warning(f"Failed to switch model: {e}")
             elif cmd == "workspace":
-                logger.info(f"System command: /workspace {args}")
+                root_path = args.strip()
+                if root_path:
+                    logger.info(f"System command: /workspace {root_path}")
+                    await session.set_workspace(root_path)
             else:
                 logger.debug(f"Unknown system command: /{cmd} {args}")
 
         self._agent._system_command_handler = _system_command_handler
+
+    # ── Workspace 相关方法 ──
+
+    async def set_workspace(self, root_path: str) -> None:
+        """设置/切换工作空间（清空旧状态，扫描新目录）。"""
+        from myagent.core.workspace import WorkspaceManager, scan_workspace_files
+
+        # 创建新容器
+        self.workspace = WorkspaceManager(root_path)
+        self.workspace.set_on_change(self._on_workspace_change)
+
+        # 扫描文件（在后台线程中执行）
+        files = await scan_workspace_files(root_path)
+        await self.workspace.update_files(files)
+
+        logger.info(f"Workspace set: {root_path} ({len(files)} entries)")
+
+    async def refresh_workspace(self) -> None:
+        """刷新工作空间文件列表（LLM 修改文件后调用）。"""
+        if not self.workspace:
+            return
+        from myagent.core.workspace import scan_workspace_files
+        files = await scan_workspace_files(self.workspace.root_path)
+        await self.workspace.update_files(files)
+
+    async def _on_workspace_change(self, state: "WorkspaceState") -> None:
+        """
+        WorkspaceManager 状态变更回调。
+        职责：
+          1. 持久化 workspace 状态到 DB
+          2. 通知前端（通过 ws_handler 注册的回调）
+        """
+        # 持久化
+        await self._persist_workspace(state)
+
+        # 通知前端（如果有的话）
+        if self._ws_notify:
+            await self._ws_notify("workspace_state", state.to_dict())
+
+    def set_ws_notify(self, callback) -> None:
+        """由 ws_handler 注入的前端通知回调。callback(type: str, data: dict) -> Awaitable。"""
+        self._ws_notify = callback
+
+    async def _persist_workspace(self, state: "WorkspaceState") -> None:
+        """持久化 workspace 状态到 DB。"""
+        if self._state_store:
+            ws_json = json.dumps(state.to_dict(), ensure_ascii=False)
+            await self._state_store.save_workspace(self.id, ws_json)
+
+    # ── 便捷代理方法 ──
+
+    async def workspace_open_file(self, path: str) -> int | None:
+        if not self.workspace:
+            return None
+        return await self.workspace.open_file(path)
+
+    async def workspace_close_file(self, index: int) -> None:
+        if self.workspace:
+            await self.workspace.close_file(index)
+
+    async def workspace_set_active_file(self, index: int) -> None:
+        if self.workspace:
+            await self.workspace.set_active_file(index)
+
+    async def record_llm_access(self, path: str, preview: str = "") -> None:
+        """LLM 工具读取文件后调用，记录访问并通知前端。"""
+        if self.workspace:
+            await self.workspace.record_llm_access(path, preview)
+
+    async def on_files_changed(self) -> None:
+        """工具执行后调用，刷新 workspace 文件列表。"""
+        if self.workspace:
+            await self.refresh_workspace()
 
 
 # ─── SessionManager ──────────────────────────────────────────
@@ -266,23 +396,71 @@ class SessionManager:
     2. 每用户维护一个 Agent 实例
     3. 会话持久化（StateStore 集成）
     4. 用户隔离
+    5. Session TTL 过期清理（Phase 2）
     """
 
-    def __init__(self, factory: "AgentFactory", state_store: "StateStore | None" = None):
+    def __init__(
+        self,
+        factory: "AgentFactory",
+        state_store: "StateStore | None" = None,
+        session_ttl_seconds: int = 3600,
+    ):
         """
         Args:
             factory: AgentFactory（用于创建 Agent 实例）
             state_store: 可选的 StateStore（用于会话持久化）
+            session_ttl_seconds: Session TTL 秒数（默认 3600 = 1小时）
         """
         self._factory = factory
         self._state_store = state_store
         self._sessions: dict[str, Session] = {}
         self._user_agents: dict[str, "Agent"] = {}  # user_id → Agent
 
+        # TTL 清理
+        self._session_ttl = session_ttl_seconds
+        self._cleanup_interval = 300  # 每 5 分钟清理一次
+        self._running = False
+        self._cleanup_task: asyncio.Task | None = None
+
     @property
     def factory(self) -> "AgentFactory":
         """公开 getter：获取 AgentFactory 实例。"""
         return self._factory
+
+    async def start(self) -> None:
+        """启动 TTL 清理循环。"""
+        self._running = True
+        self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+        logger.info(f"SessionManager TTL cleanup started (TTL={self._session_ttl}s)")
+
+    async def stop(self) -> None:
+        """停止 TTL 清理循环。"""
+        self._running = False
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
+        logger.info("SessionManager TTL cleanup stopped")
+
+    async def _cleanup_loop(self) -> None:
+        """定期清理过期 Session。"""
+        while self._running:
+            await asyncio.sleep(self._cleanup_interval)
+            await self._evict_expired()
+
+    async def _evict_expired(self) -> None:
+        """淘汰超过 TTL 的 Session。"""
+        now = datetime.now(timezone.utc)
+        to_evict = []
+        for sid, session in self._sessions.items():
+            if (now - session.last_active_at).total_seconds() > self._session_ttl:
+                to_evict.append(sid)
+        for sid in to_evict:
+            session = self._sessions.pop(sid)
+            await session.save()
+            logger.info(f"Session evicted (TTL): {sid}")
 
     def _get_or_create_agent(
         self,
@@ -302,7 +480,7 @@ class SessionManager:
             logger.info(f"Agent created for user: {user_id}")
         return self._user_agents[user_id]
 
-    def create_session(
+    async def create_session(
         self,
         user: UserContext,
         session_id: str | None = None,
@@ -313,6 +491,7 @@ class SessionManager:
         context_window_size: int = 128000,
         tool_result_max_chars: int = 100000,
         no_safety: bool = False,
+        workspace_root: str | None = None,
     ) -> Session:
         """创建新会话。"""
         if hooks is None:
@@ -333,11 +512,18 @@ class SessionManager:
             max_tokens_budget=max_tokens_budget,
             context_window_size=context_window_size,
             tool_result_max_chars=tool_result_max_chars,
+            workspace_root=workspace_root,
         )
         self._sessions[session.id] = session
 
-        # 注入 system_command_handler（让 /new、/model 等指令生效）
+        # 注入 system_command_handler（让 /new、/model、/workspace 等指令生效）
         session.make_command_handler()
+
+        # 如果有初始工作空间，扫描文件
+        if workspace_root and session.workspace:
+            from myagent.core.workspace import scan_workspace_files
+            files = await scan_workspace_files(workspace_root)
+            await session.workspace.update_files(files)
 
         logger.info(f"Session created: {session.id} for user: {user.user_id}")
         return session
@@ -363,6 +549,7 @@ class SessionManager:
         2. 获取/创建用户的 Agent 实例
         3. 创建 Session 对象
         4. 恢复 ContextManager（消息历史）
+        5. 恢复 WorkspaceManager（工作空间状态）
         """
         if not self._state_store:
             raise RuntimeError("No StateStore configured")
@@ -393,6 +580,23 @@ class SessionManager:
         messages = await self._state_store.load_messages(session_id)
         if messages:
             session._context.restore_from(messages)
+
+        # 恢复 workspace 状态
+        workspace_json = await self._state_store.load_workspace(session_id)
+        if workspace_json:
+            try:
+                from myagent.core.workspace import WorkspaceManager, WorkspaceState
+                ws_data = json.loads(workspace_json)
+                ws_state = WorkspaceState.from_dict(ws_data)
+                session.workspace = WorkspaceManager()
+                session.workspace.restore_from(ws_state)
+                session.workspace.set_on_change(session._on_workspace_change)
+                logger.info(f"Workspace restored for session {session_id}: {ws_state.root_path}")
+            except Exception as e:
+                logger.warning(f"Failed to restore workspace for session {session_id}: {e}")
+
+        # 注入 system_command_handler
+        session.make_command_handler()
 
         self._sessions[session.id] = session
         logger.info(f"Session restored: {session_id}")

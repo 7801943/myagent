@@ -64,6 +64,9 @@ class Agent:
         self._max_iterations = max_iterations
         self._approval_handler = approval_handler
         self._system_command_handler = system_command_handler
+        # Phase 2: workspace 信息（由 Session.chat() 注入）
+        self._workspace_root: str | None = None
+        self._active_file_path: str | None = None
 
     @property
     def hooks(self) -> HookManager:

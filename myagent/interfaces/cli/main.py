@@ -191,7 +191,7 @@ async def _chat(
 
     # 创建 SessionManager 并创建会话
     session_manager = SessionManager(factory=factory)
-    session = session_manager.create_session(
+    session = await session_manager.create_session(
         user=user,
         session_id=session_id,
         hooks=hooks,

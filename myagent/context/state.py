@@ -143,6 +143,13 @@ class SQLiteStateStore(StateStore):
         except Exception:
             pass  # 列已存在
 
+        # 安全添加 workspace 列（Phase 2 新增，已存在则忽略）
+        try:
+            await self._db.execute("ALTER TABLE sessions ADD COLUMN workspace TEXT")
+            await self._db.commit()
+        except Exception:
+            pass  # 列已存在
+
     async def close(self) -> None:
         if self._db:
             await self._db.close()
@@ -189,6 +196,28 @@ class SQLiteStateStore(StateStore):
             (session_id, session_state.value, now),
         )
         await self._db.commit()
+
+    async def save_workspace(self, session_id: str, workspace_json: str) -> None:
+        """保存工作空间状态快照（JSON 字符串）。"""
+        now = datetime.now(timezone.utc).isoformat()
+        await self._db.execute(
+            """INSERT INTO sessions (session_id, agent_state, session_state, metadata, updated_at, workspace)
+               VALUES (?, 'idle', 'active', '{}', ?, ?)
+               ON CONFLICT(session_id) DO UPDATE SET
+                 workspace = excluded.workspace,
+                 updated_at = excluded.updated_at""",
+            (session_id, now, workspace_json),
+        )
+        await self._db.commit()
+
+    async def load_workspace(self, session_id: str) -> str | None:
+        """加载工作空间状态快照 JSON。不存在返回 None。"""
+        async with self._db.execute(
+            "SELECT workspace FROM sessions WHERE session_id = ?",
+            (session_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else None
 
     async def save_messages(self, session_id: str, messages: list[Message]) -> None:
         now = datetime.now(timezone.utc).isoformat()

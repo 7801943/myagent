@@ -30,11 +30,17 @@ async def startup() -> None:
     global _state_store
     if _state_store:
         await _state_store.initialize()
+    # Phase 2: 启动 Session TTL 清理
+    if _session_manager:
+        await _session_manager.start()
 
 
 async def shutdown() -> None:
     """清理资源。"""
     global _state_store
+    # Phase 2: 停止 Session TTL 清理
+    if _session_manager:
+        await _session_manager.stop()
     if _state_store:
         await _state_store.close()
         _state_store = None

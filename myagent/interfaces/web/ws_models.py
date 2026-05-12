@@ -175,6 +175,47 @@ class PongMessage(ServerMessage):
     type: str = "pong"
 
 
+class WorkspaceStateMessage(ServerMessage):
+    """工作空间状态推送（完整快照）。"""
+    type: str = "workspace_state"
+    root_path: str = ""
+    files: list[dict] = []
+    open_files: list[dict] = []
+    active_file_index: int | None = None
+    llm_files: list[dict] = []
+
+
+# ── 客户端 → 服务端 workspace 消息 ──
+
+class WorkspaceOpenFileMessage(BaseModel):
+    """前端打开文件。"""
+    type: Literal["workspace_open_file"] = "workspace_open_file"
+    path: str = Field(..., description="文件相对路径")
+
+
+class WorkspaceCloseFileMessage(BaseModel):
+    """前端关闭文件 Tab。"""
+    type: Literal["workspace_close_file"] = "workspace_close_file"
+    index: int = Field(..., description="Tab 索引")
+
+
+class WorkspaceSetActiveFileMessage(BaseModel):
+    """前端切换活跃文件。"""
+    type: Literal["workspace_set_active_file"] = "workspace_set_active_file"
+    index: int = Field(..., description="Tab 索引")
+
+
+class WorkspaceSetRootMessage(BaseModel):
+    """前端设置工作空间根目录。"""
+    type: Literal["workspace_set_root"] = "workspace_set_root"
+    path: str = Field(..., description="工作空间根目录绝对路径")
+
+
+class WorkspaceRefreshMessage(BaseModel):
+    """前端请求刷新工作空间文件列表。"""
+    type: Literal["workspace_refresh"] = "workspace_refresh"
+
+
 # ── 消息类型映射（用于解析）──
 
 INCOMING_MESSAGE_TYPES: dict[str, type[BaseModel]] = {
@@ -186,4 +227,10 @@ INCOMING_MESSAGE_TYPES: dict[str, type[BaseModel]] = {
     "session_delete": SessionDeleteMessage,
     "session_list": SessionListMessage,
     "ping": PingMessage,
+    # Phase 2: workspace 消息
+    "workspace_open_file": WorkspaceOpenFileMessage,
+    "workspace_close_file": WorkspaceCloseFileMessage,
+    "workspace_set_active_file": WorkspaceSetActiveFileMessage,
+    "workspace_set_root": WorkspaceSetRootMessage,
+    "workspace_refresh": WorkspaceRefreshMessage,
 }

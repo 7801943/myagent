@@ -181,13 +181,15 @@ class WebSocketHandler:
 
         # 通过 SessionManager 创建初始会话
         try:
-            self._session = self._session_manager.create_session(
+            self._session = await self._session_manager.create_session(
                 user=user,
                 session_id=self._session_id,
                 hooks=self._hooks,
                 approval_handler=self._approval_handler,
                 context_window_size=context_window_size,
             )
+            # Phase 2: 注入 ws_notify 回调，让 workspace 状态变更能推送到前端
+            self._session.set_ws_notify(self._send_notification)
             # 启动工具热加载
             try:
                 await self._session.agent.start_hot_reload()
@@ -328,6 +330,17 @@ class WebSocketHandler:
             await self._handle_session_delete(data)
         elif msg_type == "ping":
             await self._send_json({"type": "pong"})
+        # Phase 2: workspace 消息路由
+        elif msg_type == "workspace_open_file":
+            await self._handle_workspace_open_file(data)
+        elif msg_type == "workspace_close_file":
+            await self._handle_workspace_close_file(data)
+        elif msg_type == "workspace_set_active_file":
+            await self._handle_workspace_set_active_file(data)
+        elif msg_type == "workspace_set_root":
+            await self._handle_workspace_set_root(data)
+        elif msg_type == "workspace_refresh":
+            await self._handle_workspace_refresh()
 
     async def _handle_chat(self, data: dict) -> None:
         """处理聊天消息。使用 Session.chat()。"""
@@ -451,13 +464,14 @@ class WebSocketHandler:
         # 通过 SessionManager 创建新会话
         user = UserContext(user_id="ws_default", username="WebSocket User")
         factory = self._session_manager.factory
-        self._session = self._session_manager.create_session(
+        self._session = await self._session_manager.create_session(
             user=user,
             session_id=new_session_id,
             hooks=self._hooks,
             approval_handler=self._approval_handler,
             context_window_size=factory.context_window_size,
         )
+        self._session.set_ws_notify(self._send_notification)
         self._session_id = new_session_id
 
         await self._send_json({"type": "session_created", "session_id": new_session_id})
@@ -485,6 +499,8 @@ class WebSocketHandler:
                     approval_handler=self._approval_handler,
                     context_window_size=factory.context_window_size,
                 )
+            # Phase 2: 注入 ws_notify 回调
+            self._session.set_ws_notify(self._send_notification)
         except Exception as e:
             await self._send_json({"type": "error", "message": f"切换会话失败: {e}"})
             return
@@ -535,6 +551,47 @@ class WebSocketHandler:
         """连接断开时清理资源。"""
         self._running_tasks.pop(self._session_id, None)
         self._ws_lock.cleanup(self._session_id)
+
+    # ── Phase 2: Workspace 消息处理 ──
+
+    async def _send_notification(self, msg_type: str, data: dict) -> None:
+        """Session 的 ws_notify 回调：将 workspace 状态变更推送到前端。"""
+        await self._send_json({"type": msg_type, **data})
+
+    async def _handle_workspace_open_file(self, data: dict) -> None:
+        """处理前端打开文件请求。"""
+        path = data.get("path", "")
+        if not path or not self._session:
+            return
+        idx = await self._session.workspace_open_file(path)
+        logger.debug(f"Workspace open file: {path} (index={idx})")
+
+    async def _handle_workspace_close_file(self, data: dict) -> None:
+        """处理前端关闭文件 Tab 请求。"""
+        index = data.get("index", -1)
+        if index < 0 or not self._session:
+            return
+        await self._session.workspace_close_file(index)
+
+    async def _handle_workspace_set_active_file(self, data: dict) -> None:
+        """处理前端切换活跃文件请求。"""
+        index = data.get("index", -1)
+        if index < 0 or not self._session:
+            return
+        await self._session.workspace_set_active_file(index)
+
+    async def _handle_workspace_set_root(self, data: dict) -> None:
+        """处理前端设置工作空间根目录请求。"""
+        path = data.get("path", "")
+        if not path or not self._session:
+            return
+        await self._session.set_workspace(path)
+
+    async def _handle_workspace_refresh(self) -> None:
+        """处理前端刷新工作空间文件列表请求。"""
+        if not self._session:
+            return
+        await self._session.refresh_workspace()
 
     async def _send_json(self, data: dict) -> None:
         """安全发送 JSON 消息到 WebSocket 客户端。"""

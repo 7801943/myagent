@@ -28,6 +28,7 @@ from myagent.providers.router import ProviderRouter
 from myagent.context.manager import ContextManager
 from myagent.context.message import ToolCall, ToolResult as MsgToolResult, ContentBlock
 from myagent.core.hook import HookContext, HookManager
+from myagent.core.permissions import check_permission
 from myagent.providers.base import StreamEvent
 from myagent.utils.logging import get_logger
 
@@ -428,6 +429,38 @@ class ToolTurn(BaseTurn):
 
     async def _do_execute(self, ctx: HookContext, input_data: Any = None, source: TurnKind | None = None) -> TurnResult:
         tool_calls = input_data  # ModelTurn 通过 TurnResult.data 传递的 tool_calls 列表
+
+        # Phase 2: 权限检查 — 逐个验证用户是否有权执行该工具
+        for tc in tool_calls:
+            perm = f"tool:{tc.name}"
+            if not check_permission(ctx.user_permissions, perm):
+                from myagent.tools.api import ToolResult as Tr
+                logger.warning(f"Permission denied for tool '{tc.name}' (user permissions: {ctx.user_permissions})")
+                # 替换为权限拒绝结果
+                tc._permission_denied = True
+
+        # 分离被权限拒绝的 tool_calls
+        denied_calls = [tc for tc in tool_calls if getattr(tc, '_permission_denied', False)]
+        allowed_calls = [tc for tc in tool_calls if not getattr(tc, '_permission_denied', False)]
+
+        # 写入权限拒绝结果
+        for tc in denied_calls:
+            msg_result = MsgToolResult(
+                tool_call_id=tc.id,
+                tool_name=tc.name,
+                content=f"权限不足：您没有执行工具 '{tc.name}' 的权限",
+            )
+            await self._context.add_tool_result(tc.id, msg_result)
+            await self._hooks.emit("tool_error",
+                ctx, tool_name=tc.name,
+                error=Exception(f"Permission denied for tool '{tc.name}'"),
+                call_id=tc.id,
+            )
+
+        # 只执行有权限的工具
+        tool_calls = allowed_calls
+        if not tool_calls:
+            return TurnResult(kind=TurnKind.TOOL, next_turn=TurnKind.MODEL)
 
         # 通知前端：正在等待工具执行
         await self._hooks.emit("state_change", ctx, state="waiting_tool")
