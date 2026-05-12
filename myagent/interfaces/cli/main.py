@@ -3,10 +3,11 @@ CLI 主入口：交互式 ReAct 循环。
 User Input → Session.chat() → Stream → UI 渲染。
 
 Phase 1 变更：
-  - 导入路径 myagent.factory → myagent.core.factory
+  - 导入路径 myagent.core.agent.AgentFactory
   - 使用 SessionManager/UserContext 创建会话
   - agent.run(text) → session.chat(text)
   - agent.create_session() → session_manager.create_session()
+  - 使用公开 getter（session.agent）替代私有属性访问
 """
 from __future__ import annotations
 
@@ -55,7 +56,7 @@ async def interactive_loop(session: Session) -> None:
     ui.print("   💡 附带图像: 在消息中使用 @image <文件路径>")
     ui.print("   💡 示例: 描述这张图片 @image photo.jpg @image diagram.png\n")
 
-    agent = session._agent
+    agent = session.agent
 
     while True:
         try:
@@ -200,7 +201,7 @@ async def _chat(
         context_window_size=factory.context_window_size,
     )
 
-    agent = session._agent
+    agent = session.agent
 
     # 启动工具热加载
     try:

@@ -62,7 +62,7 @@ class StateStore(ABC):
     """状态持久化抽象接口。"""
 
     @abstractmethod
-    async def save_state(self, session_id: str, state: AgentRunState, metadata: dict | None = None) -> None: ...
+    async def save_state(self, session_id: str, state: AgentRunState, metadata: dict | None = None, session_state: SessionState | None = None) -> None: ...
 
     @abstractmethod
     async def load_state(self, session_id: str) -> tuple[AgentRunState, dict]:
@@ -147,20 +147,22 @@ class SQLiteStateStore(StateStore):
         if self._db:
             await self._db.close()
 
-    async def save_state(self, session_id: str, state: AgentRunState, metadata: dict | None = None) -> None:
+    async def save_state(self, session_id: str, state: AgentRunState, metadata: dict | None = None, session_state: SessionState | None = None) -> None:
         now = datetime.now(timezone.utc).isoformat()
         meta_json = json.dumps(metadata or {}, ensure_ascii=False)
+        ss_value = session_state.value if session_state else SessionState.ACTIVE.value
         await self._db.execute(
-            """INSERT INTO sessions (session_id, agent_state, metadata, updated_at)
-               VALUES (?, ?, ?, ?)
+            """INSERT INTO sessions (session_id, agent_state, session_state, metadata, updated_at)
+               VALUES (?, ?, ?, ?, ?)
                ON CONFLICT(session_id) DO UPDATE SET
                  agent_state = excluded.agent_state,
+                 session_state = excluded.session_state,
                  metadata = excluded.metadata,
                  updated_at = excluded.updated_at""",
-            (session_id, state.value, meta_json, now),
+            (session_id, state.value, ss_value, meta_json, now),
         )
         await self._db.commit()
-        logger.debug(f"State saved: session={session_id}, state={state.value}")
+        logger.debug(f"State saved: session={session_id}, state={state.value}, session_state={ss_value}")
 
     async def load_state(self, session_id: str) -> tuple[AgentRunState, dict]:
         async with self._db.execute(

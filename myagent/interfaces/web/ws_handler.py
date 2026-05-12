@@ -5,8 +5,8 @@ Phase 1 变更：
   - 使用 SessionManager 创建/恢复/删除会话
   - 使用 UserContext 标识用户
   - 使用 Session.chat() 替代 Agent.run()
-  - 导入路径 myagent.factory → myagent.core.factory
-  - 导入路径 myagent.core.session → Session（新）
+  - 导入路径 myagent.core.agent.AgentFactory
+  - 使用公开 getter（session.agent / session_manager.factory）替代私有属性访问
 """
 import asyncio
 import json
@@ -163,7 +163,7 @@ class WebSocketHandler:
         logger.info(f"WebSocket client connected, session: {self._session_id}")
 
         # 发送连接确认（含上下文窗口大小）
-        factory = self._session_manager._factory
+        factory = self._session_manager.factory
         context_window_size = factory.context_window_size
         await self._send_json({
             "type": "connected",
@@ -190,7 +190,7 @@ class WebSocketHandler:
             )
             # 启动工具热加载
             try:
-                await self._session._agent.start_hot_reload()
+                await self._session.agent.start_hot_reload()
             except Exception as e:
                 logger.warning(f"Hot reload start failed (non-fatal): {e}")
         except Exception as e:
@@ -209,8 +209,8 @@ class WebSocketHandler:
             logger.error(f"WebSocket connection error: {e}")
         finally:
             # 清理：停止热加载器
-            if self._session and self._session._agent:
-                await self._session._agent.stop_hot_reload()
+            if self._session and self._session.agent:
+                await self._session.agent.stop_hot_reload()
             self._cleanup()
 
     def _register_ws_hooks(self) -> None:
@@ -450,7 +450,7 @@ class WebSocketHandler:
 
         # 通过 SessionManager 创建新会话
         user = UserContext(user_id="ws_default", username="WebSocket User")
-        factory = self._session_manager._factory
+        factory = self._session_manager.factory
         self._session = self._session_manager.create_session(
             user=user,
             session_id=new_session_id,
@@ -477,7 +477,7 @@ class WebSocketHandler:
             else:
                 # 从 StateStore 恢复
                 user = UserContext(user_id="ws_default", username="WebSocket User")
-                factory = self._session_manager._factory
+                factory = self._session_manager.factory
                 self._session = await self._session_manager.restore_session(
                     session_id=target_id,
                     user=user,

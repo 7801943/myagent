@@ -102,6 +102,11 @@ class Session:
     def context(self) -> ContextManager:
         return self._context
 
+    @property
+    def agent(self) -> "Agent":
+        """公开 getter：获取关联的 Agent 实例。"""
+        return self._agent
+
     async def _on_state_change(self, ctx, state: str) -> None:
         """Hook 回调：同步 agent_run_state。"""
         try:
@@ -203,12 +208,16 @@ class Session:
         if metadata is not None:
             self.metadata.update(metadata)
         if self._state_store:
-            await self._state_store.save_state(self.id, self.agent_run_state, self.metadata)
+            await self._state_store.save_state(
+                self.id, self.agent_run_state, self.metadata, self.session_state
+            )
 
     async def save(self) -> None:
         """持久化会话状态和消息。"""
         if self._state_store:
-            await self._state_store.save_state(self.id, self.agent_run_state, self.metadata)
+            await self._state_store.save_state(
+                self.id, self.agent_run_state, self.metadata, self.session_state
+            )
             await self._state_store.save_messages(self.id, self._context.messages)
 
     async def load_messages(self) -> list:
@@ -216,6 +225,35 @@ class Session:
         if not self._state_store:
             return []
         return await self._state_store.load_messages(self.id)
+
+    def make_command_handler(self):
+        """
+        创建系统指令处理器并注入给 Agent。
+
+        处理 /new、/model、/workspace 等系统指令。
+        必须在 Session 创建后、首次 chat 前调用。
+        """
+        from myagent.core.hook import HookContext
+
+        async def _system_command_handler(cmd: str, args: str, ctx: HookContext) -> None:
+            """系统指令处理回调。"""
+            if cmd == "new":
+                logger.info(f"System command: /new — clearing context for session {self.id}")
+                self._context.clear()
+            elif cmd == "model":
+                provider_name = args.strip()
+                if provider_name and hasattr(self._agent, '_router'):
+                    try:
+                        self._agent._router.set_provider(provider_name)
+                        logger.info(f"System command: /model → {provider_name}")
+                    except Exception as e:
+                        logger.warning(f"Failed to switch model: {e}")
+            elif cmd == "workspace":
+                logger.info(f"System command: /workspace {args}")
+            else:
+                logger.debug(f"Unknown system command: /{cmd} {args}")
+
+        self._agent._system_command_handler = _system_command_handler
 
 
 # ─── SessionManager ──────────────────────────────────────────
@@ -240,6 +278,11 @@ class SessionManager:
         self._state_store = state_store
         self._sessions: dict[str, Session] = {}
         self._user_agents: dict[str, "Agent"] = {}  # user_id → Agent
+
+    @property
+    def factory(self) -> "AgentFactory":
+        """公开 getter：获取 AgentFactory 实例。"""
+        return self._factory
 
     def _get_or_create_agent(
         self,
@@ -292,6 +335,10 @@ class SessionManager:
             tool_result_max_chars=tool_result_max_chars,
         )
         self._sessions[session.id] = session
+
+        # 注入 system_command_handler（让 /new、/model 等指令生效）
+        session.make_command_handler()
+
         logger.info(f"Session created: {session.id} for user: {user.user_id}")
         return session
 

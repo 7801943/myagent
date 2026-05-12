@@ -88,58 +88,90 @@ class Agent:
         """注册 hook 回调（代理到 HookManager.on()）。"""
         self._hooks.on(event, callback)
 
+    # async def run(self, context: ContextManager, ctx: HookContext) -> StreamResult:
+    #     """
+    #     执行 ReAct 循环。原 AgentLoop.run() 逻辑。
+
+    #     Args:
+    #         context: ContextManager（由 Session 提供）
+    #         ctx: HookContext（由 Session 创建）
+
+    #     Returns:
+    #         最终的 StreamResult
+    #     """
+    #     final_result: StreamResult | None = None
+    #     current_kind = TurnKind.SYSTEM
+    #     current_data = None
+    #     previous_kind: TurnKind | None = None
+
+    #     try:
+    #         for iteration in range(self._max_iterations):
+    #             ctx.iteration = iteration + 1
+    #             logger.debug(f"Iteration {iteration + 1}, turn={current_kind.name}")
+
+    #             turn = self._create_turn(current_kind, context)
+    #             from myagent.core.turns import TurnResult
+    #             result: TurnResult = await turn.execute(ctx, current_data, source=previous_kind)
+
+    #             if result.next_turn is None:
+    #                 final_result = result.stream_result
+    #                 await self._hooks.emit("state_change", ctx, state="idle")
+    #                 break
+
+    #             previous_kind = result.kind
+    #             current_kind = result.next_turn
+    #             current_data = result.data
+
+    #         else:
+    #             logger.warning(f"Agent reached max iterations ({self._max_iterations})")
+    #             final_result = StreamResult(
+    #                 text="达到最大迭代次数限制，终止执行。",
+    #                 stop_reason="max_iterations",
+    #             )
+
+    #     except asyncio.CancelledError:
+    #         cancel_msg = "[系统] 操作已取消"
+    #         logger.info(f"Agent cancelled at iteration {ctx.iteration}")
+    #         await context.add_assistant_message(content=cancel_msg, tool_calls=None)
+    #         return StreamResult(
+    #             text=cancel_msg,
+    #             stop_reason="cancelled",
+    #         )
+
+    #     return final_result or StreamResult(stop_reason="unknown")
     async def run(self, context: ContextManager, ctx: HookContext) -> StreamResult:
-        """
-        执行 ReAct 循环。原 AgentLoop.run() 逻辑。
+            from myagent.core.turns import TurnResult
+            
+            # 1. 初始化起始状态载体（不再需要 current_kind, current_data 等散装变量）
+            state = TurnResult(kind=None, next_turn=TurnKind.SYSTEM, data=None)
 
-        Args:
-            context: ContextManager（由 Session 提供）
-            ctx: HookContext（由 Session 创建）
+            try:
+                for iteration in range(self._max_iterations):
+                    ctx.iteration = iteration + 1
+                    logger.debug(f"Iteration {ctx.iteration}, turn={state.next_turn.name}")
 
-        Returns:
-            最终的 StreamResult
-        """
-        final_result: StreamResult | None = None
-        current_kind = TurnKind.SYSTEM
-        current_data = None
-        previous_kind: TurnKind | None = None
+                    # 2. 从状态载体中提取动作并执行
+                    turn = self._create_turn(state.next_turn, context)
+                    state = await turn.execute(ctx, input_data=state.data, source=state.kind)
 
-        try:
-            for iteration in range(self._max_iterations):
-                ctx.iteration = iteration + 1
-                logger.debug(f"Iteration {iteration + 1}, turn={current_kind.name}")
+                    # 3. 检查流转是否结束
+                    if state.next_turn is None:
+                        await self._hooks.emit("state_change", ctx, state="idle")
+                        return state.stream_result
 
-                turn = self._create_turn(current_kind, context)
-                from myagent.core.turns import TurnResult
-                result: TurnResult = await turn.execute(ctx, current_data, source=previous_kind)
-
-                if result.next_turn is None:
-                    final_result = result.stream_result
-                    await self._hooks.emit("state_change", ctx, state="idle")
-                    break
-
-                previous_kind = result.kind
-                current_kind = result.next_turn
-                current_data = result.data
-
-            else:
+                # 4. for...else: 处理达到最大迭代次数
                 logger.warning(f"Agent reached max iterations ({self._max_iterations})")
-                final_result = StreamResult(
-                    text="达到最大迭代次数限制，终止执行。",
-                    stop_reason="max_iterations",
-                )
+                msg = "达到最大迭代次数限制，终止执行。"
+                await context.add_assistant_message(content=msg, tool_calls=None)
+                return StreamResult(text=msg, stop_reason="max_iterations")
 
-        except asyncio.CancelledError:
-            cancel_msg = "[系统] 操作已取消"
-            logger.info(f"Agent cancelled at iteration {ctx.iteration}")
-            await context.add_assistant_message(content=cancel_msg, tool_calls=None)
-            return StreamResult(
-                text=cancel_msg,
-                stop_reason="cancelled",
-            )
-
-        return final_result or StreamResult(stop_reason="unknown")
-
+            except asyncio.CancelledError:
+                # 5. 取消处理
+                cancel_msg = "[系统] 操作已取消"
+                logger.info(f"Agent cancelled at iteration {getattr(ctx, 'iteration', 0)}")
+                await context.add_assistant_message(content=cancel_msg, tool_calls=None)
+                return StreamResult(text=cancel_msg, stop_reason="cancelled")
+            
     def _create_turn(self, kind: TurnKind, context: ContextManager):
         """Turn 工厂。每次动态获取 tool_schemas，支持运行时热加载。"""
         if kind == TurnKind.MODEL:

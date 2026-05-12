@@ -2,7 +2,7 @@
 FastAPI 依赖注入：管理共享服务实例。
 
 Phase 1 变更：
-  - 导入路径 myagent.factory → myagent.core.factory
+  - 导入路径 myagent.core.agent.AgentFactory
   - AgentFactory 不再接受 state_store 参数
 """
 from myagent.context.state import SQLiteStateStore
