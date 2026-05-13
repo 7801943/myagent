@@ -182,7 +182,21 @@ class WorkspaceStateMessage(ServerMessage):
     files: list[dict] = []
     open_files: list[dict] = []
     active_file_index: int | None = None
-    llm_files: list[dict] = []
+    expanded_dirs: list[str] = []
+
+
+class ConversationStateMessage(ServerMessage):
+    """会话全局状态推送（聚合快照：模型、Token、工具、Agent 状态等）。"""
+    type: str = "conversation_state"
+    user_id: str = ""
+    username: str = ""
+    active_model: dict = {}
+    available_models: list[dict] = []
+    token_usage: dict = {}
+    tools: list[dict] = []
+    agent_run_state: str = "idle"
+    session_state: str = "active"
+    workspace_state: dict | None = None
 
 
 # ── 客户端 → 服务端 workspace 消息 ──
@@ -216,6 +230,12 @@ class WorkspaceRefreshMessage(BaseModel):
     type: Literal["workspace_refresh"] = "workspace_refresh"
 
 
+class WorkspaceScanDirMessage(BaseModel):
+    """前端请求扫描指定子目录（一层）。"""
+    type: Literal["workspace_scan_dir"] = "workspace_scan_dir"
+    path: str = Field(..., description="要扫描的子目录相对路径")
+
+
 # ── 消息类型映射（用于解析）──
 
 INCOMING_MESSAGE_TYPES: dict[str, type[BaseModel]] = {
@@ -233,4 +253,5 @@ INCOMING_MESSAGE_TYPES: dict[str, type[BaseModel]] = {
     "workspace_set_active_file": WorkspaceSetActiveFileMessage,
     "workspace_set_root": WorkspaceSetRootMessage,
     "workspace_refresh": WorkspaceRefreshMessage,
+    "workspace_scan_dir": WorkspaceScanDirMessage,
 }

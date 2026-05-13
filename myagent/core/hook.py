@@ -33,7 +33,6 @@ class HookContext:
     # Phase 2 新增
     workspace_root: str | None = None          # 工作空间根目录（绝对路径）
     active_file_path: str | None = None        # 当前活跃文件相对路径
-    user_permissions: list[str] = field(default_factory=list)
 
     def snapshot(self) -> dict:
         """生成可序列化的上下文快照（供审计/错误记录使用）。"""

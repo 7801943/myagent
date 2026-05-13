@@ -2,6 +2,9 @@
 # API Key 等敏感信息请自行填入
 
 agent:
+  # 用户根目录（CLI 工具将不能越过此目录进行操作）
+  root_dir: ""
+
   # System Prompt
   system_prompt: "你是一个智能助手，可以帮助用户完成各种任务。"
   system_prompt_file: "config/prompt.txt"

@@ -189,6 +189,9 @@ async def _chat(
     # 创建默认用户上下文
     user = UserContext(user_id="cli_default", username="CLI User")
 
+    # 读取 root_dir 配置
+    root_dir = factory.config.root_dir or None
+
     # 创建 SessionManager 并创建会话
     session_manager = SessionManager(factory=factory)
     session = await session_manager.create_session(
@@ -199,6 +202,7 @@ async def _chat(
         no_safety=no_safety,
         system_prompt=system_prompt,
         context_window_size=factory.context_window_size,
+        workspace_root=root_dir,
     )
 
     agent = session.agent

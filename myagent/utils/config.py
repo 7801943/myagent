@@ -76,5 +76,7 @@ class AgentConfig(BaseSettings):
     tool_result_max_chars: int = 4000
     system_prompt: str | None = None
     system_prompt_file: str | None = None
+    # ── 用户根目录（CLI 工具不能越过此目录操作） ──
+    root_dir: str = ""
 
     model_config = {"env_prefix": "MYAGENT_", "extra": "ignore"}
