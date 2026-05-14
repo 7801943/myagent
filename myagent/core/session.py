@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from myagent.core.hook import HookManager
     from myagent.core.workspace import WorkspaceManager, WorkspaceState
     from myagent.context.state import StateStore
+    from myagent.prompt.renderer import PromptRenderer
 
 logger = get_logger(__name__)
 
@@ -277,6 +278,9 @@ class Session:
         # 前端通知回调（由 ws_handler 注入）
         self._ws_notify = None
 
+        # PromptRenderer（由 SessionManager 注入，SSPT 动态渲染）
+        self._prompt_renderer: "PromptRenderer | None" = None
+
         # WorkspaceManager（工作空间状态容器，不做文件 I/O）
         self.workspace: "WorkspaceManager | None" = None
         if workspace_root:
@@ -376,7 +380,7 @@ class Session:
         active_cws = active_model.get("context_window_size", 128000)
         self.meta.get("context", "token_usage")["total"] = active_cws
 
-        # ── 2. 采集工具列表 ──
+        # ── 2. 采集工具列表（含 parameters_schema 供 API 调用和 prompt 渲染使用） ──
         tools: list[dict] = []
         tm = self._agent.tool_manager
         if tm:
@@ -384,7 +388,40 @@ class Session:
                 tools.append({
                     "name": record.name,
                     "description": record.description,
+                    "parameters_schema": getattr(record, "parameters_schema", {}),
                     "source": record.source,
+                })
+        self.meta.set("tool", tools=tools)
+
+    # ── PromptRenderer 注入 ──
+
+    def set_prompt_renderer(self, renderer: "PromptRenderer") -> None:
+        """注入 PromptRenderer（由 SessionManager 在创建 Session 后调用）。"""
+        self._prompt_renderer = renderer
+
+    # ── 工具统一管理 ──
+
+    async def update_tools(self, source: str = "agent") -> None:
+        """从 ToolManager 重新采集工具列表，同步到 meta。
+
+        Args:
+            source: "agent" → LLM 触发的变更, "user" → 用户操作触发
+        """
+        from myagent.prompt.variables import _summarize_parameters
+
+        tools: list[dict] = []
+        tm = self._agent.tool_manager
+        if tm:
+            for record in tm.list_schemas() or []:
+                tools.append({
+                    "name": record.name,
+                    "description": record.description,
+                    "parameters_schema": getattr(record, "parameters_schema", {}),
+                    "parameters_summary": _summarize_parameters(
+                        getattr(record, "parameters_schema", {})
+                    ),
+                    "source": record.source,
+                    "category": getattr(record.meta, "category", "") if hasattr(record, "meta") and record.meta else "",
                 })
         self.meta.set("tool", tools=tools)
 
@@ -450,10 +487,15 @@ class Session:
         logger.info(f"Session chat start: {self.id}")
 
         try:
-            if self.workspace:
-                workspace_text = self.workspace.get_file_list_text()
-                if workspace_text:
-                    self._context.add_system_note(workspace_text)
+            # ── 渲染动态 system prompt（SSPT） ──
+            if self._prompt_renderer:
+                from myagent.prompt.variables import VariableCollector
+                variables = await VariableCollector.collect(self)
+                rendered_prompt = self._prompt_renderer.render(variables)
+                self._context.set_system(rendered_prompt)
+
+            # ── 注入 SessionMeta 到 Agent（统一工具数据源） ──
+            self._agent._session_meta = self.meta
 
             if isinstance(user_input, list):
                 await self._context.add_user_message(user_input)
@@ -743,6 +785,12 @@ class SessionManager:
         agent = self._get_or_create_agent(user.user_id, hooks, approval_handler, no_safety=no_safety)
         effective_prompt = system_prompt or self._factory.system_prompt
 
+        # 如果没有显式传入 workspace_root，从配置读取 root_dir 作为默认值
+        if not workspace_root:
+            root_dir = self._factory.app_config.get("root_dir", "")
+            if root_dir:
+                workspace_root = root_dir
+
         session = Session(
             session_id=session_id,
             agent=agent,
@@ -757,6 +805,13 @@ class SessionManager:
         self._sessions[session.id] = session
 
         session.make_command_handler()
+
+        # ── 注入 PromptRenderer（SSPT 动态渲染） ──
+        try:
+            renderer = self._factory.create_prompt_renderer()
+            session.set_prompt_renderer(renderer)
+        except Exception as e:
+            logger.warning(f"Failed to create PromptRenderer, using static prompt: {e}")
 
         if workspace_root and session.workspace:
             from myagent.core.workspace import scan_dir_files

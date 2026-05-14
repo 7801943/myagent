@@ -74,6 +74,24 @@ class SubprocessTransport(Transport):
         return self._writer
 
     async def start(self) -> None:
+        # ── 幂等保护：防止 start() 被重复调用 ──
+        #
+        # 背景：当前调用链中，Transport.start() 会被调用两次：
+        #   1. try_create_transport() 中先调用 start() — 目的是验证 transport 可用
+        #      （Docker TCP 场景需要探测连接，subprocess 场景并不需要但也会执行）
+        #   2. JsonRpcProxy.start() 中再次调用 self._transport.start() — 作为统一生命周期入口
+        #
+        # 不加保护时，第二次 start() 会：
+        #   - 创建新的子进程，覆盖 self._proc（旧子进程成为孤儿）
+        #   - 创建新的 _drain_task，覆盖旧 task（旧 task 永远不会被 await/cancel）
+        #   - 导致 "Task was destroyed but it is pending!" 警告
+        #
+        # TODO: 未来优化方向 — 让 try_create_transport() 只负责创建、不负责启动，
+        #       将 start() 统一交给 JsonRpcProxy 管理，届时可移除此保护。
+        if self._proc is not None:
+            logger.debug("SubprocessTransport.start() skipped: already started (idempotent guard)")
+            return
+
         self._proc = await asyncio.create_subprocess_exec(
             sys.executable, "-m", "myagent.tools.runner",
             stdin=asyncio.subprocess.PIPE,
@@ -183,6 +201,15 @@ class TcpTransport(Transport):
         return self._writer
 
     async def start(self) -> None:
+        # ── 幂等保护：防止 start() 被重复调用 ──
+        # 原因同 SubprocessTransport.start() 中的注释：
+        # try_create_transport() 和 JsonRpcProxy.start() 都会调用 start()。
+        # TCP 场景下，try_create_transport() 中已经真正建立了连接（用于探测 Docker 可用性），
+        # JsonRpcProxy.start() 再次调用时不应重复建连。
+        if self._reader is not None:
+            logger.debug("TcpTransport.start() skipped: already connected (idempotent guard)")
+            return
+
         self._reader, self._writer = await asyncio.open_connection(
             self._host, self._port,
             limit=SubprocessTransport._READER_LIMIT,
