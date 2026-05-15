@@ -6,7 +6,7 @@ HookContext 携带 trace_id / span_id（V3 链路追踪）。
 import asyncio
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 from uuid import uuid4
 
 from myagent.utils.logging import get_logger
@@ -33,6 +33,10 @@ class HookContext:
     # Phase 2 新增
     workspace_root: str | None = None          # 工作空间根目录（绝对路径）
     active_file_path: str | None = None        # 当前活跃文件相对路径
+    # 新增：会话级状态载体（替代 Agent._session_meta）
+    session_meta: Any = None
+    # 新增：会话级系统指令处理器（替代 Agent._system_command_handler）
+    system_command_handler: Callable | None = None
 
     def snapshot(self) -> dict:
         """生成可序列化的上下文快照（供审计/错误记录使用）。"""

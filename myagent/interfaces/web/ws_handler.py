@@ -1,12 +1,42 @@
 """
 WebSocket Handler：处理 WebSocket 连接的完整生命周期。
 
-Phase 1 变更：
-  - 使用 SessionManager 创建/恢复/删除会话
-  - 使用 UserContext 标识用户
-  - 使用 Session.chat() 替代 Agent.run()
-  - 导入路径 myagent.core.agent.AgentFactory
-  - 使用公开 getter（session.agent / session_manager.factory）替代私有属性访问
+═══════════════════════════════════════════════════════════════
+  架构（V2 共享 HookManager + 多客户端共享 Session）
+═══════════════════════════════════════════════════════════════
+
+  三层职责划分：
+
+  ┌─ ws_handler.py ─ "入口层 / 传输层" ─────────────────────┐
+  │  1. 初始化 Session（获取现有的 or 创建新的）              │
+  │  2. 将本连接的 WS 回调注册到 Agent 共享 HookManager       │
+  │  3. 断开时 unregister 本连接的回调                       │
+  │  4. 路由前端消息到 Session 方法                          │
+  └────────────────────────────────────────────────────────┘
+
+  ┌─ session.py ─ "会话层" ───────────────────────────────┐
+  │  1. 管理会话生命周期（创建/恢复/删除/TTL 清理）         │
+  │  2. 用户 → Session 映射                                 │
+  │  3. 消息持久化（StateStore）                             │
+  └────────────────────────────────────────────────────────┘
+
+  ┌─ agent.py ─ "引擎层" ────────────────────────────────┐
+  │  1. LLM 调用（run / _create_turn）                    │
+  │  2. HookManager 广播（emit 事件 → 所有 WS 连接）       │
+  │  3. ToolManager 管理（注册/热加载）                    │
+  │  4. SafetyGuard 安全检查                               │
+  └────────────────────────────────────────────────────────┘
+
+  数据流：
+    Agent.emit("stream", delta="你好")
+      → HookManager 广播 → [_on_stream_A, _on_stream_B, ...]
+      → 所有 WS 连接都收到推送
+
+  多客户端共享：
+    电脑 A 和电脑 B 使用同一用户登录 → 共享同一个 Session + Agent
+    任一客户端发消息，所有客户端都看到响应
+
+═══════════════════════════════════════════════════════════════
 """
 import asyncio
 import json
@@ -15,7 +45,7 @@ from uuid import uuid4
 from fastapi import WebSocket, WebSocketDisconnect
 
 from myagent.core.agent import Agent, AgentFactory
-from myagent.core.hook import HookManager
+from myagent.core.hook import HookManager, HookHandle
 from myagent.core.session import Session, SessionManager, UserContext
 from myagent.context.message import ToolCall
 from myagent.context.state import StateStore
@@ -25,6 +55,8 @@ from myagent.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
+
+# ─── WebSocketApprovalHandler ────────────────────────────────
 
 class WebSocketApprovalHandler:
     """
@@ -89,6 +121,8 @@ class WebSocketApprovalHandler:
             fut.set_result(approved)
 
 
+# ─── 消息序列化工具 ──────────────────────────────────────────
+
 def _serialize_messages(messages: list) -> list[dict]:
     """将消息列表序列化为前端可显示的 dict 列表。"""
     history = []
@@ -132,10 +166,20 @@ def _serialize_messages(messages: list) -> list[dict]:
     return history
 
 
+# ─── WebSocketHandler ────────────────────────────────────────
+
 class WebSocketHandler:
     """
     WebSocket 连接处理器。
-    使用 SessionManager 管理会话，Session.chat() 执行对话。
+
+    ┌────────────────────────────────────────────────────────┐
+    │  V2 架构核心：                                          │
+    │  - 每个 WS 连接不再自建 HookManager                     │
+    │  - 回调注册到 Session.agent.hooks（共享广播中心）        │
+    │  - Agent emit 时所有连接都收到推送                       │
+    │  - 断开时通过 HookHandle.unregister() 取消注册          │
+    │  - 多客户端共享同一个 Session + Agent                    │
+    └────────────────────────────────────────────────────────┘
     """
 
     def __init__(
@@ -148,21 +192,85 @@ class WebSocketHandler:
         self._session_manager = session_manager
         self._state_store = state_store
         self._ws_lock = WebSocketLock()
+
+        # 当前活跃的 Session（可能与其他 WS 连接共享）
         self._session: Session | None = None
-        self._running_tasks: dict[str, asyncio.Task] = {}
         self._session_id: str = ""
+
+        # 本连接注册到共享 HookManager 的回调句柄
+        self._hook_handles: list[HookHandle] = []
+
+        # 运行中的 chat 任务
+        self._running_tasks: dict[str, asyncio.Task] = {}
+
+        # 人工审批 handler（per-WS-connection）
         self._approval_handler: WebSocketApprovalHandler | None = None
-        self._hooks: HookManager | None = None
+
+    # ═══════════════════════════════════════════════════════
+    #  连接主循环
+    # ═══════════════════════════════════════════════════════
 
     async def run(self) -> None:
-        """WebSocket 连接主循环。"""
+        """
+        WebSocket 连接主循环。
+
+        流程：
+        1. 接受连接，认证用户
+        2. 获取已有 Session（多客户端共享）或创建新 Session
+        3. 注册本连接的 WS 回调到 Agent 共享 HookManager
+        4. 推送初始状态
+        5. 进入消息循环
+        6. 断开时清理（不删除 Session，其他连接可能还在使用）
+        """
         await self._ws.accept()
 
-        # 初始化会话
-        self._session_id = uuid4().hex[:16]
-        logger.info(f"WebSocket client connected, session: {self._session_id}")
+        # ── 1. 用户认证 ──
+        user = self._authenticate_user()
 
-        # 发送连接确认（含上下文窗口大小）
+        # ── 2. 初始化 approval_handler ──
+        self._approval_handler = WebSocketApprovalHandler(self._ws)
+
+        # ── 3. 获取或创建 Session ──
+        # 优先查找用户的活跃 Session（多客户端共享）
+        existing_session = self._session_manager.get_user_active_session(user.user_id)
+        if existing_session:
+            # 复用已有 Session（多客户端共享同一个 Agent + Context + Tools）
+            self._session = existing_session
+            self._session_id = existing_session.id
+            logger.info(f"WebSocket client connected, reusing session: {self._session_id}")
+        else:
+            # 首次连接 → 创建新会话
+            self._session_id = uuid4().hex[:16]
+            factory = self._session_manager.factory
+            try:
+                self._session = await self._session_manager.create_session(
+                    user=user,
+                    session_id=self._session_id,
+                    approval_handler=self._approval_handler,
+                    context_window_size=factory.context_window_size,
+                )
+            except Exception as e:
+                logger.error(f"Failed to create session: {e}")
+                await self._send_json({"type": "error", "message": f"会话初始化失败: {e}"})
+                await self._ws.close()
+                return
+
+            # 启动工具热加载（仅首次创建 Agent 时）
+            try:
+                await self._session.agent.start_hot_reload()
+            except Exception as e:
+                logger.warning(f"Hot reload start failed (non-fatal): {e}")
+
+            logger.info(f"WebSocket client connected, new session: {self._session_id}")
+
+        # ── 4. 注册本连接的 WS 回调到 Agent 共享 HookManager ──
+        shared_hooks = self._session.agent.hooks
+        self._register_ws_hooks(shared_hooks)
+
+        # ── 5. 注入 ws_notify 回调（workspace 状态变更推送到前端）──
+        self._session.add_ws_notify(self._send_notification)
+
+        # ── 6. 发送连接确认 ──
         factory = self._session_manager.factory
         context_window_size = factory.context_window_size
         await self._send_json({
@@ -171,38 +279,10 @@ class WebSocketHandler:
             "context_window_size": context_window_size,
         })
 
-        # 构建 hooks 和 approval_handler
-        self._approval_handler = WebSocketApprovalHandler(self._ws)
-        self._hooks = HookManager()
-        self._register_ws_hooks()
+        # ── 7. 推送初始 conversation_state ──
+        await self._push_conversation_state()
 
-        # 创建默认用户上下文
-        user = UserContext(user_id="ws_default", username="WebSocket User")
-
-        # 通过 SessionManager 创建初始会话
-        try:
-            self._session = await self._session_manager.create_session(
-                user=user,
-                session_id=self._session_id,
-                hooks=self._hooks,
-                approval_handler=self._approval_handler,
-                context_window_size=context_window_size,
-            )
-            # Phase 2: 注入 ws_notify 回调，让 workspace 状态变更能推送到前端
-            self._session.set_ws_notify(self._send_notification)
-            # 启动工具热加载
-            try:
-                await self._session.agent.start_hot_reload()
-            except Exception as e:
-                logger.warning(f"Hot reload start failed (non-fatal): {e}")
-            # 推送初始 conversation_state（模型、Token、工具等信息）
-            await self._push_conversation_state()
-        except Exception as e:
-            logger.error(f"Failed to create session: {e}")
-            await self._send_json({"type": "error", "message": f"会话初始化失败: {e}"})
-            await self._ws.close()
-            return
-
+        # ── 8. 消息循环 ──
         try:
             async for raw_message in self._ws.iter_text():
                 await self._dispatch_message(raw_message)
@@ -212,31 +292,41 @@ class WebSocketHandler:
         except Exception as e:
             logger.error(f"WebSocket connection error: {e}")
         finally:
-            # 清理：停止热加载器
-            if self._session and self._session.agent:
-                await self._session.agent.stop_hot_reload()
+            # 停止热加载（仅当不再有其他连接使用同一 Agent 时）
+            # TODO: 引用计数后再停止，暂时保留不停止
             self._cleanup()
 
-    def _register_ws_hooks(self) -> None:
-        """注册 WebSocket Hook 回调：将 Agent 事件推送到 WebSocket。"""
+    # ═══════════════════════════════════════════════════════
+    #  Hook 注册（核心改动：注册到共享 HookManager）
+    # ═══════════════════════════════════════════════════════
 
-        @self._hooks.hook("stream")
+    def _register_ws_hooks(self, shared_hooks: HookManager) -> None:
+        """
+        注册本连接的 WebSocket 回调到 Agent 共享 HookManager。
+
+        每个 WS 连接注册自己的回调，Agent emit 时所有连接都收到推送。
+        断开时通过 HookHandle.unregister() 取消注册。
+
+        Args:
+            shared_hooks: Agent 的共享 HookManager（广播中心）
+        """
+        # 保存所有 HookHandle，用于断开时清理
+        self._hook_handles = []
+
+        # ── 流式输出 ──
         async def _on_stream(ctx, delta):
             await self._send_json({"type": "text_delta", "text": delta})
 
-        @self._hooks.hook("thinking_stream")
         async def _on_thinking_stream(ctx, delta):
             await self._send_json({"type": "thinking_delta", "text": delta})
 
-        @self._hooks.hook("stream_start")
         async def _on_stream_start(ctx):
             await self._send_json({"type": "stream_start"})
 
-        @self._hooks.hook("stream_end")
         async def _on_stream_end(ctx, resuming=False):
             await self._send_json({"type": "stream_end", "resuming": resuming})
 
-        @self._hooks.hook("tool_start")
+        # ── 工具事件 ──
         async def _on_tool_start(ctx, tool_name, args, call_id):
             await self._send_json({
                 "type": "tool_start",
@@ -245,7 +335,6 @@ class WebSocketHandler:
                 "call_id": call_id,
             })
 
-        @self._hooks.hook("tool_end")
         async def _on_tool_end(ctx, tool_name, result, call_id, latency_ms):
             await self._send_json({
                 "type": "tool_end",
@@ -255,7 +344,6 @@ class WebSocketHandler:
                 "call_id": call_id,
             })
 
-        @self._hooks.hook("tool_error")
         async def _on_tool_error(ctx, tool_name, error, call_id):
             await self._send_json({
                 "type": "tool_error",
@@ -264,7 +352,7 @@ class WebSocketHandler:
                 "call_id": call_id,
             })
 
-        @self._hooks.hook("safety_blocked")
+        # ── 安全事件 ──
         async def _on_safety_blocked(ctx, rule, reason, action, call_id="", tool_name=""):
             await self._send_json({
                 "type": "safety_blocked",
@@ -275,15 +363,15 @@ class WebSocketHandler:
                 "tool_name": tool_name,
             })
 
-        @self._hooks.hook("state_change")
+        # ── 状态变更 ──
         async def _on_state_change(ctx, state):
             await self._send_json({"type": "state_change", "state": state})
 
-        @self._hooks.hook("error")
+        # ── 错误 ──
         async def _on_error(ctx, error):
             await self._send_json({"type": "error", "message": str(error)})
 
-        # 超时警告
+        # ── 超时警告 ──
         async def _on_timeout_warning(ctx, **kw):
             await self._send_json({
                 "type": "timeout_warning",
@@ -291,7 +379,50 @@ class WebSocketHandler:
                 "timeout_seconds": kw.get("timeout_seconds", 0),
                 "message": kw.get("message", "操作超时"),
             })
-        self._hooks.on("timeout_warning", _on_timeout_warning)
+
+        # 注册到共享 HookManager，保存 Handle
+        self._hook_handles.append(shared_hooks.on("stream", _on_stream))
+        self._hook_handles.append(shared_hooks.on("thinking_stream", _on_thinking_stream))
+        self._hook_handles.append(shared_hooks.on("stream_start", _on_stream_start))
+        self._hook_handles.append(shared_hooks.on("stream_end", _on_stream_end))
+        self._hook_handles.append(shared_hooks.on("tool_start", _on_tool_start))
+        self._hook_handles.append(shared_hooks.on("tool_end", _on_tool_end))
+        self._hook_handles.append(shared_hooks.on("tool_error", _on_tool_error))
+        self._hook_handles.append(shared_hooks.on("safety_blocked", _on_safety_blocked))
+        self._hook_handles.append(shared_hooks.on("state_change", _on_state_change))
+        self._hook_handles.append(shared_hooks.on("error", _on_error))
+        self._hook_handles.append(shared_hooks.on("timeout_warning", _on_timeout_warning))
+
+    # ═══════════════════════════════════════════════════════
+    #  连接断开清理
+    # ═══════════════════════════════════════════════════════
+
+    def _cleanup(self) -> None:
+        """
+        连接断开时清理资源。
+
+        1. 从共享 HookManager 取消注册本连接的所有回调
+        2. 从 Session 的 ws_notifiers 移除本连接的推送回调
+        3. 释放任务和锁
+
+        注意：不删除 Session 本身，其他连接可能还在使用。
+        """
+        # 1. 取消 hook 回调注册（从共享 HookManager 中移除）
+        for handle in self._hook_handles:
+            handle.unregister()
+        self._hook_handles.clear()
+
+        # 2. 移除 ws_notify 回调
+        if self._session:
+            self._session.remove_ws_notify(self._send_notification)
+
+        # 3. 释放任务和锁
+        self._running_tasks.pop(self._session_id, None)
+        self._ws_lock.cleanup(self._session_id)
+
+    # ═══════════════════════════════════════════════════════
+    #  消息路由
+    # ═══════════════════════════════════════════════════════
 
     async def _dispatch_message(self, raw_message: str) -> None:
         """解析并路由 WebSocket 消息。"""
@@ -332,7 +463,7 @@ class WebSocketHandler:
             await self._handle_session_delete(data)
         elif msg_type == "ping":
             await self._send_json({"type": "pong"})
-        # Phase 2: workspace 消息路由（统一使用 workspace_update）
+        # Workspace 消息路由（统一使用 workspace_update）
         elif msg_type == "workspace_open_file":
             await self._handle_workspace_action("open_file", data)
         elif msg_type == "workspace_close_file":
@@ -346,8 +477,15 @@ class WebSocketHandler:
         elif msg_type == "workspace_scan_dir":
             await self._handle_workspace_action("scan_dir", data)
 
+    # ═══════════════════════════════════════════════════════
+    #  消息处理器
+    # ═══════════════════════════════════════════════════════
+
     async def _handle_chat(self, data: dict) -> None:
-        """处理聊天消息。使用 Session.chat()。"""
+        """
+        处理聊天消息。使用 Session.chat()。
+        所有订阅同一 Session 的 WS 连接都会收到流式推送。
+        """
         user_text = data.get("text", "").strip()
         if not user_text:
             await self._send_json({"type": "error", "message": "消息内容不能为空"})
@@ -457,7 +595,11 @@ class WebSocketHandler:
         await self._send_json({"type": "session_list_result", "sessions": sessions})
 
     async def _handle_session_create(self) -> None:
-        """处理创建新会话请求。"""
+        """
+        创建新会话。
+        复用当前 Agent（共享 HookManager），新建 Context。
+        先取消本连接的旧 hook 回调，再重新注册。
+        """
         new_session_id = uuid4().hex[:16]
 
         # 取消旧会话的运行任务
@@ -467,25 +609,32 @@ class WebSocketHandler:
 
         self._ws_lock.cleanup(self._session_id)
 
-        # 通过 SessionManager 创建新会话
-        user = UserContext(user_id="ws_default", username="WebSocket User")
+        # 先取消本连接在旧 Session 的 hook 和 ws_notify
+        self._unregister_all()
+
+        # 通过 SessionManager 创建新会话（复用已有 Agent + 共享 HookManager）
+        user = self._authenticate_user()
         factory = self._session_manager.factory
         self._session = await self._session_manager.create_session(
             user=user,
             session_id=new_session_id,
-            hooks=self._hooks,
             approval_handler=self._approval_handler,
             context_window_size=factory.context_window_size,
         )
-        self._session.set_ws_notify(self._send_notification)
         self._session_id = new_session_id
+
+        # 重新注册本连接的 hook 回调到共享 HookManager
+        self._register_ws_hooks(self._session.agent.hooks)
+        self._session.add_ws_notify(self._send_notification)
 
         await self._send_json({"type": "session_created", "session_id": new_session_id})
         # 推送新会话的 conversation_state
         await self._push_conversation_state()
 
     async def _handle_session_switch(self, data: dict) -> None:
-        """处理切换会话请求。"""
+        """
+        切换会话。先取消旧 hook，再注册到新 Session 的 Agent hooks。
+        """
         target_id = data.get("session_id", "")
         if not target_id:
             await self._send_json({"type": "error", "message": "缺少 session_id"})
@@ -498,17 +647,22 @@ class WebSocketHandler:
                 self._session = existing
             else:
                 # 从 StateStore 恢复
-                user = UserContext(user_id="ws_default", username="WebSocket User")
+                user = self._authenticate_user()
                 factory = self._session_manager.factory
                 self._session = await self._session_manager.restore_session(
                     session_id=target_id,
                     user=user,
-                    hooks=self._hooks,
                     approval_handler=self._approval_handler,
                     context_window_size=factory.context_window_size,
                 )
-            # Phase 2: 注入 ws_notify 回调
-            self._session.set_ws_notify(self._send_notification)
+
+            # 取消旧 Session 的 hook 和 ws_notify
+            self._unregister_all()
+
+            # 注册到新 Session 的 Agent 共享 hooks
+            self._register_ws_hooks(self._session.agent.hooks)
+            self._session.add_ws_notify(self._send_notification)
+
         except Exception as e:
             await self._send_json({"type": "error", "message": f"切换会话失败: {e}"})
             return
@@ -545,6 +699,38 @@ class WebSocketHandler:
 
         await self._send_json({"type": "session_deleted", "session_id": target_id})
 
+    # ═══════════════════════════════════════════════════════
+    #  Hook 管理辅助
+    # ═══════════════════════════════════════════════════════
+
+    def _unregister_all(self) -> None:
+        """
+        取消本连接在当前 Session 的所有注册：
+        1. 从共享 HookManager 取消 hook 回调
+        2. 从 Session 的 ws_notifiers 移除推送回调
+        """
+        for handle in self._hook_handles:
+            handle.unregister()
+        self._hook_handles.clear()
+
+        if self._session:
+            self._session.remove_ws_notify(self._send_notification)
+
+    # ═══════════════════════════════════════════════════════
+    #  认证
+    # ═══════════════════════════════════════════════════════
+
+    def _authenticate_user(self) -> UserContext:
+        """
+        从 WebSocket 连接信息提取用户身份（认证桩）。
+        TODO: 接入真实认证系统后替换（从 cookie / header / token 解析）
+        """
+        return UserContext(user_id="ws_default", username="WebSocket User")
+
+    # ═══════════════════════════════════════════════════════
+    #  辅助方法
+    # ═══════════════════════════════════════════════════════
+
     def _build_context_usage(self, session: Session) -> dict:
         """构建上下文使用量信息，用于前端进度条展示。"""
         ctx = session.context
@@ -557,12 +743,7 @@ class WebSocketHandler:
             "percentage": percentage,
         }
 
-    def _cleanup(self) -> None:
-        """连接断开时清理资源。"""
-        self._running_tasks.pop(self._session_id, None)
-        self._ws_lock.cleanup(self._session_id)
-
-    # ── Phase 2: Workspace 消息处理（统一入口） ──
+    # ── Workspace 消息处理（统一入口） ──
 
     async def _send_notification(self, msg_type: str, data: dict) -> None:
         """Session 的 ws_notify 回调：将 workspace 状态变更推送到前端。"""

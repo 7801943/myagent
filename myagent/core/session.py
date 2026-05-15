@@ -23,6 +23,14 @@ Phase 4 重构：
   - SessionMeta 作为唯一状态容器（扁平化嵌套 dict 结构）
   - 初始化时从 Agent 实例采集模型、工具等信息
   - 运行时更新由 Hook 信号驱动（Phase 2 完善）
+
+Phase 5 重构（多用户 Bug 修复）：
+  - Hook 回调保存 HookHandle，Session 销毁时取消注册（Bug #6）
+  - Hook 回调增加 session_id 过滤（Bug #5）
+  - chat() 不再写入 Agent 属性，通过 HookContext 传递状态（Bug #2）
+  - make_command_handler 保存为实例属性，不写入 Agent（Bug #3）
+  - ws_notify 改为观察者列表，支持多客户端（Bug #4）
+  - SessionManager 销毁/TTL 清理时取消 hook 注册
 """
 from __future__ import annotations
 
@@ -30,13 +38,14 @@ import asyncio
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from myagent.context.manager import ContextManager
 from myagent.context.state import SessionState, AgentRunState
 from myagent.context.message import ContentBlock
-from myagent.core.hook import HookContext
+from myagent.core.hook import HookContext, HookHandle
 from myagent.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -275,8 +284,8 @@ class Session:
         self._cancel_reason: str = ""
         self._cancel_detail: str = ""
 
-        # 前端通知回调（由 ws_handler 注入）
-        self._ws_notify = None
+        # 前端通知回调（支持多客户端订阅同一 Session）
+        self._ws_notifiers: list = []
 
         # PromptRenderer（由 SessionManager 注入，SSPT 动态渲染）
         self._prompt_renderer: "PromptRenderer | None" = None
@@ -295,10 +304,33 @@ class Session:
         self._init_meta_from_agent()
 
         # 注册状态同步 hook：监听 state_change 事件更新 meta
-        agent.hooks.on("state_change", self._on_state_change)
+        # 保存 HookHandle，用于 Session 销毁时取消注册
+        self._hook_handles: list[HookHandle] = []
+        self._hook_handles.append(
+            agent.hooks.on("state_change", self._on_state_change)
+        )
 
         # 注册 tool_end hook：文件操作工具执行后自动刷新 workspace
-        agent.hooks.on("tool_end", self._on_tool_end)
+        self._hook_handles.append(
+            agent.hooks.on("tool_end", self._on_tool_end)
+        )
+
+        # 系统指令处理器（由 make_command_handler 创建）
+        self._system_command_handler = None
+
+    # ── Hook 取消注册 ──
+
+    def unregister_hooks(self) -> None:
+        """取消注册所有 hook 回调（Session 销毁时调用）。"""
+        for handle in self._hook_handles:
+            handle.unregister()
+        self._hook_handles.clear()
+
+    # ── 空会话判定 ──
+
+    def has_user_message(self) -> bool:
+        """判断会话中是否存在用户消息（用于空会话过滤）。"""
+        return any(m.role == "user" for m in self._context.messages)
 
     # ── 兼容属性 ──
 
@@ -428,11 +460,15 @@ class Session:
     # ── Hook 回调 ──
 
     async def _on_state_change(self, ctx, state: str) -> None:
-        """Hook 回调：同步 agent_run_state 到 meta。"""
+        """Hook 回调：同步 agent_run_state 到 meta（仅处理当前 session 的事件）。"""
+        if ctx.session_id != self.id:
+            return  # 不是本 session 的事件，跳过
         self.meta.set("context", agent_run_state=state)
 
     async def _on_tool_end(self, ctx, tool_name: str, result: Any, call_id: str, latency_ms: float) -> None:
-        """Hook 回调：文件操作工具执行后自动刷新 workspace。"""
+        """Hook 回调：文件操作工具执行后自动刷新 workspace（仅处理当前 session 的事件）。"""
+        if ctx.session_id != self.id:
+            return  # 不是本 session 的事件，跳过
         if not self.workspace:
             return
 
@@ -471,18 +507,18 @@ class Session:
         self._cancel_reason = ""
         self._cancel_detail = ""
 
-        # 构建 HookContext，注入 workspace 信息
+        # 构建 HookContext，将所有会话级状态注入 ctx（不再写入 Agent）
         workspace_root = self.workspace.root_path if self.workspace else None
         active_file_path = self.workspace.get_active_file_path() if self.workspace else None
         ctx = HookContext(
             session_id=self.id,
             workspace_root=workspace_root,
             active_file_path=active_file_path,
+            session_meta=self.meta,
+            system_command_handler=self._system_command_handler,
         )
 
-        if self.workspace:
-            self._agent._workspace_root = self.workspace.root_path
-            self._agent._active_file_path = self.workspace.get_active_file_path()
+        # 不再修改 Agent 的任何属性！
 
         logger.info(f"Session chat start: {self.id}")
 
@@ -493,9 +529,6 @@ class Session:
                 variables = await VariableCollector.collect(self)
                 rendered_prompt = self._prompt_renderer.render(variables)
                 self._context.set_system(rendered_prompt)
-
-            # ── 注入 SessionMeta 到 Agent（统一工具数据源） ──
-            self._agent._session_meta = self.meta
 
             if isinstance(user_input, list):
                 await self._context.add_user_message(user_input)
@@ -606,7 +639,7 @@ class Session:
         return await self._state_store.load_messages(self.id)
 
     def make_command_handler(self):
-        """创建系统指令处理器并注入给 Agent。"""
+        """创建系统指令处理器并保存为实例属性（不写入 Agent）。"""
         session = self
 
         async def _system_command_handler(cmd: str, args: str, ctx: HookContext) -> None:
@@ -635,7 +668,8 @@ class Session:
             else:
                 logger.debug(f"Unknown system command: /{cmd} {args}")
 
-        self._agent._system_command_handler = _system_command_handler
+        # 保存为 Session 实例属性，不再写入 Agent
+        self._system_command_handler = _system_command_handler
 
     # ── Workspace 相关方法 ──
 
@@ -643,10 +677,11 @@ class Session:
         """设置/切换工作空间。"""
         from myagent.core.workspace import WorkspaceManager
 
-        self.workspace = WorkspaceManager(root_path)
+        expanded_path = str(Path(root_path).expanduser())
+        self.workspace = WorkspaceManager(expanded_path)
         self.workspace.set_on_change(self._on_workspace_change)
-        await self.workspace.update("user", "set_root", {"root_path": root_path})
-        logger.info(f"Workspace set: {root_path}")
+        await self.workspace.update("user", "set_root", {"root_path": expanded_path})
+        logger.info(f"Workspace set: {expanded_path}")
 
     async def refresh_workspace(self) -> None:
         """刷新工作空间文件列表。"""
@@ -656,15 +691,38 @@ class Session:
     async def _on_workspace_change(self, state: "WorkspaceState", source: str) -> None:
         """WorkspaceManager 状态变更回调。"""
         await self._persist_workspace(state)
-        if source == "agent" and self._ws_notify:
-            await self._ws_notify("workspace_state", state.to_dict())
+        if source == "agent":
+            await self._notify_clients("workspace_state", state.to_dict())
+
+    # ── 多客户端通知 ──
+
+    def add_ws_notify(self, callback) -> None:
+        """添加一个客户端通知回调（支持多客户端订阅同一 Session）。"""
+        if callback not in self._ws_notifiers:
+            self._ws_notifiers.append(callback)
+
+    def remove_ws_notify(self, callback) -> None:
+        """移除一个客户端通知回调（客户端断开时调用）。"""
+        if callback in self._ws_notifiers:
+            self._ws_notifiers.remove(callback)
 
     def set_ws_notify(self, callback) -> None:
-        """由 ws_handler 注入的前端通知回调。"""
-        self._ws_notify = callback
+        """向后兼容：内部调用 add_ws_notify。"""
+        self.add_ws_notify(callback)
+
+    async def _notify_clients(self, msg_type: str, data: dict) -> None:
+        """向所有订阅的客户端推送通知。"""
+        for notify in list(self._ws_notifiers):  # 复制列表防止迭代中修改
+            try:
+                await notify(msg_type, data)
+            except Exception:
+                logger.warning("Client notify failed (connection may be closed)")
 
     async def _persist_workspace(self, state: "WorkspaceState") -> None:
         """持久化 workspace 状态到 DB。"""
+        # 空会话（无用户消息）不触发持久化，避免产生无实际对话的记录
+        if not self.has_user_message():
+            return
         if self._state_store:
             ws_json = json.dumps(state.to_dict(), ensure_ascii=False)
             await self._state_store.save_workspace(self.id, ws_json)
@@ -678,9 +736,9 @@ class Session:
     # ── 前端推送 ──
 
     async def push_conversation_state(self) -> None:
-        """推送 meta 快照到前端（通过 ws_notify）。"""
-        if self._ws_notify:
-            await self._ws_notify("conversation_state", self.meta.to_dict())
+        """推送 meta 快照到前端（通过 ws_notifiers）。"""
+        if self._ws_notifiers:
+            await self._notify_clients("conversation_state", self.meta.to_dict())
 
 
 # ─── SessionManager ──────────────────────────────────────────
@@ -744,19 +802,29 @@ class SessionManager:
                 to_evict.append(sid)
         for sid in to_evict:
             session = self._sessions.pop(sid)
-            await session.save()
-            logger.info(f"Session evicted (TTL): {sid}")
+            session.unregister_hooks()
+            # 空会话（无用户消息）直接丢弃，不持久化；同时清理 DB 中可能存在的残余记录
+            if not session.has_user_message():
+                if self._state_store:
+                    await self._state_store.clear_session(sid)
+                logger.info(f"Empty session discarded (TTL): {sid}")
+            else:
+                await session.save()
+                logger.info(f"Session evicted (TTL): {sid}")
 
     def _get_or_create_agent(
         self,
         user_id: str,
-        hooks: "HookManager",
         approval_handler=None,
         no_safety: bool = False,
     ) -> "Agent":
+        """
+        获取或创建用户的 Agent 实例。
+        Agent 始终自建 HookManager（共享广播中心），外部通过 agent.hooks.on() 注册回调。
+        同一用户复用同一个 Agent，确保 HookManager 共享。
+        """
         if user_id not in self._user_agents:
             agent = self._factory.create_agent(
-                hooks=hooks,
                 approval_handler=approval_handler,
                 no_safety=no_safety,
             )
@@ -768,7 +836,6 @@ class SessionManager:
         self,
         user: UserContext,
         session_id: str | None = None,
-        hooks: "HookManager | None" = None,
         approval_handler=None,
         system_prompt: str | None = None,
         max_tokens_budget: int = 100000,
@@ -777,19 +844,19 @@ class SessionManager:
         no_safety: bool = False,
         workspace_root: str | None = None,
     ) -> Session:
-        """创建新会话。"""
-        if hooks is None:
-            from myagent.core.hook import HookManager
-            hooks = HookManager()
-
-        agent = self._get_or_create_agent(user.user_id, hooks, approval_handler, no_safety=no_safety)
+        """
+        创建新会话。
+        Agent 始终自建 HookManager，不再接受外部 hooks 参数。
+        外部（如 ws_handler）通过 agent.hooks.on() 注册自己的回调。
+        """
+        agent = self._get_or_create_agent(user.user_id, approval_handler, no_safety=no_safety)
         effective_prompt = system_prompt or self._factory.system_prompt
 
         # 如果没有显式传入 workspace_root，从配置读取 root_dir 作为默认值
         if not workspace_root:
             root_dir = self._factory.app_config.get("root_dir", "")
             if root_dir:
-                workspace_root = root_dir
+                workspace_root = str(Path(root_dir).expanduser())
 
         session = Session(
             session_id=session_id,
@@ -814,9 +881,10 @@ class SessionManager:
             logger.warning(f"Failed to create PromptRenderer, using static prompt: {e}")
 
         if workspace_root and session.workspace:
-            from myagent.core.workspace import scan_dir_files
-            files = await scan_dir_files(workspace_root)
-            session.workspace._state.files = files
+            # 使用统一的 update 入口扫描根目录（触发通知链 + 状态同步）
+            await session.workspace.update("user", "set_root", {"root_path": workspace_root})
+            # 同步 workspace 快照到 meta，确保首次 _push_conversation_state 包含文件列表
+            session.meta.set("workspace", state=session.workspace.snapshot().to_dict())
 
         logger.info(f"Session created: {session.id} for user: {user.user_id}")
         return session
@@ -828,21 +896,19 @@ class SessionManager:
         self,
         session_id: str,
         user: UserContext,
-        hooks: "HookManager | None" = None,
         approval_handler=None,
         max_tokens_budget: int = 100000,
         context_window_size: int = 128000,
         tool_result_max_chars: int = 100000,
     ) -> Session:
-        """从 StateStore 恢复会话。"""
+        """
+        从 StateStore 恢复会话。
+        复用用户的 Agent（含共享 HookManager），不再接受外部 hooks。
+        """
         if not self._state_store:
             raise RuntimeError("No StateStore configured")
 
-        if hooks is None:
-            from myagent.core.hook import HookManager
-            hooks = HookManager()
-
-        agent = self._get_or_create_agent(user.user_id, hooks, approval_handler)
+        agent = self._get_or_create_agent(user.user_id, approval_handler)
 
         # 加载会话状态
         agent_run_state, metadata_dict = await self._state_store.load_state(session_id)
@@ -900,9 +966,24 @@ class SessionManager:
 
     async def delete_session(self, session_id: str) -> None:
         session = self._sessions.pop(session_id, None)
-        if session and self._state_store:
+        if session:
+            session.unregister_hooks()
+        # 无论是否在内存中，都尝试从 DB 清理
+        if self._state_store:
             await self._state_store.clear_session(session_id)
         logger.info(f"Session deleted: {session_id}")
+
+    def get_user_active_session(self, user_id: str) -> Session | None:
+        """
+        获取用户的活跃会话（供 WS 连接复用）。
+        优先返回最近活跃的会话，用于多客户端共享同一 Session。
+        """
+        # 反向遍历，优先返回最近使用的
+        for sid in reversed(list(self._sessions.keys())):
+            session = self._sessions.get(sid)
+            if session and session.user.user_id == user_id:
+                return session
+        return None
 
     async def list_sessions(self, user_id: str | None = None) -> list[dict]:
         if self._state_store:

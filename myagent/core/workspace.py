@@ -445,4 +445,4 @@ async def scan_dir_files(root_path: str, sub_path: str | None = None) -> list[Fi
     扫描工作空间目录（一层，非递归），返回文件元信息列表。
     在后台线程中执行以避免阻塞事件循环。
     """
-    return await asyncio.to_thread(_scan_level_sync, Path(root_path).resolve(), sub_path)
+    return await asyncio.to_thread(_scan_level_sync, Path(root_path).expanduser().resolve(), sub_path)

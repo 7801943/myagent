@@ -294,7 +294,9 @@ class SQLiteStateStore(StateStore):
             return result
 
     async def clear_session(self, session_id: str) -> None:
-        await self._db.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+        cursor = await self._db.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
         await self._db.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
         await self._db.execute("DELETE FROM pending_tool_calls WHERE session_id = ?", (session_id,))
         await self._db.commit()
+        if cursor.rowcount > 0:
+            logger.info(f"DB session cleared: {session_id}")

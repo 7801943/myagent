@@ -49,27 +49,24 @@ class Agent:
         *,
         provider_router: ProviderRouter,
         tool_manager: ToolManager | None = None,
-        hooks: HookManager | None = None,
         safety_guard=None,
         secret_manager=None,
         max_iterations: int = 100,
         approval_handler: Callable[[list], Awaitable[list[bool]]] | None = None,
-        system_command_handler: Callable[[str, str, HookContext], Awaitable[None]] | None = None,
     ):
+        """
+        无状态 AI 引擎。hooks 始终自建（共享广播中心），外部通过 agent.hooks.on() 注册回调。
+        不再接受外部 hooks 注入，确保多客户端共享同一个 HookManager。
+        """
         self._router = provider_router
         self._tool_manager = tool_manager or ToolManager()
-        self._hooks = hooks or HookManager()
+        self._hooks = HookManager()  # 始终自建，不暴露给外部
         self._safety_guard = safety_guard
         self._secret_manager = secret_manager
         self._max_iterations = max_iterations
         self._approval_handler = approval_handler
-        self._system_command_handler = system_command_handler
-        # Phase 2: workspace 信息（由 Session.chat() 注入）
-        self._workspace_root: str | None = None
-        self._active_file_path: str | None = None
-
-        # Phase 5: SessionMeta 引用（由 Session.chat() 注入，用于统一工具数据源）
-        self._session_meta = None
+        # 不再持有 _system_command_handler, _workspace_root, _active_file_path, _session_meta
+        # 这些通过 HookContext 由 Session.chat() 每次注入
 
     @property
     def hooks(self) -> HookManager:
@@ -106,7 +103,7 @@ class Agent:
                     logger.debug(f"Iteration {ctx.iteration}, turn={state.next_turn.name}")
 
                     # 2. 从状态载体中提取动作并执行
-                    turn = self._create_turn(state.next_turn, context)
+                    turn = self._create_turn(state.next_turn, context, ctx)
                     state = await turn.execute(ctx, input_data=state.data, source=state.kind)
 
                     # 3. 检查流转是否结束
@@ -127,13 +124,13 @@ class Agent:
                 await context.add_assistant_message(content=cancel_msg, tool_calls=None)
                 return StreamResult(text=cancel_msg, stop_reason="cancelled")
             
-    def _create_turn(self, kind: TurnKind, context: ContextManager):
+    def _create_turn(self, kind: TurnKind, context: ContextManager, ctx: HookContext):
         """Turn 工厂。每次动态获取 tool_schemas，支持运行时热加载。"""
         if kind == TurnKind.MODEL:
             from myagent.core.turns import ModelTurn
-            # 数据源：优先从 SessionMeta（统一工具管理），降级到 ToolManager 直接调用
-            if self._session_meta:
-                tool_schemas = self._session_meta.get("tool", "tools", [])
+            # 数据源：优先从 ctx.session_meta（会话级），降级到 ToolManager 直接调用（CLI 单会话场景）
+            if ctx.session_meta:
+                tool_schemas = ctx.session_meta.get("tool", "tools", [])
             else:
                 tool_schemas = self._tool_manager.list_schemas() if self._tool_manager else None
             return ModelTurn(
@@ -154,11 +151,12 @@ class Agent:
             )
         elif kind == TurnKind.SYSTEM:
             from myagent.core.turns import SystemTurn
+            # 从 ctx 获取会话级指令处理器
             return SystemTurn(
                 context=context,
                 hooks=self._hooks,
                 timeout=30.0,
-                system_command_handler=self._system_command_handler,
+                system_command_handler=ctx.system_command_handler,
             )
         else:
             raise ValueError(f"Unknown TurnKind: {kind}")
@@ -216,7 +214,7 @@ class AgentFactory:
 
     用法：
         factory = AgentFactory(config_path="config.yaml")
-        agent = factory.create_agent(hooks=my_hooks, approval_handler=my_handler)
+        agent = factory.create_agent(approval_handler=my_handler)
     """
 
     def __init__(
@@ -269,15 +267,14 @@ class AgentFactory:
     def create_agent(
         self,
         *,
-        hooks: HookManager,
         approval_handler: Callable[[list], Awaitable[list[bool]]] | None = None,
         no_safety: bool = False,
     ) -> Agent:
         """
         创建纯 Agent 实例（无 session 管理）。
+        Agent 始终自建 HookManager（共享广播中心），外部通过 agent.hooks.on() 注册回调。
 
         Args:
-            hooks: 由调用方构建的 HookManager
             approval_handler: 可选的人工审批回调
             no_safety: 是否禁用安全检查
 
@@ -300,10 +297,9 @@ class AgentFactory:
         # ── 5. 构建工具管理器 ──
         tool_manager = self._build_tool_manager()
 
-        # ── 6. 组装 Agent ──
+        # ── 6. 组装 Agent（hooks 始终自建，不传外部 hooks）──
         agent = Agent(
             provider_router=router,
-            hooks=hooks,
             tool_manager=tool_manager,
             safety_guard=safety_guard,
             secret_manager=secret_manager,
