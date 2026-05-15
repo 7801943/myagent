@@ -474,7 +474,7 @@ class Session:
 
         file_tools = {"file_write", "file_read", "cli_execute"}
         if tool_name in file_tools:
-            await self.workspace_update("agent", "files_changed", {})
+            await self.workspace.update("agent", "files_changed", {})
 
         if tool_name == "file_read" and hasattr(result, 'metadata'):
             file_path = result.metadata.get("path", "") if isinstance(result.metadata, dict) else ""
@@ -485,7 +485,7 @@ class Session:
                     rel_path = os.path.relpath(file_path, root)
                 else:
                     rel_path = file_path
-                await self.workspace_update("agent", "mark_llm_read", {"path": rel_path})
+                await self.workspace.update("agent", "mark_llm_read", {"path": rel_path})
 
     # ── 核心对话 ──
 
@@ -660,37 +660,20 @@ class Session:
                         logger.info(f"System command: /model → {provider_name}")
                     except Exception as e:
                         logger.warning(f"Failed to switch model: {e}")
-            elif cmd == "workspace":
-                root_path = args.strip()
-                if root_path:
-                    logger.info(f"System command: /workspace {root_path}")
-                    await session.set_workspace(root_path)
             else:
                 logger.debug(f"Unknown system command: /{cmd} {args}")
 
         # 保存为 Session 实例属性，不再写入 Agent
         self._system_command_handler = _system_command_handler
 
-    # ── Workspace 相关方法 ──
-
-    async def set_workspace(self, root_path: str) -> None:
-        """设置/切换工作空间。"""
-        from myagent.core.workspace import WorkspaceManager
-
-        expanded_path = str(Path(root_path).expanduser())
-        self.workspace = WorkspaceManager(expanded_path)
-        self.workspace.set_on_change(self._on_workspace_change)
-        await self.workspace.update("user", "set_root", {"root_path": expanded_path})
-        logger.info(f"Workspace set: {expanded_path}")
-
-    async def refresh_workspace(self) -> None:
-        """刷新工作空间文件列表。"""
-        if self.workspace:
-            await self.workspace.update("agent", "files_changed", {})
+    # ── Workspace 回调 ──
 
     async def _on_workspace_change(self, state: "WorkspaceState", source: str) -> None:
         """WorkspaceManager 状态变更回调。"""
-        await self._persist_workspace(state)
+        # 持久化 workspace 状态到 DB（空会话不触发）
+        if self.has_user_message() and self._state_store:
+            ws_json = json.dumps(state.to_dict(), ensure_ascii=False)
+            await self._state_store.save_workspace(self.id, ws_json)
         if source == "agent":
             await self._notify_clients("workspace_state", state.to_dict())
 
@@ -717,21 +700,6 @@ class Session:
                 await notify(msg_type, data)
             except Exception:
                 logger.warning("Client notify failed (connection may be closed)")
-
-    async def _persist_workspace(self, state: "WorkspaceState") -> None:
-        """持久化 workspace 状态到 DB。"""
-        # 空会话（无用户消息）不触发持久化，避免产生无实际对话的记录
-        if not self.has_user_message():
-            return
-        if self._state_store:
-            ws_json = json.dumps(state.to_dict(), ensure_ascii=False)
-            await self._state_store.save_workspace(self.id, ws_json)
-
-    async def workspace_update(self, source: str, action: str, data: dict) -> Any:
-        """统一 workspace 更新入口。"""
-        if not self.workspace:
-            return None
-        return await self.workspace.update(source, action, data)
 
     # ── 前端推送 ──
 

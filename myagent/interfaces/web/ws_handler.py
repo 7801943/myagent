@@ -752,11 +752,11 @@ class WebSocketHandler:
     async def _handle_workspace_action(self, action: str, data: dict) -> None:
         """
         统一 workspace 操作处理。
-        所有前端 workspace 操作统一通过 Session.workspace_update("user", action, data) 处理。
+        所有前端 workspace 操作直接通过 WorkspaceManager.update() 处理。
         """
-        if not self._session:
+        if not self._session or not self._session.workspace:
             return
-        await self._session.workspace_update("user", action, data)
+        await self._session.workspace.update("user", action, data)
         logger.debug(f"Workspace action: {action}, data={data}")
 
     async def _push_conversation_state(self) -> None:

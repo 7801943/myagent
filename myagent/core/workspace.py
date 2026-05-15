@@ -13,7 +13,7 @@
             "scan_dir" | "files_changed" | "mark_dirty" | "mark_llm_read"
 
 数据流：
-  前端用户操作 ──ws──→ ws_handler ──→ Session.workspace_update("user", action, data)
+  前端用户操作 ──ws──→ ws_handler ──→ workspace.update("user", action, data)
                                               │
                                     WorkspaceManager.update("user", action, data)
                                               │
@@ -23,7 +23,7 @@
                                               ├─ 持久化
                                               └─ workspace 状态自动注入 LLM 上下文
 
-  LLM 工具执行 ──→ tool_end hook ──→ Session.workspace_update("agent", action, data)
+  LLM 工具执行 ──→ tool_end hook ──→ workspace.update("agent", action, data)
                                               │
                                     WorkspaceManager.update("agent", action, data)
                                               │
@@ -53,7 +53,6 @@ class FileInfo:
     is_dir: bool = False   # 是否为目录
     size: int = 0          # 文件大小（字节），目录为 0
     modified_at: str = ""  # ISO 格式最后修改时间
-    language: str = ""     # 编程语言标识（如 "python"），目录为 ""
     is_user_opened: bool = False  # 用户在前端打开过此文件
     is_llm_read: bool = False     # LLM 后端读取过此文件
 
@@ -61,7 +60,6 @@ class FileInfo:
         return {
             "path": self.path, "is_dir": self.is_dir,
             "size": self.size, "modified_at": self.modified_at,
-            "language": self.language,
             "is_user_opened": self.is_user_opened,
             "is_llm_read": self.is_llm_read,
         }
@@ -187,7 +185,7 @@ class WorkspaceManager:
                 flags += " [用户已打开]"
             if f.is_llm_read:
                 flags += " [LLM已读取]"
-            lines.append(f"  {f.path} ({size_str}, {f.language}){flags}")
+            lines.append(f"  {f.path} ({size_str}){flags}")
         if len(files_only) > 80:
             lines.append(f"  ... 还有 {len(files_only) - 80} 个文件")
         return "\n".join(lines)
@@ -389,24 +387,6 @@ class WorkspaceManager:
 #  文件扫描工具函数（外部调用，非 WorkspaceManager 方法）
 # ══════════════════════════════════════
 
-_LANGUAGE_MAP = {
-    ".py": "python", ".js": "javascript", ".ts": "typescript",
-    ".tsx": "typescript", ".jsx": "javascript", ".html": "html",
-    ".css": "css", ".json": "json", ".yaml": "yaml", ".yml": "yaml",
-    ".md": "markdown", ".txt": "text", ".toml": "toml",
-    ".sh": "bash", ".sql": "sql", ".xml": "xml", ".rs": "rust",
-    ".go": "go", ".java": "java", ".c": "c", ".cpp": "cpp",
-    ".h": "c", ".hpp": "cpp", ".rb": "ruby", ".php": "php",
-    ".swift": "swift", ".kt": "kotlin", ".scala": "scala",
-    ".lua": "lua", ".r": "r", ".zig": "zig",
-}
-
-
-def _detect_language(filename: str) -> str:
-    suffix = Path(filename).suffix.lower()
-    return _LANGUAGE_MAP.get(suffix, "text")
-
-
 def _scan_level_sync(root: Path, sub_path: str | None = None) -> list[FileInfo]:
     """同步扫描目录（一层，非递归），返回直接子条目列表。"""
     target = (root / sub_path) if sub_path else root
@@ -422,7 +402,7 @@ def _scan_level_sync(root: Path, sub_path: str | None = None) -> list[FileInfo]:
 
         rel = str(entry.relative_to(root))
         if entry.is_dir():
-            result.append(FileInfo(path=rel, is_dir=True, language=""))
+            result.append(FileInfo(path=rel, is_dir=True))
         else:
             try:
                 stat = entry.stat()
@@ -433,10 +413,9 @@ def _scan_level_sync(root: Path, sub_path: str | None = None) -> list[FileInfo]:
                     modified_at=datetime.fromtimestamp(
                         stat.st_mtime, tz=timezone.utc
                     ).isoformat(),
-                    language=_detect_language(entry.name),
                 ))
             except (PermissionError, OSError):
-                result.append(FileInfo(path=rel, is_dir=False, language=_detect_language(entry.name)))
+                result.append(FileInfo(path=rel, is_dir=False))
     return result
 
 
