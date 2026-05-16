@@ -15,48 +15,18 @@ Phase 1 重构：
 import json
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from enum import Enum
 from pathlib import Path
 
 import aiosqlite
 
 from myagent.context.message import Message, ToolCall, ToolResult
+from myagent.core.models import SessionState, AgentRunState, _LEGACY_STATE_MAP
 from myagent.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-
-class SessionState(str, Enum):
-    """会话生命周期状态。"""
-    ACTIVE = "active"           # 活跃
-    SUSPENDED = "suspended"     # 挂起（用户离线但保留状态）
-    CLOSED = "closed"           # 已关闭
-
-
-class AgentRunState(str, Enum):
-    """
-    Agent 运行时状态（原 AgentState，重命名以区分 SessionState）。
-    AgentLoop 的每一次状态变迁都必须先持久化到 StateStore，
-    再执行实际操作——这是断电恢复的基石。
-    """
-    IDLE = "idle"                    # 空闲。run() 未执行，或刚结束回到此状态
-    THINKING = "thinking"            # LLM 推理阶段（对应 extended thinking）
-    GENERATING = "generating"        # LLM 流式输出中（首次 text_delta 后进入）
-    WAITING_TOOL = "waiting_tool"    # LLM 已返回 tool_calls，等待执行
-    WAITING_HITL = "waiting_hitl"    # 等待人工审批（Phase 2 预留）
-    ERROR = "error"                  # 发生错误
-
-
 # 向后兼容别名
 AgentState = AgentRunState
-
-# ── 旧状态值迁移映射 ──
-# 精简重构时移除了 RUNNING / FINISHED，但旧数据库中可能仍存储了这些值。
-# 加载时通过此映射自动转换，避免 ValueError。
-_LEGACY_STATE_MAP: dict[str, str] = {
-    "running": "generating",   # RUNNING → GENERATING
-    "finished": "idle",        # FINISHED → IDLE（会话结束即回到空闲）
-}
 
 class StateStore(ABC):
     """状态持久化抽象接口。"""

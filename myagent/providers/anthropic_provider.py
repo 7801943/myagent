@@ -64,12 +64,12 @@ class AnthropicProvider(BaseProvider):
         
         支持两种输入格式：
         1. BaseTool 对象列表（旧格式，ToolManager 直接调用）
-        2. dict 列表（新格式，来自 SessionMeta）
+        2. dict 列表（新格式，来自 SessionData）
         """
         result = []
         for tool in tools:
             if isinstance(tool, dict):
-                # dict 格式（来自 SessionMeta）
+                # dict 格式（来自 SessionData）
                 result.append({
                     "name": tool.get("name", ""),
                     "description": tool.get("description", ""),

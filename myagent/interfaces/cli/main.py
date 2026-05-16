@@ -17,7 +17,8 @@ import sys
 from pathlib import Path
 
 from myagent.core.agent import AgentFactory
-from myagent.core.session import Session, SessionManager, UserContext
+from myagent.core.session import Session, SessionManager
+from myagent.core.models import UserContext
 from myagent.core.hook import HookManager
 from myagent.context.message import ToolCall
 from myagent.interfaces.cli.ui import CliUI, print_warning

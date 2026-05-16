@@ -16,7 +16,8 @@ Phase 3 重构：
 """
 from myagent.core.agent import Agent
 from myagent.core.hook import HookContext, HookManager, HookHandle
-from myagent.core.session import Session, SessionManager, UserContext
+from myagent.core.session import Session, SessionManager
+from myagent.core.models import UserContext, SessionData
 from myagent.core.agent import AgentFactory
 from myagent.core.turns import BaseTurn, TurnKind, TurnResult, StreamResult
 from myagent.core.workspace import WorkspaceManager
@@ -28,6 +29,7 @@ __all__ = [
     "HookHandle",
     "Session",
     "SessionManager",
+    "SessionData",
     "UserContext",
     "AgentFactory",
     "BaseTurn",

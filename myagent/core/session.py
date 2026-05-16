@@ -20,7 +20,7 @@ Phase 3 重构：
   - agent 操作目录同步到前端，user 操作目录同步到 LLM 上下文
 
 Phase 4 重构：
-  - SessionMeta 作为唯一状态容器（扁平化嵌套 dict 结构）
+  - SessionData 作为唯一状态容器（扁平化嵌套 dict 结构）
   - 初始化时从 Agent 实例采集模型、工具等信息
   - 运行时更新由 Hook 信号驱动（Phase 2 完善）
 
@@ -31,21 +31,25 @@ Phase 5 重构（多用户 Bug 修复）：
   - make_command_handler 保存为实例属性，不写入 Agent（Bug #3）
   - ws_notify 改为观察者列表，支持多客户端（Bug #4）
   - SessionManager 销毁/TTL 清理时取消 hook 注册
+
+Phase 6 重构（领域模型解耦）：
+  - SessionState / AgentRunState 迁移到 core/models.py
+  - UserContext / SessionData 迁移到 core/models.py
+  - session.py 仅保留 Session 核心流转 + SessionManager 管理
 """
 from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from myagent.context.manager import ContextManager
-from myagent.context.state import SessionState, AgentRunState
 from myagent.context.message import ContentBlock
 from myagent.core.hook import HookContext, HookHandle
+from myagent.core.models import UserContext, SessionData, SessionState, AgentRunState
 from myagent.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -56,165 +60,6 @@ if TYPE_CHECKING:
     from myagent.prompt.renderer import PromptRenderer
 
 logger = get_logger(__name__)
-
-
-# ─── SessionMeta ──────────────────────────────────────────────
-
-@dataclass
-class SessionMeta:
-    """
-    会话状态容器 — 扁平化嵌套 dict 结构。
-
-    分组：
-      - user: {"user_id", "username"}
-      - model: {"active": {...}, "available": [{...}, ...]}
-      - tool:  {"tools": [{"name", "description", "source"}, ...]}
-      - context: {"token_usage": {"used", "total"},
-                  "agent_run_state", "session_state",
-                  "stop_reason", "cancelled"}
-      - workspace: {"state": {...} | None}
-      - extra: 扩展字段
-    """
-
-    user: dict[str, Any] = field(default_factory=lambda: {"user_id": "", "username": ""})
-    model: dict[str, Any] = field(default_factory=lambda: {"active": {}, "available": []})
-    tool: dict[str, Any] = field(default_factory=lambda: {"tools": []})
-    context: dict[str, Any] = field(default_factory=lambda: {
-        "token_usage": {"used": 0, "total": 128000},
-        "agent_run_state": "idle",
-        "session_state": "active",
-        "stop_reason": "",
-        "cancelled": False,
-    })
-    workspace: dict[str, Any] = field(default_factory=lambda: {"state": None})
-    extra: dict[str, Any] = field(default_factory=dict)
-
-    _GROUPS = ("user", "model", "tool", "context", "workspace", "extra")
-
-    # ── 统一 get / set ──
-
-    def get(self, group: str, key: str | None = None, default=None):
-        """
-        取值。
-
-        meta.get("user")           → 整个 user dict
-        meta.get("user", "username") → "alice"
-        meta.get("context", "agent_run_state") → "idle"
-        """
-        data = getattr(self, group, None)
-        if data is None:
-            return default
-        if key is None:
-            return data
-        return data.get(key, default)
-
-    def set(self, group: str, data: dict | None = None, **kwargs):
-        """
-        设值。支持两种方式（可混用）：
-
-        meta.set("user", {"user_id": "1", "username": "alice"})  # dict 整体合并
-        meta.set("context", agent_run_state="idle")               # kwargs 合并
-        meta.set("model", active={...}, available=[...])           # 多 kwargs
-        """
-        target = getattr(self, group, None)
-        if target is None:
-            return
-        if data is not None:
-            target.update(data)
-        if kwargs:
-            target.update(kwargs)
-
-    # ── 序列化 ──
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为持久化 / 前端推送的 dict。"""
-        # 计算 token_usage 派生值
-        tu = self.context.get("token_usage", {})
-        used = tu.get("used", 0)
-        total = tu.get("total", 128000)
-        percentage = round(used / total * 100, 1) if total > 0 else 0.0
-        remaining = max(0, total - used)
-
-        return {
-            "user": dict(self.user),
-            "model": {
-                "active": dict(self.model.get("active", {})),
-                "available": [dict(m) for m in self.model.get("available", [])],
-            },
-            "tool": {
-                "tools": [dict(t) for t in self.tool.get("tools", [])],
-            },
-            "context": {
-                **{k: v for k, v in self.context.items() if k != "token_usage"},
-                "token_usage": {
-                    "used": used,
-                    "total": total,
-                    "percentage": percentage,
-                    "remaining": remaining,
-                },
-            },
-            "workspace": dict(self.workspace),
-            "extra": dict(self.extra),
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> SessionMeta:
-        """
-        从 dict 反序列化（用于从 DB 恢复）。
-        兼容新旧两种格式。
-        """
-        # 新格式检测：有 "user" 顶级 key 且为 dict
-        if "user" in data and isinstance(data["user"], dict) and "user_id" in data["user"]:
-            return cls(
-                user=data.get("user", {}),
-                model=data.get("model", {}),
-                tool=data.get("tool", {}),
-                context=data.get("context", {}),
-                workspace=data.get("workspace", {}),
-                extra=data.get("extra", {}),
-            )
-
-        # 旧格式（扁平） — 迁移到新格式
-        token_usage_data = data.get("token_usage", {})
-        if not isinstance(token_usage_data, dict):
-            token_usage_data = {}
-
-        return cls(
-            user={
-                "user_id": data.get("user_id", ""),
-                "username": data.get("username", ""),
-            },
-            model={
-                "active": data.get("active_model", {}) or {},
-                "available": data.get("available_models", []) or [],
-            },
-            tool={
-                "tools": data.get("tools", []) or [],
-            },
-            context={
-                "token_usage": {
-                    "used": token_usage_data.get("used", 0),
-                    "total": token_usage_data.get("total", 128000),
-                },
-                "agent_run_state": data.get("agent_run_state", "idle"),
-                "session_state": data.get("session_state", "active"),
-                "stop_reason": data.get("stop_reason", ""),
-                "cancelled": data.get("cancelled", False),
-            },
-            workspace={"state": data.get("workspace_state")},
-            extra=data.get("extra", {}),
-        )
-
-
-# ─── UserContext ──────────────────────────────────────────────
-
-@dataclass
-class UserContext:
-    """用户会话上下文。"""
-    user_id: str
-    username: str = ""
-    credentials: dict = field(default_factory=dict)  # 下载 token 等
-    preferences: dict = field(default_factory=dict)   # 用户配置
 
 
 # ─── Session ─────────────────────────────────────────────────
@@ -228,13 +73,13 @@ class Session:
     2. 持有 Agent 引用（共享组件）
     3. 提供 chat(user_input) 执行一轮交互
     4. 管理生命周期：取消、持久化、恢复
-    5. 持有 SessionMeta（唯一状态容器）
+    5. 持有 SessionData（唯一状态容器）
     6. 持有 WorkspaceManager（工作空间状态容器）
 
     状态管理：
-      - self.meta: SessionMeta — 唯一状态载体（可序列化到 DB / 推送前端）
+      - self.meta: SessionData — 唯一状态载体（可序列化到 DB / 推送前端）
       - 初始化时从 Agent 实例采集模型列表、工具列表等
-      - 运行时通过 meta.get() / meta.set() 方法更新
+      - 运行时通过 meta 属性直接访问
     """
 
     def __init__(
@@ -256,7 +101,7 @@ class Session:
         self.last_active_at: datetime = datetime.now(timezone.utc)
 
         # ── 唯一状态容器 ──
-        self.meta = SessionMeta(
+        self.meta = SessionData(
             user={"user_id": user.user_id, "username": user.username},
             context={
                 "token_usage": {"used": 0, "total": context_window_size},
@@ -338,30 +183,30 @@ class Session:
     def session_state(self) -> SessionState:
         """兼容属性：从 meta 读取 session_state。"""
         try:
-            return SessionState(self.meta.get("context", "session_state", "active"))
+            return SessionState(self.meta.context.session_state)
         except ValueError:
             return SessionState.ACTIVE
 
     @session_state.setter
     def session_state(self, value: SessionState) -> None:
-        self.meta.set("context", session_state=value.value)
+        self.meta.context.session_state = value.value
 
     @property
     def agent_run_state(self) -> AgentRunState:
         """兼容属性：从 meta 读取 agent_run_state。"""
         try:
-            return AgentRunState(self.meta.get("context", "agent_run_state", "idle"))
+            return AgentRunState(self.meta.context.agent_run_state)
         except ValueError:
             return AgentRunState.IDLE
 
     @agent_run_state.setter
     def agent_run_state(self, value: AgentRunState) -> None:
-        self.meta.set("context", agent_run_state=value.value)
+        self.meta.context.agent_run_state = value.value
 
     @property
     def metadata(self) -> dict:
-        """兼容属性：返回 meta 的 to_dict()（只读视图）。"""
-        return self.meta.to_dict()
+        """返回 meta 的字典形式（只读视图）。"""
+        return self.meta.model_dump()
 
     @property
     def context(self) -> ContextManager:
@@ -376,7 +221,7 @@ class Session:
 
     def _init_meta_from_agent(self) -> None:
         """
-        从 Agent 实例采集初始状态到 meta（模型列表、工具列表等）。
+        从 Agent 实例采集初始状态到 data（模型列表、工具列表等）。
         仅在 Session 创建时调用一次。
         """
         router = self._agent.router
@@ -406,11 +251,13 @@ class Session:
             active_model = available_models[0]
             active_model["is_active"] = True
 
-        self.meta.set("model", active=active_model, available=available_models)
+        self.meta.model.active = active_model
+        self.meta.model.available = available_models
 
         # 同步 token_usage.total 为当前 active provider 的 context_window_size
+        # [Pydantic 迁移] 直接属性赋值，不再通过 get()["key"] = value
         active_cws = active_model.get("context_window_size", 128000)
-        self.meta.get("context", "token_usage")["total"] = active_cws
+        self.meta.context.token_usage.total = active_cws
 
         # ── 2. 采集工具列表（含 parameters_schema 供 API 调用和 prompt 渲染使用） ──
         tools: list[dict] = []
@@ -423,7 +270,7 @@ class Session:
                     "parameters_schema": getattr(record, "parameters_schema", {}),
                     "source": record.source,
                 })
-        self.meta.set("tool", tools=tools)
+        self.meta.tool.tools = tools
 
     # ── PromptRenderer 注入 ──
 
@@ -455,7 +302,7 @@ class Session:
                     "source": record.source,
                     "category": getattr(record.meta, "category", "") if hasattr(record, "meta") and record.meta else "",
                 })
-        self.meta.set("tool", tools=tools)
+        self.meta.tool.tools = tools
 
     # ── Hook 回调 ──
 
@@ -463,7 +310,7 @@ class Session:
         """Hook 回调：同步 agent_run_state 到 meta（仅处理当前 session 的事件）。"""
         if ctx.session_id != self.id:
             return  # 不是本 session 的事件，跳过
-        self.meta.set("context", agent_run_state=state)
+        self.meta.context.agent_run_state = state
 
     async def _on_tool_end(self, ctx, tool_name: str, result: Any, call_id: str, latency_ms: float) -> None:
         """Hook 回调：文件操作工具执行后自动刷新 workspace（仅处理当前 session 的事件）。"""
@@ -508,17 +355,11 @@ class Session:
         self._cancel_detail = ""
 
         # 构建 HookContext，将所有会话级状态注入 ctx（不再写入 Agent）
-        workspace_root = self.workspace.root_path if self.workspace else None
-        active_file_path = self.workspace.get_active_file_path() if self.workspace else None
         ctx = HookContext(
             session_id=self.id,
-            workspace_root=workspace_root,
-            active_file_path=active_file_path,
             session_meta=self.meta,
             system_command_handler=self._system_command_handler,
         )
-
-        # 不再修改 Agent 的任何属性！
 
         logger.info(f"Session chat start: {self.id}")
 
@@ -542,7 +383,7 @@ class Session:
             logger.info(f"Session chat end: {self.id}, reason={result.stop_reason}")
 
             # 更新 meta 并持久化
-            self.meta.set("context", stop_reason=result.stop_reason or "completed")
+            self.meta.context.stop_reason = result.stop_reason or "completed"
             await self._persist(AgentRunState.IDLE)
 
             return final_content or ""
@@ -554,8 +395,9 @@ class Session:
                 cancel_msg += f": {self._cancel_detail}"
             logger.info(f"Session chat cancelled (session-level): {reason}")
             try:
-                self.meta.set("context", cancelled=True)
-                self.meta.get("extra")["cancel_reason"] = reason
+                self.meta.context.cancelled = True
+                # [Pydantic 迁移] extra 仍是 dict，直接用属性访问
+                self.meta.extra["cancel_reason"] = reason
                 await asyncio.shield(self._persist(AgentRunState.IDLE))
             except Exception:
                 pass
@@ -584,7 +426,8 @@ class Session:
 
     def update_metadata(self, key: str, value) -> None:
         """更新会话扩展元数据（存入 meta.extra）。"""
-        self.meta.get("extra")[key] = value
+        # [Pydantic 迁移] extra 仍是 dict，直接用属性访问
+        self.meta.extra[key] = value
 
     # ── 持久化 ──
 
@@ -595,36 +438,36 @@ class Session:
         """
         # 同步 agent_run_state
         if state is not None:
-            self.meta.set("context", agent_run_state=state.value)
+            self.meta.context.agent_run_state = state.value
 
         # 同步 token 使用量
-        self.meta.get("context", "token_usage")["used"] = self._context.last_usage_input_tokens
+        # [Pydantic 迁移] 直接属性赋值
+        self.meta.context.token_usage.used = self._context.last_usage_input_tokens
 
         # 同步 workspace 快照
         if self.workspace:
-            self.meta.set("workspace", state=self.workspace.snapshot().to_dict())
+            self.meta.workspace.state = self.workspace.snapshot().to_dict()
 
         if self._state_store:
-            # 兼容旧 StateStore 接口：传入 enum + meta dict + enum
             await self._state_store.save_state(
                 self.id,
-                self.agent_run_state,       # AgentRunState enum（兼容）
-                self.meta.to_dict(),         # 完整状态 dict
-                self.session_state,          # SessionState enum（兼容）
+                self.agent_run_state,
+                self.meta.model_dump(),
+                self.session_state,
             )
 
     async def save(self) -> None:
         """持久化会话状态和消息。"""
         if self._state_store:
-            # 同步最新状态到 meta
-            self.meta.get("context", "token_usage")["used"] = self._context.last_usage_input_tokens
+            # [Pydantic 迁移] 直接属性赋值
+            self.meta.context.token_usage.used = self._context.last_usage_input_tokens
             if self.workspace:
-                self.meta.set("workspace", state=self.workspace.snapshot().to_dict())
+                self.meta.workspace.state = self.workspace.snapshot().to_dict()
 
             await self._state_store.save_state(
                 self.id,
                 self.agent_run_state,
-                self.meta.to_dict(),
+                self.meta.model_dump(),
                 self.session_state,
             )
             await self._state_store.save_messages(self.id, self._context.messages)
@@ -652,11 +495,11 @@ class Session:
                     try:
                         session._agent._router.set_provider(provider_name)
                         # 更新 meta 中的 active_model
-                        available = session.meta.get("model", "available", [])
+                        available = session.meta.model.available
                         for m in available:
                             m["is_active"] = (m.get("provider_name") == provider_name)
                             if m["is_active"]:
-                                session.meta.set("model", active=m)
+                                session.meta.model.active = m
                         logger.info(f"System command: /model → {provider_name}")
                     except Exception as e:
                         logger.warning(f"Failed to switch model: {e}")
@@ -706,7 +549,7 @@ class Session:
     async def push_conversation_state(self) -> None:
         """推送 meta 快照到前端（通过 ws_notifiers）。"""
         if self._ws_notifiers:
-            await self._notify_clients("conversation_state", self.meta.to_dict())
+            await self._notify_clients("conversation_state", self.meta.model_dump())
 
 
 # ─── SessionManager ──────────────────────────────────────────
@@ -852,7 +695,7 @@ class SessionManager:
             # 使用统一的 update 入口扫描根目录（触发通知链 + 状态同步）
             await session.workspace.update("user", "set_root", {"root_path": workspace_root})
             # 同步 workspace 快照到 meta，确保首次 _push_conversation_state 包含文件列表
-            session.meta.set("workspace", state=session.workspace.snapshot().to_dict())
+            session.meta.workspace.state = session.workspace.snapshot().to_dict()
 
         logger.info(f"Session created: {session.id} for user: {user.user_id}")
         return session
@@ -894,15 +737,15 @@ class SessionManager:
 
         # 从持久化的 dict 恢复 meta
         if isinstance(metadata_dict, dict):
-            restored_meta = SessionMeta.from_dict(metadata_dict)
+            restored_data = SessionData.model_validate(metadata_dict)
             # 保留从 Agent 采集的 available_models / tools（可能已变化）
-            restored_meta.set("model", available=session.meta.get("model", "available", []))
-            restored_meta.set("tool", tools=session.meta.get("tool", "tools", []))
-            session.meta = restored_meta
+            restored_data.model.available = session.meta.model.available
+            restored_data.tool.tools = session.meta.tool.tools
+            session.meta = restored_data
 
             # 回填 ContextManager 的 token 使用量
-            tu = restored_meta.get("context", "token_usage", {})
-            session._context._last_usage_input_tokens = tu.get("used", 0)
+            # [Pydantic 迁移] 直接属性访问，不再通过 get()
+            session._context._last_usage_input_tokens = restored_data.context.token_usage.used
         else:
             # 兼容旧格式
             session.agent_run_state = agent_run_state
@@ -963,9 +806,9 @@ class SessionManager:
         for sid, session in self._sessions.items():
             result.append({
                 "session_id": sid,
-                "agent_state": session.meta.get("context", "agent_run_state"),
-                "session_state": session.meta.get("context", "session_state"),
-                "metadata": session.meta.to_dict(),
+                "agent_state": session.meta.context.agent_run_state,
+                "session_state": session.meta.context.session_state,
+                "metadata": session.meta.model_dump(),
             })
         return result
 

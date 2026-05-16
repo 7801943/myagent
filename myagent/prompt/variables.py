@@ -137,9 +137,8 @@ class VariableCollector:
         )
 
         # ── 用户信息 ──
-        user_info = dict(session.meta.get("user", "info", {}))
-        if not user_info.get("name"):
-            user_info = {"name": "未设置", "group": "未设置", "role": "未设置"}
+        # [Pydantic 迁移] user 已无 "info" 字段，旧代码始终走默认分支
+        user_info = {"name": "未设置", "group": "未设置", "role": "未设置"}
 
         # ── 工具 ──
         tools = session.meta.get("tool", "tools", [])
@@ -181,12 +180,13 @@ class VariableCollector:
             active_model = {"model_id": "unknown", "provider_type": "unknown", "context_window_size": 200000}
 
         # ── Token ──
-        tu = dict(session.meta.get("context", "token_usage", {}))
+        # [Pydantic 迁移] token_usage 现在是 TokenUsage 对象，直接属性访问 + 计算字段
+        tu = session.meta.context.token_usage
         token_usage = {
-            "used": tu.get("used", 0),
-            "total": tu.get("total", 200000),
-            "percentage": tu.get("percentage", 0.0),
-            "remaining": tu.get("remaining", 200000),
+            "used": tu.used,
+            "total": tu.total,
+            "percentage": tu.percentage,
+            "remaining": tu.remaining,
         }
 
         return PromptVariables(

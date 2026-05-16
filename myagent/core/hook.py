@@ -20,19 +20,21 @@ if TYPE_CHECKING:
 class HookContext:
     """传递给所有 Hook 方法，携带当前 Agent 执行状态。"""
     session_id: str
-    agent_id: str = "main"
-    turn_id: str = field(default_factory=lambda: uuid4().hex[:12])
-    trace_id: str = ""              # V3: 全链路追踪
-    span_id: str = ""
+    # 用户：待废弃
+    # agent_id: str = "main"
+    # turn_id: str = field(default_factory=lambda: uuid4().hex[:12])
+    # trace_id: str = ""              # V3: 全链路追踪
+    # span_id: str = ""
     iteration: int = 0
-    model: str = ""
-    provider: str = ""
-    tool_calls: list = field(default_factory=list)
-    tool_events: list = field(default_factory=list)
-    usage: dict = field(default_factory=dict)
-    # Phase 2 新增
-    workspace_root: str | None = None          # 工作空间根目录（绝对路径）
-    active_file_path: str | None = None        # 当前活跃文件相对路径
+    # 用户：待废弃
+    # model: str = ""
+    # provider: str = ""
+    # tool_calls: list = field(default_factory=list)
+    # tool_events: list = field(default_factory=list)
+    # usage: dict = field(default_factory=dict)
+    # Phase 2 新增 (用户：待废弃)
+    # workspace_root: str | None = None          # 工作空间根目录（绝对路径）
+    # active_file_path: str | None = None        # 当前活跃文件相对路径
     # 新增：会话级状态载体（替代 Agent._session_meta）
     session_meta: Any = None
     # 新增：会话级系统指令处理器（替代 Agent._system_command_handler）
@@ -42,16 +44,17 @@ class HookContext:
         """生成可序列化的上下文快照（供审计/错误记录使用）。"""
         return {
             "session_id": self.session_id,
-            "agent_id": self.agent_id,
-            "turn_id": self.turn_id,
-            "trace_id": self.trace_id,
-            "span_id": self.span_id,
+            # 用户：待废弃
+            # "agent_id": self.agent_id,
+            # "turn_id": self.turn_id,
+            # "trace_id": self.trace_id,
+            # "span_id": self.span_id,
             "iteration": self.iteration,
-            "model": self.model,
-            "provider": self.provider,
-            "usage": self.usage,
-            "workspace_root": self.workspace_root,
-            "active_file_path": self.active_file_path,
+            # "model": self.model,
+            # "provider": self.provider,
+            # "usage": self.usage,
+            # "workspace_root": self.workspace_root,
+            # "active_file_path": self.active_file_path,
         }
 
 class HookHandle:

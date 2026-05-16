@@ -46,7 +46,8 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from myagent.core.agent import Agent, AgentFactory
 from myagent.core.hook import HookManager, HookHandle
-from myagent.core.session import Session, SessionManager, UserContext
+from myagent.core.session import Session, SessionManager
+from myagent.core.models import UserContext
 from myagent.context.message import ToolCall
 from myagent.context.state import StateStore
 from myagent.interfaces.websocket.lock import WebSocketLock
@@ -764,7 +765,7 @@ class WebSocketHandler:
         if not self._session:
             return
         try:
-            state_dict = self._session.meta.to_dict()
+            state_dict = self._session.meta.model_dump()
             await self._send_json({"type": "conversation_state", **state_dict})
         except Exception as e:
             logger.warning(f"Failed to push conversation_state: {e}")
