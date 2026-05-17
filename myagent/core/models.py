@@ -103,6 +103,14 @@ class SessionContext(BaseModel):
     cancelled: bool = False
 
 
+class AgentInfo(BaseModel):
+    """Agent 运行时信息快照（从 AgentConfig + Agent 实例采集）。"""
+    max_iterations: int = 50
+    safety_enabled: bool = False
+    hot_reload_enabled: bool = False
+    llm_timeout: float = 120.0
+
+
 class WorkspaceInfo(BaseModel):
     """工作区快照。"""
     state: dict[str, Any] | None = None
@@ -128,6 +136,7 @@ class SessionData(BaseModel):
     model: ModelInfo = ModelInfo()
     tool: ToolInfo = ToolInfo()
     context: SessionContext = SessionContext()
+    agent: AgentInfo = AgentInfo()
     workspace: WorkspaceInfo = WorkspaceInfo()
     extra: dict[str, Any] = {}
 

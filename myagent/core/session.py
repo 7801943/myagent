@@ -46,8 +46,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from dataclasses import dataclass
+
 from myagent.context.manager import ContextManager
-from myagent.context.message import ContentBlock
+from myagent.context.message import ContentBlock, ToolCall
 from myagent.core.hook import HookContext, HookHandle
 from myagent.core.models import UserContext, SessionData, SessionState, AgentRunState
 from myagent.utils.logging import get_logger
@@ -60,6 +62,115 @@ if TYPE_CHECKING:
     from myagent.prompt.renderer import PromptRenderer
 
 logger = get_logger(__name__)
+
+
+# ─── 消息序列化工具 ──────────────────────────────────────────
+
+def _serialize_messages(messages: list) -> list[dict]:
+    """将消息列表序列化为前端可显示的 dict 列表。"""
+    history = []
+    for msg in messages:
+        entry: dict = {"role": msg.role, "content": ""}
+
+        if hasattr(msg, 'content') and msg.content:
+            if isinstance(msg.content, str):
+                entry["content"] = msg.content
+            elif isinstance(msg.content, list):
+                parts = []
+                for block in msg.content:
+                    if isinstance(block, dict):
+                        if block.get("type") == "text":
+                            parts.append(block.get("text") or "")
+                    elif hasattr(block, 'type') and block.type == "text":
+                        parts.append(getattr(block, 'text', '') or "")
+                entry["content"] = "".join(parts)
+            else:
+                entry["content"] = str(msg.content)
+
+        if hasattr(msg, 'tool_calls') and msg.tool_calls:
+            entry["tool_calls"] = [
+                {
+                    "id": getattr(tc, 'id', None) if not isinstance(tc, dict) else tc.get('id'),
+                    "name": getattr(tc, 'name', None) if not isinstance(tc, dict) else tc.get('name'),
+                    "arguments": getattr(tc, 'arguments', {}) if not isinstance(tc, dict) else tc.get('arguments', {}),
+                }
+                for tc in msg.tool_calls
+            ]
+
+        if hasattr(msg, 'tool_call_id') and msg.tool_call_id:
+            entry["tool_call_id"] = msg.tool_call_id
+        if hasattr(msg, 'tool_name') and msg.tool_name:
+            entry["tool_name"] = msg.tool_name
+        if hasattr(msg, 'metadata') and msg.metadata:
+            entry["metadata"] = msg.metadata
+
+        history.append(entry)
+
+    return history
+
+
+# ─── VirtualApprovalHandler + ClientHandle ────────────────────
+
+@dataclass
+class PendingApproval:
+    """等待审批的工单。"""
+    future: asyncio.Future
+    tool_calls: list
+
+
+class VirtualApprovalHandler:
+    """
+    会话级审批 handler，与 WebSocket 连接解耦。
+    Agent 调用 → Session 广播 hitl_request → 任意客户端响应 → Future 完成。
+    """
+
+    def __init__(self, broadcast):
+        self._broadcast = broadcast  # session._notify_clients
+        self._pending: dict[str, PendingApproval] = {}
+
+    async def __call__(self, tool_calls: list[ToolCall]) -> list[bool]:
+        ticket_id = uuid4().hex[:8]
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        self._pending[ticket_id] = PendingApproval(future=fut, tool_calls=tool_calls)
+
+        await self._broadcast("hitl_request", {
+            "ticket_id": ticket_id,
+            "tool_calls": [
+                {"name": tc.name, "args": tc.arguments, "call_id": tc.id}
+                for tc in tool_calls
+            ],
+        })
+
+        try:
+            decisions = await asyncio.wait_for(fut, timeout=120.0)
+            return decisions
+        except asyncio.TimeoutError:
+            return [False] * len(tool_calls)
+        finally:
+            self._pending.pop(ticket_id, None)
+
+    def resolve(self, ticket_id: str, decisions: list[bool]) -> None:
+        """任意客户端调用此方法完成审批。"""
+        pa = self._pending.get(ticket_id)
+        if pa and not pa.future.done():
+            pa.future.set_result(decisions)
+
+
+class ClientHandle:
+    """代表一个客户端的连接句柄，断开时调用 detach() 清理。"""
+
+    def __init__(self, hook_handles: list[HookHandle], session: "Session", sender):
+        self._hook_handles = hook_handles
+        self._session = session
+        self._sender = sender
+
+    def detach(self) -> None:
+        """断开连接时清理所有注册。"""
+        for h in self._hook_handles:
+            h.unregister()
+        self._hook_handles.clear()
+        self._session.remove_ws_notify(self._sender)
 
 
 # ─── Session ─────────────────────────────────────────────────
@@ -77,7 +188,7 @@ class Session:
     6. 持有 WorkspaceManager（工作空间状态容器）
 
     状态管理：
-      - self.meta: SessionData — 唯一状态载体（可序列化到 DB / 推送前端）
+      - self.data: SessionData — 唯一状态载体（可序列化到 DB / 推送前端）
       - 初始化时从 Agent 实例采集模型列表、工具列表等
       - 运行时通过 meta 属性直接访问
     """
@@ -90,18 +201,21 @@ class Session:
         user: UserContext,
         state_store: "StateStore | None" = None,
         system_prompt: str | None = None,
-        max_tokens_budget: int = 100000,
-        context_window_size: int = 128000,
-        tool_result_max_chars: int = 100000,
+        max_tokens_budget: int = 200000,
+        context_window_size: int = 200000,
+        tool_result_max_chars: int = 200000,
         workspace_root: str | None = None,
+        name: str | None = "新会话",
     ):
         self.id: str = session_id or uuid4().hex[:16]
         self.created_at: datetime = datetime.now(timezone.utc)
         self.user = user
         self.last_active_at: datetime = datetime.now(timezone.utc)
+        self.name = name
+        self.created_at: datetime = datetime.now(timezone.utc)
 
         # ── 唯一状态容器 ──
-        self.meta = SessionData(
+        self.data = SessionData(
             user={"user_id": user.user_id, "username": user.username},
             context={
                 "token_usage": {"used": 0, "total": context_window_size},
@@ -160,6 +274,12 @@ class Session:
             agent.hooks.on("tool_end", self._on_tool_end)
         )
 
+        # ── 内置审批 handler（与 WebSocket 连接解耦） ──
+        self._approval_handler = VirtualApprovalHandler(self._notify_clients)
+
+        # ── 内置并发锁（防止多客户端同时 chat） ──
+        self._chat_lock = asyncio.Lock()
+
         # 系统指令处理器（由 make_command_handler 创建）
         self._system_command_handler = None
 
@@ -183,30 +303,30 @@ class Session:
     def session_state(self) -> SessionState:
         """兼容属性：从 meta 读取 session_state。"""
         try:
-            return SessionState(self.meta.context.session_state)
+            return SessionState(self.data.context.session_state)
         except ValueError:
             return SessionState.ACTIVE
 
     @session_state.setter
     def session_state(self, value: SessionState) -> None:
-        self.meta.context.session_state = value.value
+        self.data.context.session_state = value.value
 
     @property
     def agent_run_state(self) -> AgentRunState:
         """兼容属性：从 meta 读取 agent_run_state。"""
         try:
-            return AgentRunState(self.meta.context.agent_run_state)
+            return AgentRunState(self.data.context.agent_run_state)
         except ValueError:
             return AgentRunState.IDLE
 
     @agent_run_state.setter
     def agent_run_state(self, value: AgentRunState) -> None:
-        self.meta.context.agent_run_state = value.value
+        self.data.context.agent_run_state = value.value
 
     @property
     def metadata(self) -> dict:
         """返回 meta 的字典形式（只读视图）。"""
-        return self.meta.model_dump()
+        return self.data.model_dump()
 
     @property
     def context(self) -> ContextManager:
@@ -251,13 +371,13 @@ class Session:
             active_model = available_models[0]
             active_model["is_active"] = True
 
-        self.meta.model.active = active_model
-        self.meta.model.available = available_models
+        self.data.model.active = active_model
+        self.data.model.available = available_models
 
         # 同步 token_usage.total 为当前 active provider 的 context_window_size
         # [Pydantic 迁移] 直接属性赋值，不再通过 get()["key"] = value
-        active_cws = active_model.get("context_window_size", 128000)
-        self.meta.context.token_usage.total = active_cws
+        active_cws = active_model.get("context_window_size", 200000)
+        self.data.context.token_usage.total = active_cws
 
         # ── 2. 采集工具列表（含 parameters_schema 供 API 调用和 prompt 渲染使用） ──
         tools: list[dict] = []
@@ -270,7 +390,7 @@ class Session:
                     "parameters_schema": getattr(record, "parameters_schema", {}),
                     "source": record.source,
                 })
-        self.meta.tool.tools = tools
+        self.data.tool.tools = tools
 
     # ── PromptRenderer 注入 ──
 
@@ -302,7 +422,7 @@ class Session:
                     "source": record.source,
                     "category": getattr(record.meta, "category", "") if hasattr(record, "meta") and record.meta else "",
                 })
-        self.meta.tool.tools = tools
+        self.data.tool.tools = tools
 
     # ── Hook 回调 ──
 
@@ -310,7 +430,7 @@ class Session:
         """Hook 回调：同步 agent_run_state 到 meta（仅处理当前 session 的事件）。"""
         if ctx.session_id != self.id:
             return  # 不是本 session 的事件，跳过
-        self.meta.context.agent_run_state = state
+        self.data.context.agent_run_state = state
 
     async def _on_tool_end(self, ctx, tool_name: str, result: Any, call_id: str, latency_ms: float) -> None:
         """Hook 回调：文件操作工具执行后自动刷新 workspace（仅处理当前 session 的事件）。"""
@@ -338,7 +458,7 @@ class Session:
 
     async def chat(self, user_input: str | list[ContentBlock]) -> str:
         """
-        发起一轮对话。
+        发起一轮对话。内置并发锁，多客户端同时调用时排队执行。
 
         Args:
             user_input: 用户输入，支持三种形式：
@@ -348,7 +468,21 @@ class Session:
 
         Returns:
             Agent 的最终回复文本
+
+        Raises:
+            RuntimeError: Session 正忙（另一轮对话进行中）
         """
+        if not self._chat_lock.locked():
+            async with self._chat_lock:
+                return await self._chat_inner(user_input)
+        else:
+            raise RuntimeError("Session is busy, please wait")
+
+    async def _chat_inner(self, user_input: str | list[ContentBlock]) -> str:
+        """chat 的实际实现（在锁内执行）。"""
+        # 注入 Session 内置的 VirtualApprovalHandler 到 Agent
+        self._agent._approval_handler = self._approval_handler
+
         self.last_active_at = datetime.now(timezone.utc)
         self._running_task = asyncio.current_task()
         self._cancel_reason = ""
@@ -357,7 +491,7 @@ class Session:
         # 构建 HookContext，将所有会话级状态注入 ctx（不再写入 Agent）
         ctx = HookContext(
             session_id=self.id,
-            session_meta=self.meta,
+            session_meta=self.data,
             system_command_handler=self._system_command_handler,
         )
 
@@ -383,7 +517,7 @@ class Session:
             logger.info(f"Session chat end: {self.id}, reason={result.stop_reason}")
 
             # 更新 meta 并持久化
-            self.meta.context.stop_reason = result.stop_reason or "completed"
+            self.data.context.stop_reason = result.stop_reason or "completed"
             await self._persist(AgentRunState.IDLE)
 
             return final_content or ""
@@ -395,16 +529,16 @@ class Session:
                 cancel_msg += f": {self._cancel_detail}"
             logger.info(f"Session chat cancelled (session-level): {reason}")
             try:
-                self.meta.context.cancelled = True
+                self.data.context.cancelled = True
                 # [Pydantic 迁移] extra 仍是 dict，直接用属性访问
-                self.meta.extra["cancel_reason"] = reason
+                self.data.extra["cancel_reason"] = reason
                 await asyncio.shield(self._persist(AgentRunState.IDLE))
             except Exception:
                 pass
             return cancel_msg
 
         except Exception as e:
-            logger.error(f"Session chat error: {e}")
+            logger.error(f"Session chat error: {e}", exc_info=True)
             await self._agent.hooks.emit("error", ctx, error=e)
             await self._persist(AgentRunState.ERROR)
             raise
@@ -427,7 +561,7 @@ class Session:
     def update_metadata(self, key: str, value) -> None:
         """更新会话扩展元数据（存入 meta.extra）。"""
         # [Pydantic 迁移] extra 仍是 dict，直接用属性访问
-        self.meta.extra[key] = value
+        self.data.extra[key] = value
 
     # ── 持久化 ──
 
@@ -438,21 +572,21 @@ class Session:
         """
         # 同步 agent_run_state
         if state is not None:
-            self.meta.context.agent_run_state = state.value
+            self.data.context.agent_run_state = state.value
 
         # 同步 token 使用量
         # [Pydantic 迁移] 直接属性赋值
-        self.meta.context.token_usage.used = self._context.last_usage_input_tokens
+        self.data.context.token_usage.used = self._context.last_usage_input_tokens
 
         # 同步 workspace 快照
         if self.workspace:
-            self.meta.workspace.state = self.workspace.snapshot().to_dict()
+            self.data.workspace.state = self.workspace.snapshot().to_dict()
 
         if self._state_store:
             await self._state_store.save_state(
                 self.id,
                 self.agent_run_state,
-                self.meta.model_dump(),
+                self.data.model_dump(),
                 self.session_state,
             )
 
@@ -460,14 +594,14 @@ class Session:
         """持久化会话状态和消息。"""
         if self._state_store:
             # [Pydantic 迁移] 直接属性赋值
-            self.meta.context.token_usage.used = self._context.last_usage_input_tokens
+            self.data.context.token_usage.used = self._context.last_usage_input_tokens
             if self.workspace:
-                self.meta.workspace.state = self.workspace.snapshot().to_dict()
+                self.data.workspace.state = self.workspace.snapshot().to_dict()
 
             await self._state_store.save_state(
                 self.id,
                 self.agent_run_state,
-                self.meta.model_dump(),
+                self.data.model_dump(),
                 self.session_state,
             )
             await self._state_store.save_messages(self.id, self._context.messages)
@@ -481,6 +615,7 @@ class Session:
             return []
         return await self._state_store.load_messages(self.id)
 
+    # 命令系统待迁移到独立文件 command.py，计划中
     def make_command_handler(self):
         """创建系统指令处理器并保存为实例属性（不写入 Agent）。"""
         session = self
@@ -495,11 +630,11 @@ class Session:
                     try:
                         session._agent._router.set_provider(provider_name)
                         # 更新 meta 中的 active_model
-                        available = session.meta.model.available
+                        available = session.data.model.available
                         for m in available:
                             m["is_active"] = (m.get("provider_name") == provider_name)
                             if m["is_active"]:
-                                session.meta.model.active = m
+                                session.data.model.active = m
                         logger.info(f"System command: /model → {provider_name}")
                     except Exception as e:
                         logger.warning(f"Failed to switch model: {e}")
@@ -536,6 +671,93 @@ class Session:
         """向后兼容：内部调用 add_ws_notify。"""
         self.add_ws_notify(callback)
 
+    def attach_client(self, sender) -> ClientHandle:
+        """
+        将一个客户端（WebSocket）接入本会话。
+        内部完成 Hook 绑定 + ws_notify 注册，返回 ClientHandle。
+
+        Args:
+            sender: 异步函数，接收 dict 并发给客户端
+
+        Returns:
+            ClientHandle，断开时调用 handle.detach()
+        """
+        hooks = self._agent.hooks
+        sid = self.id
+        handles: list[HookHandle] = []
+
+        # ── session_id 过滤器 ──
+        def _for_this(ctx) -> bool:
+            return ctx.session_id == sid
+
+        async def _on_stream(ctx, delta):
+            if _for_this(ctx):
+                await sender({"type": "text_delta", "text": delta})
+
+        async def _on_thinking_stream(ctx, delta):
+            if _for_this(ctx):
+                await sender({"type": "thinking_delta", "text": delta})
+
+        async def _on_stream_start(ctx):
+            if _for_this(ctx):
+                await sender({"type": "stream_start"})
+
+        async def _on_stream_end(ctx, resuming=False):
+            if _for_this(ctx):
+                await sender({"type": "stream_end", "resuming": resuming})
+
+        async def _on_tool_start(ctx, tool_name, args, call_id):
+            if _for_this(ctx):
+                await sender({"type": "tool_start", "tool_name": tool_name,
+                              "args": args, "call_id": call_id})
+
+        async def _on_tool_end(ctx, tool_name, result, call_id, latency_ms):
+            if _for_this(ctx):
+                await sender({"type": "tool_end", "tool_name": tool_name,
+                              "result": result.content, "latency_ms": latency_ms,
+                              "call_id": call_id})
+
+        async def _on_tool_error(ctx, tool_name, error, call_id):
+            if _for_this(ctx):
+                await sender({"type": "tool_error", "tool_name": tool_name,
+                              "error": str(error), "call_id": call_id})
+
+        async def _on_state_change(ctx, state):
+            if _for_this(ctx):
+                await sender({"type": "state_change", "state": state})
+
+        async def _on_error(ctx, error):
+            if _for_this(ctx):
+                await sender({"type": "error", "message": str(error)})
+
+        async def _on_safety_blocked(ctx, rule, reason, action, call_id="", tool_name=""):
+            if _for_this(ctx):
+                await sender({"type": "safety_blocked", "rule": rule,
+                              "reason": reason, "action": action})
+
+        async def _on_timeout_warning(ctx, **kw):
+            if _for_this(ctx):
+                await sender({"type": "timeout_warning", **kw})
+
+        handles.append(hooks.on("stream", _on_stream))
+        handles.append(hooks.on("thinking_stream", _on_thinking_stream))
+        handles.append(hooks.on("stream_start", _on_stream_start))
+        handles.append(hooks.on("stream_end", _on_stream_end))
+        handles.append(hooks.on("tool_start", _on_tool_start))
+        handles.append(hooks.on("tool_end", _on_tool_end))
+        handles.append(hooks.on("tool_error", _on_tool_error))
+        handles.append(hooks.on("state_change", _on_state_change))
+        handles.append(hooks.on("error", _on_error))
+        handles.append(hooks.on("safety_blocked", _on_safety_blocked))
+        handles.append(hooks.on("timeout_warning", _on_timeout_warning))
+
+        # ws_notify 回调签名是 (msg_type, data)，需要适配为 sender(dict)
+        async def _ws_notify_wrapper(msg_type: str, data: dict) -> None:
+            await sender({"type": msg_type, **data})
+
+        self.add_ws_notify(_ws_notify_wrapper)
+        return ClientHandle(handles, self, _ws_notify_wrapper)
+
     async def _notify_clients(self, msg_type: str, data: dict) -> None:
         """向所有订阅的客户端推送通知。"""
         for notify in list(self._ws_notifiers):  # 复制列表防止迭代中修改
@@ -544,12 +766,18 @@ class Session:
             except Exception:
                 logger.warning("Client notify failed (connection may be closed)")
 
+    # ── 消息序列化 ──
+
+    def serialize_messages(self) -> list[dict]:
+        """序列化当前会话消息历史为前端格式。"""
+        return _serialize_messages(self._context.messages)
+
     # ── 前端推送 ──
 
     async def push_conversation_state(self) -> None:
         """推送 meta 快照到前端（通过 ws_notifiers）。"""
         if self._ws_notifiers:
-            await self._notify_clients("conversation_state", self.meta.model_dump())
+            await self._notify_clients("conversation_state", self.data.model_dump())
 
 
 # ─── SessionManager ──────────────────────────────────────────
@@ -665,7 +893,7 @@ class SessionManager:
 
         # 如果没有显式传入 workspace_root，从配置读取 root_dir 作为默认值
         if not workspace_root:
-            root_dir = self._factory.app_config.get("root_dir", "")
+            root_dir = self._factory.config.root_dir
             if root_dir:
                 workspace_root = str(Path(root_dir).expanduser())
 
@@ -695,7 +923,7 @@ class SessionManager:
             # 使用统一的 update 入口扫描根目录（触发通知链 + 状态同步）
             await session.workspace.update("user", "set_root", {"root_path": workspace_root})
             # 同步 workspace 快照到 meta，确保首次 _push_conversation_state 包含文件列表
-            session.meta.workspace.state = session.workspace.snapshot().to_dict()
+            session.data.workspace.state = session.workspace.snapshot().to_dict()
 
         logger.info(f"Session created: {session.id} for user: {user.user_id}")
         return session
@@ -739,9 +967,9 @@ class SessionManager:
         if isinstance(metadata_dict, dict):
             restored_data = SessionData.model_validate(metadata_dict)
             # 保留从 Agent 采集的 available_models / tools（可能已变化）
-            restored_data.model.available = session.meta.model.available
-            restored_data.tool.tools = session.meta.tool.tools
-            session.meta = restored_data
+            restored_data.model.available = session.data.model.available
+            restored_data.tool.tools = session.data.tool.tools
+            session.data = restored_data
 
             # 回填 ContextManager 的 token 使用量
             # [Pydantic 迁移] 直接属性访问，不再通过 get()
@@ -775,6 +1003,62 @@ class SessionManager:
         logger.info(f"Session restored: {session_id}")
         return session
 
+    async def join_session(
+        self,
+        user: UserContext,
+        session_id: str | None = None,
+        config_override: dict | None = None,
+        approval_handler=None,
+    ) -> Session:
+        """
+        会话接入统一入口。调用方只需提供 user + 可选 session_id，
+        内部按优先级自动决策：内存命中 > DB恢复 > 用户活跃态 > 新建。
+
+        Args:
+            user: 用户上下文
+            session_id: 客户端指定的会话ID（None 表示不指定）
+            config_override: 覆盖默认配置（context_window_size 等）
+            approval_handler: 审批 handler（Phase B 后将由 VirtualApprovalHandler 替代）
+        """
+        cfg = config_override or {}
+
+        # 1. 命中内存
+        if session_id and session_id in self._sessions:
+            logger.info(f"join_session: memory hit {session_id}")
+            return self._sessions[session_id]
+
+        # 2. 命中持久化
+        if session_id and self._state_store:
+            try:
+                session = await self.restore_session(
+                    session_id=session_id,
+                    user=user,
+                    approval_handler=approval_handler,
+                    **cfg,
+                )
+                logger.info(f"join_session: restored {session_id}")
+                return session
+            except Exception as e:
+                logger.warning(f"join_session: restore failed ({e}), fallback to create")
+
+        # 3. 无 session_id → 强制新建
+        # (移除查用户活跃态的逻辑，确保刷新页面时默认新建空白会话)
+        # if not session_id:
+        #     active = self.get_user_active_session(user.user_id)
+        #     if active:
+        #         logger.info(f"join_session: reuse active {active.id}")
+        #         return active
+
+        # 4. 降级新建
+        session = await self.create_session(
+            user=user,
+            session_id=session_id,
+            approval_handler=approval_handler,
+            **cfg,
+        )
+        logger.info(f"join_session: created new {session.id}")
+        return session
+
     async def delete_session(self, session_id: str) -> None:
         session = self._sessions.pop(session_id, None)
         if session:
@@ -806,9 +1090,9 @@ class SessionManager:
         for sid, session in self._sessions.items():
             result.append({
                 "session_id": sid,
-                "agent_state": session.meta.context.agent_run_state,
-                "session_state": session.meta.context.session_state,
-                "metadata": session.meta.model_dump(),
+                "agent_state": session.data.context.agent_run_state,
+                "session_state": session.data.context.session_state,
+                "metadata": session.data.model_dump(),
             })
         return result
 

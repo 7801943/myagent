@@ -444,6 +444,23 @@
                 currentSessionId = data.session_id;
                 contextWindowSize = data.context_window_size || 0;
                 console.log("Session:", data.session_id, "Context Window:", contextWindowSize);
+                
+                resetProcessingState();
+                
+                // 过滤出真正需要显示的聊天消息（排除系统提示词等背景消息）
+                const displayableMessages = (data.messages || []).filter(function (msg) {
+                    return msg.role === "user" || msg.role === "assistant";
+                });
+                
+                // 恢复会话时加载历史消息，或者清空界面准备新会话
+                if (displayableMessages.length > 0) {
+                    welcomeMsg.classList.add("hidden");
+                    loadHistoryMessages(data.messages);
+                } else {
+                    messageList.innerHTML = "";
+                    welcomeMsg.classList.remove("hidden");
+                }
+                
                 requestSessionList();
                 break;
 

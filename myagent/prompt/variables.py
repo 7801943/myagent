@@ -141,7 +141,7 @@ class VariableCollector:
         user_info = {"name": "未设置", "group": "未设置", "role": "未设置"}
 
         # ── 工具 ──
-        tools = session.meta.get("tool", "tools", [])
+        tools = session.data.tool.tools
         available_tools = [
             {
                 "name": t.get("name", ""),
@@ -175,13 +175,13 @@ class VariableCollector:
             active_file = session.workspace.get_active_file_path() or ""
 
         # ── 模型 ──
-        active_model = dict(session.meta.get("model", "active", {}))
+        active_model = dict(session.data.model.active)
         if not active_model.get("model_id"):
             active_model = {"model_id": "unknown", "provider_type": "unknown", "context_window_size": 200000}
 
         # ── Token ──
         # [Pydantic 迁移] token_usage 现在是 TokenUsage 对象，直接属性访问 + 计算字段
-        tu = session.meta.context.token_usage
+        tu = session.data.context.token_usage
         token_usage = {
             "used": tu.used,
             "total": tu.total,

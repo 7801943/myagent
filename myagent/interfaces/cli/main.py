@@ -173,9 +173,9 @@ async def _chat(
     hooks.on("timeout_warning", lambda ctx, **kw: print_warning(kw.get("message", "操作超时")))
 
     # 构建 CLI 审批 handler
-    hitl_cfg = factory.app_config.get("hitl", {})
+    hitl_cfg = factory.config.hitl
     approval_handler = None
-    if hitl_cfg.get("enabled", True):
+    if hitl_cfg.enabled:
         async def _cli_approval_handler(tool_calls: list[ToolCall]) -> list[bool]:
             """CLI 人工审批：逐个询问用户是否批准工具调用。"""
             decisions = []
@@ -198,7 +198,6 @@ async def _chat(
     session = await session_manager.create_session(
         user=user,
         session_id=session_id,
-        hooks=hooks,
         approval_handler=approval_handler,
         no_safety=no_safety,
         system_prompt=system_prompt,
@@ -206,7 +205,11 @@ async def _chat(
         workspace_root=root_dir,
     )
 
+    # 将 CLI hooks 注册到 session 的 agent HookManager 上
     agent = session.agent
+    for event, callbacks in hooks._listeners.items():
+        for cb in callbacks:
+            agent.hooks.on(event, cb)
 
     # 启动工具热加载
     try:
