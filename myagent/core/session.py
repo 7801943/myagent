@@ -264,14 +264,15 @@ class Session:
 
         # 注册状态同步 hook：监听 state_change 事件更新 meta
         # 保存 HookHandle，用于 Session 销毁时取消注册
+        # topic=self.id 确保只接收本 Session 的事件（Topic 路由）
         self._hook_handles: list[HookHandle] = []
         self._hook_handles.append(
-            agent.hooks.on("state_change", self._on_state_change)
+            agent.hooks.on("state_change", self._on_state_change, topic=self.id)
         )
 
         # 注册 tool_end hook：文件操作工具执行后自动刷新 workspace
         self._hook_handles.append(
-            agent.hooks.on("tool_end", self._on_tool_end)
+            agent.hooks.on("tool_end", self._on_tool_end, topic=self.id)
         )
 
         # ── 内置审批 handler（与 WebSocket 连接解耦） ──
@@ -427,15 +428,11 @@ class Session:
     # ── Hook 回调 ──
 
     async def _on_state_change(self, ctx, state: str) -> None:
-        """Hook 回调：同步 agent_run_state 到 meta（仅处理当前 session 的事件）。"""
-        if ctx.session_id != self.id:
-            return  # 不是本 session 的事件，跳过
+        """Hook 回调：同步 agent_run_state 到 meta。Topic 路由已确保仅收到本 session 事件。"""
         self.data.context.agent_run_state = state
 
     async def _on_tool_end(self, ctx, tool_name: str, result: Any, call_id: str, latency_ms: float) -> None:
-        """Hook 回调：文件操作工具执行后自动刷新 workspace（仅处理当前 session 的事件）。"""
-        if ctx.session_id != self.id:
-            return  # 不是本 session 的事件，跳过
+        """Hook 回调：文件操作工具执行后自动刷新 workspace。Topic 路由已确保仅收到本 session 事件。"""
         if not self.workspace:
             return
 
@@ -676,6 +673,9 @@ class Session:
         将一个客户端（WebSocket）接入本会话。
         内部完成 Hook 绑定 + ws_notify 注册，返回 ClientHandle。
 
+        所有回调通过 topic=self.id 注册到 HookManager，
+        emit 时自动按 ctx.session_id 路由，无需手动过滤。
+
         Args:
             sender: 异步函数，接收 dict 并发给客户端
 
@@ -686,70 +686,59 @@ class Session:
         sid = self.id
         handles: list[HookHandle] = []
 
-        # ── session_id 过滤器 ──
-        def _for_this(ctx) -> bool:
-            return ctx.session_id == sid
+        # ── Topic 路由：所有回调注册时传入 topic=sid ──
+        # emit 时 HookManager 自动匹配 ctx.session_id == sid 的回调，
+        # 无需在每个回调内做 if ctx.session_id == sid 判断。
 
         async def _on_stream(ctx, delta):
-            if _for_this(ctx):
-                await sender({"type": "text_delta", "text": delta})
+            await sender({"type": "text_delta", "text": delta})
 
         async def _on_thinking_stream(ctx, delta):
-            if _for_this(ctx):
-                await sender({"type": "thinking_delta", "text": delta})
+            await sender({"type": "thinking_delta", "text": delta})
 
         async def _on_stream_start(ctx):
-            if _for_this(ctx):
-                await sender({"type": "stream_start"})
+            await sender({"type": "stream_start"})
 
         async def _on_stream_end(ctx, resuming=False):
-            if _for_this(ctx):
-                await sender({"type": "stream_end", "resuming": resuming})
+            await sender({"type": "stream_end", "resuming": resuming})
 
         async def _on_tool_start(ctx, tool_name, args, call_id):
-            if _for_this(ctx):
-                await sender({"type": "tool_start", "tool_name": tool_name,
-                              "args": args, "call_id": call_id})
+            await sender({"type": "tool_start", "tool_name": tool_name,
+                          "args": args, "call_id": call_id})
 
         async def _on_tool_end(ctx, tool_name, result, call_id, latency_ms):
-            if _for_this(ctx):
-                await sender({"type": "tool_end", "tool_name": tool_name,
-                              "result": result.content, "latency_ms": latency_ms,
-                              "call_id": call_id})
+            await sender({"type": "tool_end", "tool_name": tool_name,
+                          "result": result.content, "latency_ms": latency_ms,
+                          "call_id": call_id})
 
         async def _on_tool_error(ctx, tool_name, error, call_id):
-            if _for_this(ctx):
-                await sender({"type": "tool_error", "tool_name": tool_name,
-                              "error": str(error), "call_id": call_id})
+            await sender({"type": "tool_error", "tool_name": tool_name,
+                          "error": str(error), "call_id": call_id})
 
         async def _on_state_change(ctx, state):
-            if _for_this(ctx):
-                await sender({"type": "state_change", "state": state})
+            await sender({"type": "state_change", "state": state})
 
         async def _on_error(ctx, error):
-            if _for_this(ctx):
-                await sender({"type": "error", "message": str(error)})
+            await sender({"type": "error", "message": str(error)})
 
         async def _on_safety_blocked(ctx, rule, reason, action, call_id="", tool_name=""):
-            if _for_this(ctx):
-                await sender({"type": "safety_blocked", "rule": rule,
-                              "reason": reason, "action": action})
+            await sender({"type": "safety_blocked", "rule": rule,
+                          "reason": reason, "action": action})
 
         async def _on_timeout_warning(ctx, **kw):
-            if _for_this(ctx):
-                await sender({"type": "timeout_warning", **kw})
+            await sender({"type": "timeout_warning", **kw})
 
-        handles.append(hooks.on("stream", _on_stream))
-        handles.append(hooks.on("thinking_stream", _on_thinking_stream))
-        handles.append(hooks.on("stream_start", _on_stream_start))
-        handles.append(hooks.on("stream_end", _on_stream_end))
-        handles.append(hooks.on("tool_start", _on_tool_start))
-        handles.append(hooks.on("tool_end", _on_tool_end))
-        handles.append(hooks.on("tool_error", _on_tool_error))
-        handles.append(hooks.on("state_change", _on_state_change))
-        handles.append(hooks.on("error", _on_error))
-        handles.append(hooks.on("safety_blocked", _on_safety_blocked))
-        handles.append(hooks.on("timeout_warning", _on_timeout_warning))
+        handles.append(hooks.on("stream", _on_stream, topic=sid))
+        handles.append(hooks.on("thinking_stream", _on_thinking_stream, topic=sid))
+        handles.append(hooks.on("stream_start", _on_stream_start, topic=sid))
+        handles.append(hooks.on("stream_end", _on_stream_end, topic=sid))
+        handles.append(hooks.on("tool_start", _on_tool_start, topic=sid))
+        handles.append(hooks.on("tool_end", _on_tool_end, topic=sid))
+        handles.append(hooks.on("tool_error", _on_tool_error, topic=sid))
+        handles.append(hooks.on("state_change", _on_state_change, topic=sid))
+        handles.append(hooks.on("error", _on_error, topic=sid))
+        handles.append(hooks.on("safety_blocked", _on_safety_blocked, topic=sid))
+        handles.append(hooks.on("timeout_warning", _on_timeout_warning, topic=sid))
 
         # ws_notify 回调签名是 (msg_type, data)，需要适配为 sender(dict)
         async def _ws_notify_wrapper(msg_type: str, data: dict) -> None:

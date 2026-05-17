@@ -19,7 +19,6 @@ from pathlib import Path
 from myagent.core.agent import AgentFactory
 from myagent.core.session import Session, SessionManager
 from myagent.core.models import UserContext
-from myagent.core.hook import HookManager
 from myagent.context.message import ToolCall
 from myagent.interfaces.cli.ui import CliUI, print_warning
 from myagent.utils.logging import get_logger, setup_logging
@@ -145,32 +144,11 @@ async def _chat(
     # 使用 AgentFactory（从 core/factory.py）
     factory = AgentFactory(config_path=config_path)
 
-    # 准备 Hooks（CLI 特有的终端打印回调）
-    hooks = HookManager()
+    # 准备 UI
     ui = CliUI(show_tools=show_tools)
 
-    @hooks.hook("stream")
-    async def _on_stream(ctx, delta):
-        ui.print_stream_delta(delta)
-
-    @hooks.hook("thinking_stream")
-    async def _on_thinking_stream(ctx, delta):
-        ui.print_thinking_delta(delta)
-
-    @hooks.hook("tool_start")
-    async def _on_tool_start(ctx, tool_name, args, call_id):
-        ui.print_tool_call(tool_name, args, call_id)
-
-    @hooks.hook("tool_end")
-    async def _on_tool_end(ctx, tool_name, result, call_id, latency_ms):
-        ui.print_tool_result(tool_name, result.content, latency_ms)
-
-    @hooks.hook("error")
-    async def _on_error(ctx, error):
-        ui.print_error(str(error))
-
-    # 注册超时警告回调
-    hooks.on("timeout_warning", lambda ctx, **kw: print_warning(kw.get("message", "操作超时")))
+    # CLI 回调列表（注册后保存 HookHandle，用于 finally 清理）
+    cli_hook_handles = []
 
     # 构建 CLI 审批 handler
     hitl_cfg = factory.config.hitl
@@ -205,11 +183,33 @@ async def _chat(
         workspace_root=root_dir,
     )
 
-    # 将 CLI hooks 注册到 session 的 agent HookManager 上
+    # 将 CLI hooks 注册到 session 的 agent HookManager 上（全局 topic=None）
     agent = session.agent
-    for event, callbacks in hooks._listeners.items():
-        for cb in callbacks:
-            agent.hooks.on(event, cb)
+
+    def _on_stream(ctx, delta):
+        ui.print_stream_delta(delta)
+
+    async def _on_thinking_stream(ctx, delta):
+        ui.print_thinking_delta(delta)
+
+    def _on_tool_start(ctx, tool_name, args, call_id):
+        ui.print_tool_call(tool_name, args, call_id)
+
+    def _on_tool_end(ctx, tool_name, result, call_id, latency_ms):
+        ui.print_tool_result(tool_name, result.content, latency_ms)
+
+    def _on_error(ctx, error):
+        ui.print_error(str(error))
+
+    def _on_timeout_warning(ctx, **kw):
+        print_warning(kw.get("message", "操作超时"))
+
+    cli_hook_handles.append(agent.hooks.on("stream", _on_stream))
+    cli_hook_handles.append(agent.hooks.on("thinking_stream", _on_thinking_stream))
+    cli_hook_handles.append(agent.hooks.on("tool_start", _on_tool_start))
+    cli_hook_handles.append(agent.hooks.on("tool_end", _on_tool_end))
+    cli_hook_handles.append(agent.hooks.on("error", _on_error))
+    cli_hook_handles.append(agent.hooks.on("timeout_warning", _on_timeout_warning))
 
     # 启动工具热加载
     try:
