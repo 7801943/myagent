@@ -39,6 +39,7 @@
     // Header connection status elements
     const headerConnDot = $("#headerConnDot");
     const headerConnText = $("#headerConnText");
+    const headerModelName = $("#headerModelName");
 
     // ── State ──
     let ws = null;
@@ -443,6 +444,23 @@
                 currentSessionId = data.session_id;
                 contextWindowSize = data.context_window_size || 0;
                 console.log("Session:", data.session_id, "Context Window:", contextWindowSize);
+                
+                resetProcessingState();
+                
+                // 过滤出真正需要显示的聊天消息（排除系统提示词等背景消息）
+                const displayableMessages = (data.messages || []).filter(function (msg) {
+                    return msg.role === "user" || msg.role === "assistant";
+                });
+                
+                // 恢复会话时加载历史消息，或者清空界面准备新会话
+                if (displayableMessages.length > 0) {
+                    welcomeMsg.classList.add("hidden");
+                    loadHistoryMessages(data.messages);
+                } else {
+                    messageList.innerHTML = "";
+                    welcomeMsg.classList.remove("hidden");
+                }
+                
                 requestSessionList();
                 break;
 
@@ -527,6 +545,10 @@
 
             case "error":
                 handleError(data.message);
+                break;
+
+            case "conversation_state":
+                handleConversationState(data);
                 break;
 
             case "pong":
@@ -1140,6 +1162,38 @@
             return JSON.stringify(args).substring(0, 60);
         } catch (e) {
             return "";
+        }
+    }
+
+    // ── Conversation State Handler ──
+    function handleConversationState(data) {
+        // Update active model name in header
+        if (headerModelName) {
+            const active = (data.model && data.model.active) || {};
+            const modelId = active.model_id || "";
+            const providerType = active.provider_type || "";
+            if (modelId) {
+                headerModelName.textContent = modelId;
+                headerModelName.title = providerType ? (providerType + " / " + modelId) : modelId;
+                headerModelName.classList.add("visible");
+            } else {
+                headerModelName.textContent = "";
+                headerModelName.classList.remove("visible");
+            }
+        }
+
+        // Update context progress bar from token_usage
+        if (data.context && data.context.token_usage) {
+            const tu = data.context.token_usage;
+            updateContextProgress({
+                used_tokens: tu.used || 0,
+                context_window_size: tu.total || contextWindowSize || 1,
+            });
+        }
+
+        // Update contextWindowSize for future reference
+        if (data.context && data.context.token_usage && data.context.token_usage.total) {
+            contextWindowSize = data.context.token_usage.total;
         }
     }
 

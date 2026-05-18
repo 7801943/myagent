@@ -93,18 +93,35 @@ class OpenAIProvider(BaseProvider):
         return formatted
 
     def format_tools(self, tools: list) -> list[dict]:
-        """将 BaseTool 列表转为 OpenAI function calling 格式。"""
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": tool.parameters_schema,
-                },
-            }
-            for tool in tools
-        ]
+        """将工具列表转为 OpenAI function calling 格式。
+        
+        支持两种输入格式：
+        1. BaseTool 对象列表（旧格式，ToolManager 直接调用）
+        2. dict 列表（新格式，来自 SessionData）
+        """
+        result = []
+        for tool in tools:
+            if isinstance(tool, dict):
+                # dict 格式（来自 SessionData）
+                result.append({
+                    "type": "function",
+                    "function": {
+                        "name": tool.get("name", ""),
+                        "description": tool.get("description", ""),
+                        "parameters": tool.get("parameters_schema", {}),
+                    },
+                })
+            else:
+                # BaseTool 对象格式（旧格式兼容）
+                result.append({
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.parameters_schema,
+                    },
+                })
+        return result
 
     async def stream(
         self,

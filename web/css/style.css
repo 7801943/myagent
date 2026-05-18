@@ -409,6 +409,26 @@ body {
     white-space: nowrap;
 }
 
+.header-model-name {
+    display: none;
+    padding: 2px 10px;
+    border-radius: 12px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 600;
+    font-family: var(--font-mono);
+    white-space: nowrap;
+    margin-left: 4px;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.header-model-name.visible {
+    display: inline-block;
+}
+
 .sidebar-open-btn {
     display: none;
 }
@@ -433,7 +453,7 @@ body {
 .status-floating-container {
     display: flex;
     justify-content: center;
-    padding: 0 0 12px;
+    padding: 0 0 16px;
     pointer-events: none;
     flex-shrink: 0;
     position: relative;
@@ -1101,7 +1121,7 @@ body {
 }
 
 .input-area {
-    padding: 12px 24px 16px;
+    padding: 12px 24px 36px;
     background: var(--bg-primary);
     position: relative;
     z-index: 10;

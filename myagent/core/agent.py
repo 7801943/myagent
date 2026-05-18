@@ -49,21 +49,24 @@ class Agent:
         *,
         provider_router: ProviderRouter,
         tool_manager: ToolManager | None = None,
-        hooks: HookManager | None = None,
         safety_guard=None,
         secret_manager=None,
         max_iterations: int = 100,
         approval_handler: Callable[[list], Awaitable[list[bool]]] | None = None,
-        system_command_handler: Callable[[str, str, HookContext], Awaitable[None]] | None = None,
     ):
+        """
+        无状态 AI 引擎。hooks 始终自建（共享广播中心），外部通过 agent.hooks.on() 注册回调。
+        不再接受外部 hooks 注入，确保多客户端共享同一个 HookManager。
+        """
         self._router = provider_router
         self._tool_manager = tool_manager or ToolManager()
-        self._hooks = hooks or HookManager()
+        self._hooks = HookManager()  # 始终自建，不暴露给外部
         self._safety_guard = safety_guard
         self._secret_manager = secret_manager
         self._max_iterations = max_iterations
         self._approval_handler = approval_handler
-        self._system_command_handler = system_command_handler
+        # 不再持有 _system_command_handler, _workspace_root, _active_file_path, _session_meta
+        # 这些通过 HookContext 由 Session.chat() 每次注入
 
     @property
     def hooks(self) -> HookManager:
@@ -88,57 +91,6 @@ class Agent:
         """注册 hook 回调（代理到 HookManager.on()）。"""
         self._hooks.on(event, callback)
 
-    # async def run(self, context: ContextManager, ctx: HookContext) -> StreamResult:
-    #     """
-    #     执行 ReAct 循环。原 AgentLoop.run() 逻辑。
-
-    #     Args:
-    #         context: ContextManager（由 Session 提供）
-    #         ctx: HookContext（由 Session 创建）
-
-    #     Returns:
-    #         最终的 StreamResult
-    #     """
-    #     final_result: StreamResult | None = None
-    #     current_kind = TurnKind.SYSTEM
-    #     current_data = None
-    #     previous_kind: TurnKind | None = None
-
-    #     try:
-    #         for iteration in range(self._max_iterations):
-    #             ctx.iteration = iteration + 1
-    #             logger.debug(f"Iteration {iteration + 1}, turn={current_kind.name}")
-
-    #             turn = self._create_turn(current_kind, context)
-    #             from myagent.core.turns import TurnResult
-    #             result: TurnResult = await turn.execute(ctx, current_data, source=previous_kind)
-
-    #             if result.next_turn is None:
-    #                 final_result = result.stream_result
-    #                 await self._hooks.emit("state_change", ctx, state="idle")
-    #                 break
-
-    #             previous_kind = result.kind
-    #             current_kind = result.next_turn
-    #             current_data = result.data
-
-    #         else:
-    #             logger.warning(f"Agent reached max iterations ({self._max_iterations})")
-    #             final_result = StreamResult(
-    #                 text="达到最大迭代次数限制，终止执行。",
-    #                 stop_reason="max_iterations",
-    #             )
-
-    #     except asyncio.CancelledError:
-    #         cancel_msg = "[系统] 操作已取消"
-    #         logger.info(f"Agent cancelled at iteration {ctx.iteration}")
-    #         await context.add_assistant_message(content=cancel_msg, tool_calls=None)
-    #         return StreamResult(
-    #             text=cancel_msg,
-    #             stop_reason="cancelled",
-    #         )
-
-    #     return final_result or StreamResult(stop_reason="unknown")
     async def run(self, context: ContextManager, ctx: HookContext) -> StreamResult:
             from myagent.core.turns import TurnResult
             
@@ -151,7 +103,7 @@ class Agent:
                     logger.debug(f"Iteration {ctx.iteration}, turn={state.next_turn.name}")
 
                     # 2. 从状态载体中提取动作并执行
-                    turn = self._create_turn(state.next_turn, context)
+                    turn = self._create_turn(state.next_turn, context, ctx)
                     state = await turn.execute(ctx, input_data=state.data, source=state.kind)
 
                     # 3. 检查流转是否结束
@@ -172,14 +124,19 @@ class Agent:
                 await context.add_assistant_message(content=cancel_msg, tool_calls=None)
                 return StreamResult(text=cancel_msg, stop_reason="cancelled")
             
-    def _create_turn(self, kind: TurnKind, context: ContextManager):
+    def _create_turn(self, kind: TurnKind, context: ContextManager, ctx: HookContext):
         """Turn 工厂。每次动态获取 tool_schemas，支持运行时热加载。"""
         if kind == TurnKind.MODEL:
             from myagent.core.turns import ModelTurn
+            # 数据源：优先从 ctx.session_meta（会话级），降级到 ToolManager 直接调用（CLI 单会话场景）
+            if ctx.session_meta:
+                tool_schemas = ctx.session_meta.tool.tools
+            else:
+                tool_schemas = self._tool_manager.list_schemas() if self._tool_manager else None
             return ModelTurn(
                 provider_router=self._router,
                 context=context,
-                tool_schemas=self._tool_manager.list_schemas() if self._tool_manager else None,
+                tool_schemas=tool_schemas,
                 hooks=self._hooks,
                 timeout=120.0,
             )
@@ -194,11 +151,12 @@ class Agent:
             )
         elif kind == TurnKind.SYSTEM:
             from myagent.core.turns import SystemTurn
+            # 从 ctx 获取会话级指令处理器
             return SystemTurn(
                 context=context,
                 hooks=self._hooks,
                 timeout=30.0,
-                system_command_handler=self._system_command_handler,
+                system_command_handler=ctx.system_command_handler,
             )
         else:
             raise ValueError(f"Unknown TurnKind: {kind}")
@@ -256,7 +214,7 @@ class AgentFactory:
 
     用法：
         factory = AgentFactory(config_path="config.yaml")
-        agent = factory.create_agent(hooks=my_hooks, approval_handler=my_handler)
+        agent = factory.create_agent(approval_handler=my_handler)
     """
 
     def __init__(
@@ -273,17 +231,22 @@ class AgentFactory:
 
         # 加载配置（只加载一次）
         self._raw = load_yaml_config(config_path)
-        self._app_config = self._raw.get("agent", self._raw) if self._raw else {}
-        self._config_obj = AgentConfig(**self._app_config)
+        app_config = self._raw.get("agent", self._raw) if self._raw else {}
+        self._config = AgentConfig(**app_config)
 
         # 预加载系统提示词（供外部通过 factory.system_prompt 获取）
         self._system_prompt: str = self._load_system_prompt()
 
     @property
     def context_window_size(self) -> int:
-        """获取上下文窗口大小（从第一个 provider 配置中读取）。"""
-        if self._config_obj.providers:
-            return self._config_obj.providers[0].context_window_size
+        """获取上下文窗口大小（从 active provider 的配置中读取）。"""
+        if self._config.providers:
+            # 优先取 priority=1 的 provider
+            for p in self._config.providers:
+                if p.priority == 1:
+                    return p.context_window_size
+            # 降级取第一个
+            return self._config.providers[0].context_window_size
         return 128000
 
     @property
@@ -293,26 +256,20 @@ class AgentFactory:
 
     @property
     def config(self) -> AgentConfig:
-        """获取解析后的 Agent 配置。"""
-        return self._config_obj
-
-    @property
-    def app_config(self) -> dict:
-        """获取原始应用配置 dict（包含 safety、sandbox 等未在 AgentConfig 中定义的字段）。"""
-        return self._app_config
+        """获取解析后的 Agent 配置（强类型，所有配置段均已建模）。"""
+        return self._config
 
     def create_agent(
         self,
         *,
-        hooks: HookManager,
         approval_handler: Callable[[list], Awaitable[list[bool]]] | None = None,
         no_safety: bool = False,
     ) -> Agent:
         """
         创建纯 Agent 实例（无 session 管理）。
+        Agent 始终自建 HookManager（共享广播中心），外部通过 agent.hooks.on() 注册回调。
 
         Args:
-            hooks: 由调用方构建的 HookManager
             approval_handler: 可选的人工审批回调
             no_safety: 是否禁用安全检查
 
@@ -335,14 +292,13 @@ class AgentFactory:
         # ── 5. 构建工具管理器 ──
         tool_manager = self._build_tool_manager()
 
-        # ── 6. 组装 Agent ──
+        # ── 6. 组装 Agent（hooks 始终自建，不传外部 hooks）──
         agent = Agent(
             provider_router=router,
-            hooks=hooks,
             tool_manager=tool_manager,
             safety_guard=safety_guard,
             secret_manager=secret_manager,
-            max_iterations=self._config_obj.max_iterations,
+            max_iterations=self._config.max_iterations,
             approval_handler=approval_handler,
         )
 
@@ -352,20 +308,25 @@ class AgentFactory:
     def _build_router(self) -> ProviderRouter:
         """构建多模型路由器。"""
         providers = []
-        for p_cfg in self._config_obj.providers:
+        for p_cfg in self._config.providers:
             if p_cfg.type.lower() == "openai":
-                providers.append(OpenAIProvider(
+                p = OpenAIProvider(
                     name=p_cfg.name,
                     model=p_cfg.model,
                     api_key=p_cfg.api_key or "sk-dummy",
                     api_base=p_cfg.api_base,
-                ))
+                )
             elif p_cfg.type.lower() == "anthropic":
-                providers.append(AnthropicProvider(
+                p = AnthropicProvider(
                     name=p_cfg.name,
                     model=p_cfg.model,
                     api_key=p_cfg.api_key or "sk-dummy",
-                ))
+                )
+            else:
+                continue
+            # 注入 context_window_size 供 Session._init_meta_from_agent() 读取
+            p._context_window_size = p_cfg.context_window_size
+            providers.append(p)
 
         if not providers:
             raise RuntimeError("未配置任何 Provider，请检查 config.yaml")
@@ -374,10 +335,10 @@ class AgentFactory:
 
     def _load_system_prompt(self) -> str:
         """加载系统提示词（从配置或文件）。"""
-        sys_prompt = self._config_obj.system_prompt or "你是一个智能助手，可以帮助用户完成各种任务。"
+        sys_prompt = self._config.system_prompt or "你是一个智能助手，可以帮助用户完成各种任务。"
 
-        if self._config_obj.system_prompt_file:
-            prompt_path = Path(self._config_obj.system_prompt_file)
+        if self._config.system_prompt_file:
+            prompt_path = Path(self._config.system_prompt_file)
             if prompt_path.exists():
                 lines = []
                 with open(prompt_path, "r", encoding="utf-8") as f:
@@ -389,20 +350,20 @@ class AgentFactory:
                 sys_prompt = "\n".join(lines)
             else:
                 logger.warning(
-                    f"system_prompt_file {self._config_obj.system_prompt_file} not found. Using fallback."
+                    f"system_prompt_file {self._config.system_prompt_file} not found. Using fallback."
                 )
 
         return sys_prompt
 
     def _build_safety_guard(self, no_safety: bool = False) -> SafetyGuard | None:
         """构建安全守卫系统。"""
-        safety_cfg = self._app_config.get("safety", {})
+        safety_cfg = self._config.safety
 
-        if no_safety or not safety_cfg.get("enabled", False):
+        if no_safety or not safety_cfg.enabled:
             return None
 
         # 加载策略规则
-        rules_path = safety_cfg.get("rules_path", "./config/safety_rules.yaml")
+        rules_path = safety_cfg.rules_path
         rules_cfg = {}
         if Path(rules_path).exists():
             with open(rules_path) as f:
@@ -419,7 +380,7 @@ class AgentFactory:
         policy_engine = PolicyEngine(
             tool_policies=policy_cfg.get("tool_policies", []),
             default_action=policy_cfg.get(
-                "default_action", safety_cfg.get("default_action", "allow")
+                "default_action", safety_cfg.default_action
             ),
         )
 
@@ -444,19 +405,19 @@ class AgentFactory:
 
     def _build_secret_manager(self) -> SecretManager:
         """构建密钥管理器。"""
-        secrets_cfg = self._app_config.get("secrets", {})
+        secrets_cfg = self._config.secrets
         return SecretManager(
-            env_prefix=secrets_cfg.get("env_prefix", "MYAGENT_SECRET_"),
-            sensitive_fields=secrets_cfg.get("sensitive_fields"),
+            env_prefix=secrets_cfg.env_prefix,
+            sensitive_fields=secrets_cfg.sensitive_fields or None,
         )
 
     def _build_tool_manager(self) -> ToolManager:
-        hr_cfg = self._config_obj.hot_reload
+        hr_cfg = self._config.hot_reload
         tools_dir = (hr_cfg.watch_dir
                      if hr_cfg and hr_cfg.enabled
                      else "myagent/tools/tools_store")
 
-        runner_cfg = self._app_config.get("sandbox", {})
+        runner_cfg = self._config.sandbox.model_dump()
 
         manager = ToolManager(tools_dir=tools_dir,
                               runner_config=runner_cfg)
@@ -464,3 +425,22 @@ class AgentFactory:
         logger.info(
             "Registered builtin tools: cli_execute, file_read, file_write")
         return manager
+
+    # ── SSPT: Prompt 模板加载与渲染器创建 ──
+
+    def load_prompt_template(self):
+        """加载 prompt 模板配置。"""
+        from myagent.prompt.template import PromptTemplate
+
+        template_path = self._config.prompt_template_path
+        if Path(template_path).exists():
+            return PromptTemplate.from_yaml(template_path)
+        logger.warning(f"prompt_template.yaml not found at {template_path}, using default")
+        return PromptTemplate.default()
+
+    def create_prompt_renderer(self):
+        """创建 prompt 渲染器。"""
+        from myagent.prompt.renderer import PromptRenderer
+
+        template = self.load_prompt_template()
+        return PromptRenderer(template)

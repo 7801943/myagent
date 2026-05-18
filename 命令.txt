@@ -1,1 +1,1 @@
-python -m myagent.interfaces.web.app --host "" --port 8001
+venv/bin/python -m myagent.interfaces.web.app --host "" --port 8001

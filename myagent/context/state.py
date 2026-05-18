@@ -15,48 +15,18 @@ Phase 1 重构：
 import json
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from enum import Enum
 from pathlib import Path
 
 import aiosqlite
 
 from myagent.context.message import Message, ToolCall, ToolResult
+from myagent.core.models import SessionState, AgentRunState, _LEGACY_STATE_MAP
 from myagent.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-
-class SessionState(str, Enum):
-    """会话生命周期状态。"""
-    ACTIVE = "active"           # 活跃
-    SUSPENDED = "suspended"     # 挂起（用户离线但保留状态）
-    CLOSED = "closed"           # 已关闭
-
-
-class AgentRunState(str, Enum):
-    """
-    Agent 运行时状态（原 AgentState，重命名以区分 SessionState）。
-    AgentLoop 的每一次状态变迁都必须先持久化到 StateStore，
-    再执行实际操作——这是断电恢复的基石。
-    """
-    IDLE = "idle"                    # 空闲。run() 未执行，或刚结束回到此状态
-    THINKING = "thinking"            # LLM 推理阶段（对应 extended thinking）
-    GENERATING = "generating"        # LLM 流式输出中（首次 text_delta 后进入）
-    WAITING_TOOL = "waiting_tool"    # LLM 已返回 tool_calls，等待执行
-    WAITING_HITL = "waiting_hitl"    # 等待人工审批（Phase 2 预留）
-    ERROR = "error"                  # 发生错误
-
-
 # 向后兼容别名
 AgentState = AgentRunState
-
-# ── 旧状态值迁移映射 ──
-# 精简重构时移除了 RUNNING / FINISHED，但旧数据库中可能仍存储了这些值。
-# 加载时通过此映射自动转换，避免 ValueError。
-_LEGACY_STATE_MAP: dict[str, str] = {
-    "running": "generating",   # RUNNING → GENERATING
-    "finished": "idle",        # FINISHED → IDLE（会话结束即回到空闲）
-}
 
 class StateStore(ABC):
     """状态持久化抽象接口。"""
@@ -143,6 +113,13 @@ class SQLiteStateStore(StateStore):
         except Exception:
             pass  # 列已存在
 
+        # 安全添加 workspace 列（Phase 2 新增，已存在则忽略）
+        try:
+            await self._db.execute("ALTER TABLE sessions ADD COLUMN workspace TEXT")
+            await self._db.commit()
+        except Exception:
+            pass  # 列已存在
+
     async def close(self) -> None:
         if self._db:
             await self._db.close()
@@ -189,6 +166,28 @@ class SQLiteStateStore(StateStore):
             (session_id, session_state.value, now),
         )
         await self._db.commit()
+
+    async def save_workspace(self, session_id: str, workspace_json: str) -> None:
+        """保存工作空间状态快照（JSON 字符串）。"""
+        now = datetime.now(timezone.utc).isoformat()
+        await self._db.execute(
+            """INSERT INTO sessions (session_id, agent_state, session_state, metadata, updated_at, workspace)
+               VALUES (?, 'idle', 'active', '{}', ?, ?)
+               ON CONFLICT(session_id) DO UPDATE SET
+                 workspace = excluded.workspace,
+                 updated_at = excluded.updated_at""",
+            (session_id, now, workspace_json),
+        )
+        await self._db.commit()
+
+    async def load_workspace(self, session_id: str) -> str | None:
+        """加载工作空间状态快照 JSON。不存在返回 None。"""
+        async with self._db.execute(
+            "SELECT workspace FROM sessions WHERE session_id = ?",
+            (session_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else None
 
     async def save_messages(self, session_id: str, messages: list[Message]) -> None:
         now = datetime.now(timezone.utc).isoformat()
@@ -265,7 +264,9 @@ class SQLiteStateStore(StateStore):
             return result
 
     async def clear_session(self, session_id: str) -> None:
-        await self._db.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+        cursor = await self._db.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
         await self._db.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
         await self._db.execute("DELETE FROM pending_tool_calls WHERE session_id = ?", (session_id,))
         await self._db.commit()
+        if cursor.rowcount > 0:
+            logger.info(f"DB session cleared: {session_id}")

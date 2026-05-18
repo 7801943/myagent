@@ -60,12 +60,31 @@ class ContextManager:
             self._last_usage_input_tokens = usage["input_tokens"]
             logger.debug(f"Context usage updated: input_tokens={self._last_usage_input_tokens}")
 
+    @property
+    def system_prompt(self) -> str | None:
+        """获取当前 System Prompt。"""
+        return self._system_prompt
+
     def set_system(self, prompt: str) -> None:
         """设置/替换 System Prompt。"""
         self._system_prompt = prompt
         # 确保 system 消息始终在首位
         self._messages = [m for m in self._messages if m.role != "system"]
         self._messages.insert(0, Message(role="system", content=prompt))
+
+    def add_system_note(self, text: str) -> None:
+        """
+        临时注入一条系统注释（workspace 文件列表等上下文信息）。
+        不修改 _system_prompt，而是在 system 消息之后、用户消息之前插入。
+        每次调用前会清除之前注入的注释，避免重复。
+        """
+        # 移除之前通过 add_system_note 注入的注释（以特定前缀标识）
+        tag = "[工作空间]"
+        self._messages = [m for m in self._messages
+                          if not (isinstance(m.content, str) and m.content.startswith(tag))]
+        # 在 system prompt 之后插入
+        insert_idx = 1 if self._messages and self._messages[0].role == "system" else 0
+        self._messages.insert(insert_idx, Message(role="system", content=text))
 
     async def add_user_message(self, content: str | list[ContentBlock]) -> None:
         """添加用户消息 + 实时持久化。"""

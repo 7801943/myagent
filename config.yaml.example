@@ -2,9 +2,18 @@
 # API Key 等敏感信息请自行填入
 
 agent:
-  # System Prompt
+  # 用户根目录（CLI 工具将不能越过此目录进行操作）
+  root_dir: ""
+
+  # System Prompt（降级用，当 prompt_template.yaml 缺失时使用）
   system_prompt: "你是一个智能助手，可以帮助用户完成各种任务。"
   system_prompt_file: "config/prompt.txt"
+
+  # 结构化系统提示词模板（SSPT）— 新增
+  prompt_template_path: "config/prompt_template.yaml"
+
+  # 上下文窗口大小（可配置，默认 200000）
+  context_window_size: 200000
 
   # 最大 ReAct 迭代次数
   max_iterations: 50
