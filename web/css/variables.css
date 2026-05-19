@@ -1,0 +1,90 @@
+/* ============================================================
+   CSS Variables (Design Tokens) — 设计令牌 + 暗/亮主题
+   必须最先加载
+   ============================================================ */
+
+:root {
+    --font-sans: "Inter", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --font-mono: "JetBrains Mono", "Fira Code", "SF Mono", Menlo, monospace;
+    --radius-sm: 8px;
+    --radius-md: 12px;
+    --radius-lg: 16px;
+    --radius-xl: 24px;
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.08);
+    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.12);
+    --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.18);
+    --transition-fast: 0.15s ease;
+    --transition-normal: 0.25s ease;
+    --transition-slow: 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    --sidebar-width: 260px;
+}
+
+/* ── Dark Theme (default) ── */
+[data-theme="dark"] {
+    --bg-primary: hsl(220, 20%, 10%);
+    --bg-secondary: hsl(220, 18%, 14%);
+    --bg-tertiary: hsl(220, 15%, 18%);
+    --bg-sidebar: hsl(220, 20%, 8%);
+    --bg-glass: rgba(255, 255, 255, 0.04);
+    --bg-glass-hover: rgba(255, 255, 255, 0.08);
+    --bg-glass-border: rgba(255, 255, 255, 0.08);
+    --text-primary: hsl(220, 20%, 92%);
+    --text-secondary: hsl(220, 10%, 65%);
+    --text-tertiary: hsl(220, 8%, 50%);
+    --accent: hsl(210, 100%, 60%);
+    --accent-soft: hsl(210, 100%, 60%, 0.12);
+    --accent-hover: hsl(210, 100%, 68%);
+    --success: hsl(152, 68%, 48%);
+    --success-soft: hsl(152, 68%, 48%, 0.12);
+    --danger: hsl(0, 72%, 58%);
+    --danger-soft: hsl(0, 72%, 58%, 0.12);
+    --warning: hsl(38, 92%, 56%);
+    --warning-soft: hsl(38, 92%, 56%, 0.12);
+    --user-bubble: hsl(210, 50%, 25%);
+    --user-bubble-text: hsl(210, 20%, 92%);
+    --assistant-bubble: transparent;
+    --assistant-bubble-text: hsl(220, 20%, 88%);
+    --tool-bg: hsl(220, 18%, 13%);
+    --tool-border: hsl(220, 15%, 22%);
+    --code-bg: hsl(220, 20%, 14%);
+    --scrollbar-thumb: hsl(220, 10%, 28%);
+    --scrollbar-track: transparent;
+    --input-bg: rgba(255, 255, 255, 0.08);
+    --input-border: rgba(255, 255, 255, 0.1);
+    --divider: rgba(255, 255, 255, 0.06);
+}
+
+/* ── Light Theme ── */
+[data-theme="light"] {
+    --bg-primary: hsl(220, 20%, 93%);
+    --bg-secondary: hsl(220, 20%, 96%);
+    --bg-tertiary: hsl(220, 15%, 90%);
+    --bg-sidebar: hsl(220, 18%, 91%);
+    --bg-glass: rgba(255, 255, 255, 0.7);
+    --bg-glass-hover: rgba(255, 255, 255, 0.85);
+    --bg-glass-border: rgba(0, 0, 0, 0.06);
+    --text-primary: hsl(220, 20%, 15%);
+    --text-secondary: hsl(220, 10%, 42%);
+    --text-tertiary: hsl(220, 8%, 58%);
+    --accent: hsl(210, 100%, 50%);
+    --accent-soft: hsl(210, 100%, 50%, 0.08);
+    --accent-hover: hsl(210, 100%, 42%);
+    --success: hsl(152, 68%, 38%);
+    --success-soft: hsl(152, 68%, 38%, 0.08);
+    --danger: hsl(0, 72%, 50%);
+    --danger-soft: hsl(0, 72%, 50%, 0.08);
+    --warning: hsl(38, 92%, 46%);
+    --warning-soft: hsl(38, 92%, 46%, 0.08);
+    --user-bubble: hsl(210, 60%, 92%);
+    --user-bubble-text: hsl(210, 30%, 18%);
+    --assistant-bubble: transparent;
+    --assistant-bubble-text: hsl(220, 15%, 20%);
+    --tool-bg: hsl(220, 15%, 96%);
+    --tool-border: hsl(220, 12%, 88%);
+    --code-bg: hsl(220, 15%, 95%);
+    --scrollbar-thumb: hsl(220, 10%, 78%);
+    --scrollbar-track: transparent;
+    --input-bg: rgba(255, 255, 255, 0.8);
+    --input-border: rgba(0, 0, 0, 0.1);
+    --divider: rgba(0, 0, 0, 0.06);
+}

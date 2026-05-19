@@ -1,0 +1,189 @@
+/* ============================================================
+   Input Area — 输入区域 + 上下文进度条
+   ============================================================ */
+.input-area-wrapper {
+    position: relative;
+    flex-shrink: 0;
+    opacity: 0.8;
+    transition: opacity var(--transition-normal);
+}
+
+.input-area-wrapper:hover,
+.input-area-wrapper:focus-within,
+.input-area-wrapper.has-content {
+    opacity: 1;
+}
+
+.input-fade-mask {
+    position: absolute;
+    top: -40px;
+    left: 0;
+    right: 0;
+    height: 40px;
+    background: linear-gradient(to bottom, transparent, var(--bg-primary));
+    pointer-events: none;
+    z-index: 5;
+}
+
+.input-area {
+    padding: 12px 24px 36px;
+    background: var(--bg-primary);
+    position: relative;
+    z-index: 10;
+}
+
+/* ── Context Progress Bar ── */
+.context-progress-container {
+    display: block;
+    max-width: 680px;
+    margin: 0 auto;
+    padding: 0 0px;
+    opacity: 0;
+    transition: opacity var(--transition-normal);
+    position: absolute;
+    top: 0px;
+    left: 0;
+    right: 0;
+    z-index: 12;
+}
+
+.context-progress-container.visible {
+    opacity: 1;
+}
+
+.context-progress-bar {
+    width: 100%;
+    height: 8px;
+    background: var(--bg-tertiary);
+    border-radius: 1px;
+    overflow: hidden;
+    position: relative;
+}
+
+.context-progress-fill {
+    height: 100%;
+    width: 0%;
+    border-radius: 4px;
+    background: var(--success);
+    transition: width 0.5s ease, background-color 0.5s ease;
+    position: relative;
+}
+
+.context-progress-fill.animating {
+    background-image: linear-gradient(45deg,
+            rgba(255, 255, 255, 0.15) 25%,
+            transparent 25%,
+            transparent 50%,
+            rgba(255, 255, 255, 0.15) 50%,
+            rgba(255, 255, 255, 0.15) 75%,
+            transparent 75%,
+            transparent);
+    background-size: 1rem 1rem;
+    animation: progress-bar-stripes 1s linear infinite;
+}
+
+.context-progress-left,
+.context-progress-right {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 11px;
+    color: var(--text-tertiary);
+    white-space: nowrap;
+    font-family: var(--font-mono);
+    opacity: 0;
+    transition: opacity 0.3s ease 0s;
+    pointer-events: none;
+}
+
+.context-progress-left {
+    left: -40px;
+}
+
+.context-progress-right {
+    right: -40px;
+    text-align: right;
+}
+
+.context-progress-container:hover .context-progress-left,
+.context-progress-container:hover .context-progress-right {
+    opacity: 1;
+    transition-delay: 0.5s;
+}
+
+.input-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    max-width: 680px;
+    margin: 0 auto;
+    padding: 8px 16px 8px 16px;
+    border-radius: 6px;
+    border: 1px solid var(--input-border);
+    background: var(--input-bg);
+    transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.input-wrapper:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+#userInput {
+    flex: 1;
+    border: none;
+    background: transparent;
+    color: var(--text-primary);
+    font-size: 14px;
+    font-family: var(--font-sans);
+    line-height: 1.5;
+    resize: none;
+    outline: none;
+    max-height: 120px;
+    min-height: 48px;
+    overflow-y: auto;
+}
+
+#userInput::placeholder {
+    color: var(--text-tertiary);
+}
+
+.send-btn,
+.stop-btn {
+    width: 34px;
+    height: 34px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    flex-shrink: 0;
+}
+
+.send-btn {
+    background: var(--accent);
+    color: white;
+}
+
+.send-btn:hover {
+    background: var(--accent-hover);
+    transform: scale(1.05);
+}
+
+.send-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    transform: none;
+}
+
+.stop-btn {
+    background: var(--danger);
+    color: white;
+}
+
+.stop-btn:hover {
+    background: hsl(0, 72%, 50%);
+    transform: scale(1.05);
+}

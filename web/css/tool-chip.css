@@ -1,0 +1,191 @@
+/* ============================================================
+   Tool Chip — Kimi style vertical timeline
+   ============================================================ */
+.tool-chip {
+    margin: 0;
+    border: none;
+    background: transparent;
+    border-radius: 0;
+    overflow: visible;
+}
+
+.tool-chip-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 0;
+    cursor: pointer;
+    user-select: none;
+    font-size: 13px;
+    transition: background var(--transition-fast);
+}
+
+.tool-chip-header:hover {
+    background: var(--bg-glass-hover);
+}
+
+/* 绿色状态圆点 — 替代 emoji icon */
+.tool-chip-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--success);
+    flex-shrink: 0;
+    position: relative;
+    z-index: 2;
+}
+
+.tool-chip-dot.running {
+    background: var(--warning);
+    animation: pulse 1.5s ease-in-out infinite;
+}
+
+.tool-chip-dot.error {
+    background: var(--danger);
+}
+
+/* 工具类型标签 — 加粗 */
+.tool-chip-name {
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+}
+
+/* 参数摘要 — 同行灰色显示 */
+.tool-chip-summary {
+    color: var(--text-tertiary);
+    font-size: 12.5px;
+    font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+}
+
+.hitl-header-actions {
+    display: flex;
+    gap: 6px;
+    margin-right: 8px;
+    align-items: center;
+}
+
+.hitl-header-btn {
+    padding: 3px 8px;
+    border-radius: 4px;
+    border: none;
+    font-size: 11px;
+    font-weight: 600;
+    font-family: var(--font-sans);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.hitl-header-btn.approve {
+    background: var(--success-soft);
+    color: var(--success);
+    border: 1px solid var(--success);
+}
+
+.hitl-header-btn.approve:hover {
+    background: var(--success);
+    color: white;
+}
+
+.hitl-header-btn.reject {
+    background: var(--danger-soft);
+    color: var(--danger);
+    border: 1px solid var(--danger);
+}
+
+.hitl-header-btn.reject:hover {
+    background: var(--danger);
+    color: white;
+}
+
+.tool-chip-latency {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    font-family: var(--font-mono);
+}
+
+.tool-chip-spinner {
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--text-tertiary);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+}
+
+.tool-chip-body {
+    display: none;
+    margin-left: 16px;
+    /* 对齐到绿点右侧 */
+    padding-left: 12px;
+    border-left: 2px solid var(--divider);
+    position: relative;
+}
+
+/* 连接圆点的垂线 */
+.tool-chip:not(:last-child) .tool-chip-header::after {
+    content: "";
+    position: absolute;
+    left: 3px;
+    top: 18px;
+    bottom: -10px;
+    width: 2px;
+    background: var(--divider);
+    z-index: 1;
+}
+
+.tool-chip.expanded .tool-chip-body {
+    display: block;
+}
+
+.tool-chip-body-inner {
+    padding: 8px 0;
+    font-size: 12px;
+    font-family: var(--font-mono);
+    line-height: 1.5;
+}
+
+.tool-chip-params-title,
+.tool-chip-result-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    margin: 6px 0 3px;
+}
+
+.tool-chip-params-title:first-child {
+    margin-top: 0;
+}
+
+.tool-chip-params,
+.tool-chip-result {
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: var(--text-secondary);
+    font-size: 11.5px;
+    max-height: 250px;
+    overflow-y: auto;
+    background: var(--code-bg);
+    padding: 6px 8px;
+    border-radius: 4px;
+}
+
+/* ── Safety Blocked ── */
+.safety-blocked {
+    margin: 8px 0;
+    padding: 8px 12px;
+    background: var(--danger-soft);
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+}
+
+.safety-blocked.in-chip {
+    margin: 8px 0 0;
+}

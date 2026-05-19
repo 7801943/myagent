@@ -1,0 +1,44 @@
+/* ============================================================
+   KaTeX — Math Formula Styling
+   ============================================================ */
+
+/* Display math: centered block with vertical spacing */
+.message-content .katex-display {
+    margin: 12px 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 4px 0;
+}
+
+/* Inline math: consistent baseline alignment */
+.message-content .katex {
+    font-size: 1.05em;
+}
+
+/* Fallback display for failed KaTeX rendering */
+.katex-fallback {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    background: var(--code-bg);
+    padding: 8px 12px;
+    border-radius: var(--radius-sm);
+    margin: 8px 0;
+    overflow-x: auto;
+    color: var(--text-secondary);
+}
+
+code.katex-fallback {
+    display: inline;
+    padding: 2px 6px;
+    margin: 0 2px;
+}
+
+/* Ensure math content doesn't break layout */
+.message-content .katex-html {
+    white-space: nowrap;
+}
+
+/* Scrollable long formulas */
+.message-content .katex-display>.katex {
+    white-space: normal;
+}

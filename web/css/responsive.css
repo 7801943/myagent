@@ -1,0 +1,31 @@
+/* ============================================================
+   Responsive — 响应式断点
+   必须最后加载
+   ============================================================ */
+
+@media (max-width: 768px) {
+    .sidebar {
+        position: fixed;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        z-index: 200;
+        box-shadow: var(--shadow-lg);
+    }
+
+    .sidebar.collapsed {
+        transform: translateX(-100%);
+    }
+
+    .header-brand .header-title {
+        display: none;
+    }
+
+    .message-body {
+        max-width: 90%;
+    }
+
+    .input-wrapper {
+        margin: 0 8px;
+    }
+}
