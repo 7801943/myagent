@@ -323,3 +323,10 @@
     border-radius: var(--radius-md);
     font-size: 13px;
 }
+
+/* ============================================================
+   Layout Padding Adjustments
+   ============================================================ */
+.chat-panel.has-chat .chat-container {
+    padding-bottom: 150px;
+}

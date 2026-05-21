@@ -28,12 +28,14 @@ let statusIndicator;
 
 export function initChat() {
     messageList = document.getElementById("messageList");
-    welcomeMsg = document.getElementById("welcomeMsg");
     userInput = document.getElementById("userInput");
     sendBtn = document.getElementById("sendBtn");
     stopBtn = document.getElementById("stopBtn");
     clearBtn = document.getElementById("clearBtn");
     statusIndicator = document.getElementById("statusIndicator");
+
+    // Initialize empty state
+    updateChatEmptyState(true);
 
     // 输入事件
     userInput.addEventListener("input", autoResizeInput);
@@ -53,11 +55,25 @@ export function initChat() {
         send({ type: "cancel" });
     });
 
-    clearBtn.addEventListener("click", function () {
-        messageList.innerHTML = "";
-        resetProcessingState();
-        welcomeMsg.classList.remove("hidden");
-    });
+    if (clearBtn) {
+        clearBtn.addEventListener("click", function () {
+            messageList.innerHTML = "";
+            resetProcessingState();
+            updateChatEmptyState(true);
+        });
+    }
+
+    // Model Select listener (placeholder interface)
+    const modelSelect = document.getElementById("modelSelect");
+    if (modelSelect) {
+        modelSelect.addEventListener("change", function () {
+            console.log("Model changed to:", this.value);
+            // Future extension: send switch model event to backend when supported
+            // send({ type: "model_switch", model: this.value });
+        });
+    }
+
+
 
     // 快捷提示
     document.querySelectorAll(".quick-prompt").forEach(function (btn) {
@@ -83,7 +99,7 @@ export function sendMessage(text) {
     if (state.isProcessing) return;
 
     text = text.trim();
-    welcomeMsg.classList.add("hidden");
+    updateChatEmptyState(false);
     appendUserMessage(text);
 
     state.isProcessing = true;
@@ -228,6 +244,12 @@ export function appendThinkingDelta(text) {
 export function loadHistoryMessages(messages) {
     messageList.innerHTML = "";
 
+    if (messages && messages.length > 0) {
+        updateChatEmptyState(false);
+    } else {
+        updateChatEmptyState(true);
+    }
+
     let hasActiveAssistant = false;
 
     messages.forEach(function (msg) {
@@ -252,12 +274,12 @@ export function loadHistoryMessages(messages) {
                 }
 
                 if (msg.tool_calls && msg.tool_calls.length > 0) {
-                    msg.tool_calls.forEach(function (tc) {
+                    msg.tool_calls.forEach(function (tc, idx) {
                         let args = tc.arguments;
                         if (typeof args === "string") {
                             try { args = JSON.parse(args); } catch (e) { }
                         }
-                        appendToolStart(currentAssistantEl, tc.name || "tool", args, tc.id || ("hist_" + toolCount));
+                        appendToolStart(currentAssistantEl, tc.name || "tool", args, tc.id || ("hist_" + idx));
                     });
                 }
 
@@ -347,12 +369,31 @@ function autoResizeInput() {
     userInput.style.height = "auto";
     userInput.style.height = Math.min(userInput.scrollHeight, 120) + "px";
 
-    const wrapper = userInput.closest(".input-area-wrapper");
+    const wrapper = userInput.closest(".input-card");
     if (wrapper) {
         if (userInput.value.length > 0) {
             wrapper.classList.add("has-content");
         } else {
             wrapper.classList.remove("has-content");
+        }
+    }
+}
+
+export function updateChatEmptyState(isEmpty) {
+    const chatPanel = document.getElementById("chatPanel");
+    const centeredTitle = document.getElementById("centeredChatTitle");
+
+    if (centeredTitle) {
+        centeredTitle.textContent = "欢迎";
+    }
+
+    if (chatPanel) {
+        if (isEmpty) {
+            chatPanel.classList.add("empty-chat");
+            chatPanel.classList.remove("has-chat");
+        } else {
+            chatPanel.classList.remove("empty-chat");
+            chatPanel.classList.add("has-chat");
         }
     }
 }

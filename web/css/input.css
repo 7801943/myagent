@@ -1,189 +1,236 @@
 /* ============================================================
-   Input Area — 输入区域 + 上下文进度条
+   Input Area — Dynamic Centering & Bottom Sliding Layout
    ============================================================ */
-.input-area-wrapper {
-    position: relative;
-    flex-shrink: 0;
-    opacity: 0.8;
-    transition: opacity var(--transition-normal);
-}
 
-.input-area-wrapper:hover,
-.input-area-wrapper:focus-within,
-.input-area-wrapper.has-content {
-    opacity: 1;
-}
-
-.input-fade-mask {
+/* ── Centered-to-Bottom Transition Container ── */
+.dynamic-input-container {
     position: absolute;
-    top: -40px;
-    left: 0;
-    right: 0;
-    height: 40px;
-    background: linear-gradient(to bottom, transparent, var(--bg-primary));
-    pointer-events: none;
-    z-index: 5;
-}
-
-.input-area {
-    padding: 12px 24px 36px;
-    background: var(--bg-primary);
-    position: relative;
-    z-index: 10;
-}
-
-/* ── Context Progress Bar ── */
-.context-progress-container {
-    display: block;
-    max-width: 680px;
-    margin: 0 auto;
-    padding: 0 0px;
-    opacity: 0;
-    transition: opacity var(--transition-normal);
-    position: absolute;
-    top: 0px;
-    left: 0;
-    right: 0;
-    z-index: 12;
-}
-
-.context-progress-container.visible {
-    opacity: 1;
-}
-
-.context-progress-bar {
-    width: 100%;
-    height: 8px;
-    background: var(--bg-tertiary);
-    border-radius: 1px;
-    overflow: hidden;
-    position: relative;
-}
-
-.context-progress-fill {
-    height: 100%;
-    width: 0%;
-    border-radius: 4px;
-    background: var(--success);
-    transition: width 0.5s ease, background-color 0.5s ease;
-    position: relative;
-}
-
-.context-progress-fill.animating {
-    background-image: linear-gradient(45deg,
-            rgba(255, 255, 255, 0.15) 25%,
-            transparent 25%,
-            transparent 50%,
-            rgba(255, 255, 255, 0.15) 50%,
-            rgba(255, 255, 255, 0.15) 75%,
-            transparent 75%,
-            transparent);
-    background-size: 1rem 1rem;
-    animation: progress-bar-stripes 1s linear infinite;
-}
-
-.context-progress-left,
-.context-progress-right {
-    position: absolute;
-    top: 50%;
-    transform: translateY(-50%);
-    font-size: 11px;
-    color: var(--text-tertiary);
-    white-space: nowrap;
-    font-family: var(--font-mono);
-    opacity: 0;
-    transition: opacity 0.3s ease 0s;
-    pointer-events: none;
-}
-
-.context-progress-left {
-    left: -40px;
-}
-
-.context-progress-right {
-    right: -40px;
-    text-align: right;
-}
-
-.context-progress-container:hover .context-progress-left,
-.context-progress-container:hover .context-progress-right {
-    opacity: 1;
-    transition-delay: 0.5s;
-}
-
-.input-wrapper {
+    left: 50%;
+    transform: translateX(-50%);
+    width: 85%;
+    max-width: 580px;
+    z-index: 90;
     display: flex;
+    flex-direction: column;
     align-items: center;
-    gap: 10px;
-    max-width: 680px;
-    margin: 0 auto;
-    padding: 8px 16px 8px 16px;
-    border-radius: 6px;
-    border: 1px solid var(--input-border);
+    gap: 6px;
+    transition: top var(--transition-slow) cubic-bezier(0.25, 1, 0.5, 1),
+        bottom var(--transition-slow) cubic-bezier(0.25, 1, 0.5, 1),
+        width var(--transition-slow) cubic-bezier(0.25, 1, 0.5, 1),
+        max-width var(--transition-slow) cubic-bezier(0.25, 1, 0.5, 1),
+        transform var(--transition-slow) cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+/* state 1: Empty Chat (Centered) */
+.chat-panel.empty-chat .dynamic-input-container {
+    top: 38%;
+    transform: translate(-50%, -50%);
+    width: 80%;
+    max-width: 540px;
+}
+
+/* state 2: Has Chat (Bottom Floating) */
+.chat-panel.has-chat .dynamic-input-container {
+    bottom: 24px;
+    top: auto;
+    width: 92%;
+    max-width: 800px;
+}
+
+/* ── Centered Title ── */
+.centered-chat-title {
+    font-family: 'Outfit', var(--font-sans), sans-serif;
+    font-size: 32px;
+    font-weight: 800;
+    color: var(--text-primary);
+    letter-spacing: -0.03em;
+    opacity: 1;
+    margin-bottom: 12px;
+    transition: opacity var(--transition-normal), transform var(--transition-normal);
+}
+
+.chat-panel.has-chat .centered-chat-title {
+    opacity: 0;
+    transform: scale(0.9);
+    pointer-events: none;
+    height: 0;
+    margin: 0;
+    overflow: hidden;
+}
+
+/* ── Sleek Input Card (frosted glass — theme-aware) ── */
+.input-card.glass {
+    width: 100%;
     background: var(--input-bg);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid var(--input-border);
+    border-radius: 18px;
+    padding: 14px 16px 10px;
+    box-shadow: var(--shadow-lg);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
     transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
 }
 
-.input-wrapper:focus-within {
+.input-card.glass:focus-within {
     border-color: var(--accent);
-    box-shadow: 0 0 0 3px var(--accent-soft);
+    box-shadow: var(--shadow-lg), 0 0 0 1px var(--accent-soft);
 }
 
+/* ── Textarea ── */
 #userInput {
-    flex: 1;
+    width: 100%;
     border: none;
     background: transparent;
     color: var(--text-primary);
-    font-size: 14px;
+    font-size: 13.5px;
     font-family: var(--font-sans);
-    line-height: 1.5;
+    line-height: 1.6;
     resize: none;
     outline: none;
-    max-height: 120px;
-    min-height: 48px;
+    max-height: 160px;
+    min-height: 24px;
     overflow-y: auto;
+    padding: 2px 4px;
 }
 
 #userInput::placeholder {
     color: var(--text-tertiary);
+    opacity: 0.7;
 }
 
-.send-btn,
-.stop-btn {
-    width: 34px;
-    height: 34px;
+/* ── Card Toolbar ── */
+.input-card-bottom {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-top: 8px;
+    border-top: 1px solid var(--divider);
+}
+
+.input-card-left-toolbar,
+.input-card-right-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+/* Upload button */
+.icon-btn-upload {
+    width: 26px;
+    height: 26px;
     display: flex;
     align-items: center;
     justify-content: center;
     border: none;
-    border-radius: 6px;
+    background: var(--bg-glass);
+    color: var(--text-secondary);
+    border-radius: 50%;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.icon-btn-upload:hover {
+    background: var(--bg-glass-hover);
+    color: var(--text-primary);
+}
+
+/* Dropdown Selects */
+.input-dropdown {
+    position: relative;
+    display: flex;
+    align-items: center;
+    background: var(--bg-glass);
+    border: 1px solid var(--bg-glass-border);
+    border-radius: 20px;
+    padding: 0 10px;
+    transition: all var(--transition-fast);
+}
+
+.input-dropdown:hover {
+    background: var(--bg-glass-hover);
+    border-color: var(--input-border);
+}
+
+.input-dropdown select {
+    appearance: none;
+    -webkit-appearance: none;
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 600;
+    padding: 4px 14px 4px 4px;
+    outline: none;
+    cursor: pointer;
+    font-family: var(--font-sans);
+}
+
+.input-dropdown select option {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    padding: 8px;
+}
+
+.dropdown-chevron {
+    position: absolute;
+    right: 8px;
+    pointer-events: none;
+    color: var(--text-tertiary);
+    opacity: 0.8;
+}
+
+/* ── Circle Action Buttons ── */
+.send-btn-circle,
+.stop-btn-circle {
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    border-radius: 50%;
     cursor: pointer;
     transition: all var(--transition-fast);
     flex-shrink: 0;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.15);
 }
 
-.send-btn {
+.send-btn-circle {
     background: var(--accent);
-    color: white;
+    color: #000000;
 }
 
-.send-btn:hover {
+.send-btn-circle:hover {
     background: var(--accent-hover);
     transform: scale(1.05);
 }
 
-.send-btn:disabled {
-    opacity: 0.4;
+.send-btn-circle:disabled {
+    opacity: 0.3;
     cursor: not-allowed;
     transform: none;
 }
 
-.stop-btn {
+.stop-btn-circle {
     background: var(--danger);
     color: white;
 }
 
-.stop-btn:hover {
-    background: hsl(0, 72%, 50%);
+.stop-btn-circle:hover {
+    background: hsl(0, 80%, 55%);
     transform: scale(1.05);
+}
+
+/* ── Bottom Disclaimer ── */
+.input-disclaimer {
+    font-size: 10.5px;
+    color: var(--text-tertiary);
+    opacity: 0.65;
+    text-align: center;
+    font-family: var(--font-sans);
+    margin-top: 2px;
+    letter-spacing: -0.01em;
 }

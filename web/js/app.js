@@ -34,3 +34,26 @@ initRouter();
 
 // WebSocket 连接
 connect();
+
+// ── 全局快捷键注册 ──
+window.addEventListener("keydown", function (e) {
+    const isMeta = e.metaKey || e.ctrlKey;
+    if (isMeta) {
+        if (e.key.toLowerCase() === "e") {
+            e.preventDefault();
+            import('./header.js').then(function (m) {
+                m.toggleSidebar();
+            });
+        } else if (e.key.toLowerCase() === "i") {
+            e.preventDefault();
+            import('./workspace.js').then(function (m) {
+                m.toggleWorkspace();
+            });
+        } else if (e.key.toLowerCase() === "l") {
+            e.preventDefault();
+            const input = document.getElementById("userInput");
+            if (input) input.focus();
+        }
+    }
+});
+

@@ -1,51 +1,96 @@
 /**
  * workspace.js — 工作区面板
- * 职责：折叠/展开、Tab 切换
+ * 职责：折叠/展开、Tab 切换（通过 activity-bar 按钮）、布局模式切换
  */
 
 let panel;
-let toggleBtn;
-let closeBtn;
+let chatPanel;
+let layoutContainer;
 
 export function initWorkspace() {
     panel = document.getElementById("workspacePanel");
-    toggleBtn = document.getElementById("workspaceToggle");
-    closeBtn = document.getElementById("workspaceClose");
+    chatPanel = document.getElementById("chatPanel");
+    layoutContainer = document.querySelector(".main-layout-container");
 
-    // 折叠/展开
-    if (toggleBtn) {
-        toggleBtn.addEventListener("click", function () {
-            if (panel) panel.classList.toggle("open");
-            toggleBtn.classList.toggle("active", panel && panel.classList.contains("open"));
-            // 持久化状态
-            localStorage.setItem("myagent-workspace", panel && panel.classList.contains("open") ? "open" : "closed");
-        });
-    }
-
-    if (closeBtn) {
-        closeBtn.addEventListener("click", function () {
-            if (panel) panel.classList.remove("open");
-            if (toggleBtn) toggleBtn.classList.remove("active");
-            localStorage.setItem("myagent-workspace", "closed");
-        });
-    }
-
-    // Tab 切换
-    const tabs = document.querySelectorAll(".workspace-tab");
+    // Tab 切换 — 绑定到 activity-bar 中的 ws-tab-btn 按钮
+    const abTabBtns = document.querySelectorAll(".ab-item.ws-tab-btn");
     const contents = document.querySelectorAll(".workspace-tab-content");
 
-    tabs.forEach(function (tab) {
-        tab.addEventListener("click", function () {
+    abTabBtns.forEach(function (btn) {
+        btn.addEventListener("click", function () {
             const target = this.dataset.tab;
-            tabs.forEach(function (t) { t.classList.toggle("active", t.dataset.tab === target); });
-            contents.forEach(function (c) { c.classList.toggle("active", c.dataset.tab === target); });
+            // 更新 activity-bar 按钮状态
+            abTabBtns.forEach(function (b) {
+                b.classList.toggle("active", b.dataset.tab === target);
+            });
+            // 更新 workspace 面板内容
+            contents.forEach(function (c) {
+                c.classList.toggle("active", c.dataset.tab === target);
+            });
         });
     });
 
-    // 恢复上次状态
-    const saved = localStorage.getItem("myagent-workspace");
-    if (saved === "open" && panel) {
-        panel.classList.add("open");
-        if (toggleBtn) toggleBtn.classList.add("active");
+    // ── Layout Mode Toggle ──
+    initLayoutToggle();
+
+    // 恢复上次布局状态
+    const savedLayout = localStorage.getItem("myagent-layout-mode") || "split";
+    applyLayoutMode(savedLayout);
+}
+
+// ── Layout Toggle ──
+
+function initLayoutToggle() {
+    const layoutBtns = document.querySelectorAll(".layout-btn");
+
+    layoutBtns.forEach(function (btn) {
+        btn.addEventListener("click", function () {
+            const mode = this.dataset.layout;
+            applyLayoutMode(mode);
+            localStorage.setItem("myagent-layout-mode", mode);
+        });
+    });
+}
+
+function applyLayoutMode(mode) {
+    if (!layoutContainer || !panel) return;
+
+    // 更新按钮 active 状态
+    const layoutBtns = document.querySelectorAll(".layout-btn");
+    layoutBtns.forEach(function (btn) {
+        btn.classList.toggle("active", btn.dataset.layout === mode);
+    });
+
+    // 清除所有布局类
+    layoutContainer.classList.remove("layout-doc-only", "layout-split", "layout-chat-only");
+
+    switch (mode) {
+        case "doc-only":
+            layoutContainer.classList.add("layout-doc-only");
+            panel.classList.add("open");
+            panel.style.width = "";
+            break;
+        case "chat-only":
+            layoutContainer.classList.add("layout-chat-only");
+            panel.classList.remove("open");
+            panel.style.width = "0px";
+            break;
+        case "split":
+        default:
+            layoutContainer.classList.add("layout-split");
+            panel.classList.add("open");
+            panel.style.width = "60%";
+            break;
     }
+}
+
+export function toggleWorkspace() {
+    // Layout toggle replaces workspace toggle, cycle through modes
+    if (!layoutContainer) return;
+    const currentMode = localStorage.getItem("myagent-layout-mode") || "split";
+    const modes = ["split", "doc-only", "chat-only"];
+    const idx = modes.indexOf(currentMode);
+    const nextMode = modes[(idx + 1) % modes.length];
+    applyLayoutMode(nextMode);
+    localStorage.setItem("myagent-layout-mode", nextMode);
 }

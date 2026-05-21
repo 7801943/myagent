@@ -1,105 +1,88 @@
 /* ============================================================
-   Workspace Panel — 右侧工作区面板
+   Workspace Panel — Left-Center Document Workspace
    ============================================================ */
-
 .workspace-panel {
-   width: 0;
-   flex-shrink: 0;
-   background: var(--bg-secondary);
-   border-left: 1px solid var(--divider);
-   display: flex;
-   flex-direction: column;
-   overflow: hidden;
-   transition: width var(--transition-slow);
-   opacity: 0;
+    width: 0;
+    min-width: 0;
+    flex-shrink: 0;
+    background: var(--bg-primary);
+    border: none;
+    outline: none;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    transition: width var(--transition-slow), opacity var(--transition-normal);
+    opacity: 0;
 }
 
 .workspace-panel.open {
-   width: 360px;
-   opacity: 1;
-}
-
-.workspace-header {
-   display: flex;
-   align-items: center;
-   gap: 8px;
-   padding: 10px 14px;
-   border-bottom: 1px solid var(--divider);
-   flex-shrink: 0;
-}
-
-.workspace-title {
-   font-size: 13px;
-   font-weight: 700;
-   color: var(--text-primary);
-   white-space: nowrap;
-}
-
-.workspace-tabs {
-   display: flex;
-   gap: 2px;
-   flex: 1;
-   justify-content: center;
-}
-
-.workspace-tab {
-   padding: 4px 12px;
-   border: none;
-   background: transparent;
-   color: var(--text-tertiary);
-   font-size: 12px;
-   font-weight: 500;
-   font-family: var(--font-sans);
-   border-radius: 6px;
-   cursor: pointer;
-   transition: all var(--transition-fast);
-}
-
-.workspace-tab:hover {
-   color: var(--text-secondary);
-   background: var(--bg-glass-hover);
-}
-
-.workspace-tab.active {
-   color: var(--accent);
-   background: var(--accent-soft);
+    width: 60%;
+    opacity: 1;
+    border: none;
+    margin-right: -1px;
 }
 
 .workspace-content {
-   flex: 1;
-   overflow-y: auto;
-   min-height: 0;
+    flex: 1;
+    overflow-y: auto;
+    min-height: 0;
+    position: relative;
+    background: var(--bg-primary);
 }
 
 .workspace-tab-content {
-   display: none;
-   height: 100%;
+    display: none;
+    height: 100%;
 }
 
 .workspace-tab-content.active {
-   display: flex;
-   flex-direction: column;
+    display: flex;
+    flex-direction: column;
 }
 
+/* ── Landing Text (replaces Antigravity brand) ── */
+.workspace-landing {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    padding: 30px;
+    gap: 40px;
+    user-select: none;
+}
+
+.workspace-landing-text {
+    font-family: var(--font-sans);
+    font-size: 18px;
+    font-weight: 500;
+    color: var(--text-tertiary);
+    opacity: 0.6;
+    letter-spacing: 0.04em;
+}
+
+/* ── Workspace Empty Placeholders ── */
 .workspace-empty {
-   display: flex;
-   flex-direction: column;
-   align-items: center;
-   justify-content: center;
-   height: 100%;
-   padding: 40px 20px;
-   color: var(--text-tertiary);
-   text-align: center;
-   gap: 8px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    padding: 40px 20px;
+    color: var(--text-tertiary);
+    text-align: center;
+    gap: 12px;
 }
 
 .workspace-empty p {
-   font-size: 14px;
-   font-weight: 500;
-   color: var(--text-secondary);
-   margin: 8px 0 0;
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin: 4px 0 0;
 }
 
 .workspace-empty span {
-   font-size: 12px;
+    font-size: 11.5px;
+    max-width: 240px;
+    line-height: 1.5;
 }

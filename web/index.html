@@ -4,18 +4,25 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MyAgent — 智能助手</title>
+    <title>MyAgent — 智能助理集成开发环境</title>
+
+    <!-- Google Fonts: Outfit & Outfit Mono -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <!-- KaTeX CSS -->
+    <link
+        href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Outfit+Mono:wght@300;400;500&display=swap"
+        rel="stylesheet">
+
+    <!-- KaTeX math formulas CSS support -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+
+    <!-- CSS Modules Design System -->
     <link rel="stylesheet" href="css/variables.css">
     <link rel="stylesheet" href="css/base.css">
     <link rel="stylesheet" href="css/animations.css">
     <link rel="stylesheet" href="css/layout.css">
-    <link rel="stylesheet" href="css/header.css">
     <link rel="stylesheet" href="css/workspace.css">
+    <link rel="stylesheet" href="css/header.css">
     <link rel="stylesheet" href="css/chat.css">
     <link rel="stylesheet" href="css/tool-chip.css">
     <link rel="stylesheet" href="css/input.css">
@@ -26,203 +33,286 @@
 
 <body>
     <div class="app-layout">
-        <!-- 左侧侧栏 -->
-        <aside class="sidebar">
-            <div class="sidebar-header">
-                <div class="sidebar-brand">
-                    <svg width="22" height="22" viewBox="0 0 28 28" fill="none">
-                        <circle cx="14" cy="14" r="12" stroke="currentColor" stroke-width="2" />
-                        <circle cx="10" cy="11" r="2" fill="currentColor" />
-                        <circle cx="18" cy="11" r="2" fill="currentColor" />
-                        <path d="M9 18c1.5 2 7 2 9 0" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
-                    </svg>
-                    <span class="sidebar-title">MyAgent</span>
-                </div>
-                <button id="sidebarToggle" class="sidebar-toggle-btn" title="折叠侧栏">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <polyline points="15 18 9 12 15 6" />
-                    </svg>
-                </button>
-            </div>
-
-            <!-- 新建会话按钮 -->
-            <div class="sidebar-new-chat">
-                <button id="newChatBtn" class="new-chat-btn" title="新建会话">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <line x1="12" y1="5" x2="12" y2="19" />
-                        <line x1="5" y1="12" x2="19" y2="12" />
-                    </svg>
-                    <span>新建会话</span>
-                </button>
-            </div>
-
-            <!-- 会话列表 -->
-            <div class="sidebar-sessions">
-                <div class="sidebar-section-title">会话列表</div>
-                <div id="sessionList" class="session-list">
-                    <!-- 动态填充 -->
-                </div>
-            </div>
-
-
-        </aside>
-
-        <!-- 右侧主面板 -->
-        <div class="main-panel">
-            <!-- 顶部导航 -->
-            <header class="header">
+        <!-- ============================================================
+           Unified Top Global Header (Spans full screen width!)
+           ============================================================ -->
+        <header class="global-header">
+            <!-- Left: Brand + Connection Status + Model Name -->
+            <div class="header-left">
                 <div class="header-brand">
-                    <button id="sidebarOpenBtn" class="icon-btn sidebar-open-btn" title="展开侧栏" style="display:none;">
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                            stroke-width="2">
-                            <line x1="3" y1="6" x2="21" y2="6" />
-                            <line x1="3" y1="12" x2="21" y2="12" />
-                            <line x1="3" y1="18" x2="21" y2="18" />
-                        </svg>
-                    </button>
-                    <h1 class="header-title">MyAgent</h1>
+                    <h1 class="header-title">myagent</h1>
                     <div class="header-conn-status" id="headerConnStatus">
                         <span class="header-conn-dot" id="headerConnDot"></span>
                         <span class="header-conn-text" id="headerConnText">未连接</span>
                     </div>
                     <span class="header-model-name" id="headerModelName"></span>
                 </div>
-                <div class="header-actions">
-                    <button id="workspaceToggle" class="icon-btn" title="工作区面板">
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                            stroke-width="2">
-                            <rect x="3" y="3" width="18" height="18" rx="2" />
-                            <line x1="15" y1="3" x2="15" y2="21" />
-                        </svg>
-                    </button>
-                    <button id="themeToggle" class="icon-btn" title="切换主题">
-                        <svg class="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none"
-                            stroke="currentColor" stroke-width="2">
-                            <circle cx="12" cy="12" r="5" />
-                            <path
-                                d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
-                        </svg>
-                        <svg class="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none"
-                            stroke="currentColor" stroke-width="2">
-                            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-                        </svg>
-                    </button>
-                    <button id="clearBtn" class="icon-btn" title="清空对话">
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                            stroke-width="2">
-                            <polyline points="3 6 5 6 21 6" />
-                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                        </svg>
-                    </button>
-                </div>
-            </header>
-
-            <!-- 对话区域 -->
-            <main id="chatContainer" class="chat-container">
-                <!-- 欢迎消息 -->
-                <div class="welcome-message" id="welcomeMsg">
-                    <div class="welcome-icon">
-                        <svg width="48" height="48" viewBox="0 0 28 28" fill="none">
-                            <circle cx="14" cy="14" r="12" stroke="currentColor" stroke-width="1.5" />
-                            <circle cx="10" cy="11" r="2" fill="currentColor" />
-                            <circle cx="18" cy="11" r="2" fill="currentColor" />
-                            <path d="M9 18c1.5 2 7 2 9 0" stroke="currentColor" stroke-width="1.5"
-                                stroke-linecap="round" />
-                        </svg>
-                    </div>
-                    <h2>欢迎使用 MyAgent</h2>
-                    <p>基于全自研 Python Agent 框架的智能助手</p>
-                    <div class="quick-prompts">
-                        <button class="quick-prompt" data-text="你好，请介绍一下你自己">👋 自我介绍</button>
-                        <button class="quick-prompt" data-text="请执行 ls -la 命令查看当前目录">📁 查看目录</button>
-                        <button class="quick-prompt" data-text="请读取 config.yaml 文件的内容">📄 读取文件</button>
-                    </div>
-                </div>
-
-                <!-- 消息列表 -->
-                <div id="messageList" class="message-list"></div>
-            </main>
-
-            <!-- 状态指示器：位于输入框上方居中 -->
-            <div class="status-floating-container">
-                <span id="statusIndicator" class="status-badge status-disconnected">未连接</span>
             </div>
-
-            <!-- 底部渐变遮罩 + 输入区域 -->
-            <div class="input-area-wrapper">
-                <!-- 上下文使用量进度条 -->
-                <div class="context-progress-container" id="contextProgressContainer">
-                    <span class="context-progress-left" id="contextProgressLeft">0</span>
-                    <div class="context-progress-bar">
-                        <div class="context-progress-fill" id="contextProgressFill"></div>
-                    </div>
-                    <span class="context-progress-right" id="contextProgressRight">0</span>
-                </div>
-                <div class="input-fade-mask"></div>
-                <footer class="input-area">
-                    <div class="input-wrapper">
-                        <textarea id="userInput" placeholder="输入消息... (Enter 发送, Shift+Enter 换行)" rows="2"
-                            autofocus></textarea>
-                        <button id="sendBtn" class="send-btn" title="发送">
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                stroke-width="2">
-                                <line x1="22" y1="2" x2="11" y2="13" />
-                                <polygon points="22 2 15 22 11 13 2 9 22 2" />
-                            </svg>
-                        </button>
-                        <button id="stopBtn" class="stop-btn" title="停止" style="display:none;">
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-                                <rect x="4" y="4" width="16" height="16" rx="2" />
-                            </svg>
-                        </button>
-                    </div>
-                </footer>
-            </div>
-        </div>
-
-        <!-- 右侧工作区面板 -->
-        <aside id="workspacePanel" class="workspace-panel">
-            <div class="workspace-header">
-                <span class="workspace-title">工作区</span>
-                <div class="workspace-tabs">
-                    <button class="workspace-tab active" data-tab="files">文件</button>
-                    <button class="workspace-tab" data-tab="preview">预览</button>
-                </div>
-                <button id="workspaceClose" class="icon-btn" title="关闭工作区">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <polyline points="9 18 15 12 9 6" />
+            <!-- Right: Action Buttons -->
+            <div class="header-right">
+                <button id="newChatHeaderBtn" class="icon-btn" title="新建会话">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="12" y1="5" x2="12" y2="19" />
+                        <line x1="5" y1="12" x2="19" y2="12" />
                     </svg>
                 </button>
-            </div>
-            <div class="workspace-content">
-                <div class="workspace-tab-content active" data-tab="files">
-                    <div class="workspace-empty">
-                        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                            stroke-width="1.5">
-                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                            <polyline points="14 2 14 8 20 8" />
+                <button id="clearBtn" class="icon-btn" title="清空对话">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="3 6 5 6 21 6" />
+                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                    </svg>
+                </button>
+                <button id="themeToggle" class="icon-btn" title="切换主题">
+                    <svg class="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                        stroke-width="2">
+                        <circle cx="12" cy="12" r="5" />
+                        <path
+                            d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
+                    </svg>
+                    <svg class="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                        stroke-width="2">
+                        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+                    </svg>
+                </button>
+                <!-- Layout Mode Toggle -->
+                <div class="layout-toggle-group" id="layoutToggleGroup">
+                    <button class="layout-btn" data-layout="doc-only" title="文档预览占满">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <rect x="3" y="3" width="18" height="18" rx="2" />
                         </svg>
-                        <p>暂无文件</p>
-                        <span>对话中的文件将显示在这里</span>
-                    </div>
+                    </button>
+                    <button class="layout-btn active" data-layout="split" title="文档:Agent = 6:4">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <rect x="3" y="3" width="18" height="18" rx="2" />
+                            <line x1="14" y1="3" x2="14" y2="21" />
+                        </svg>
+                    </button>
+                    <button class="layout-btn" data-layout="chat-only" title="Agent对话占满">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <rect x="3" y="3" width="18" height="18" rx="2" />
+                            <path d="M8 8h8M8 12h5" />
+                        </svg>
+                    </button>
                 </div>
-                <div class="workspace-tab-content" data-tab="preview">
-                    <div class="workspace-empty">
-                        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                            stroke-width="1.5">
+            </div>
+        </header>
+
+        <!-- Global Token Usage Bar (横贯全宽，紧贴标题栏下方) -->
+        <div class="global-token-bar" id="globalTokenBar">
+            <div class="global-token-bar-fill" id="globalTokenBarFill"></div>
+        </div>
+
+        <!-- Main horizontal layout container -->
+        <div class="main-layout-container">
+            <!-- ============================================================
+               1. Left-most Activity Bar
+               ============================================================ -->
+            <aside class="activity-bar">
+                <div class="activity-bar-top">
+                    <!-- Sidebar Toggle Button -->
+                    <button id="sidebarToggle" class="ab-item" title="折叠/展开会话栏 (⌘E)">
+                        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                            <line x1="9" y1="3" x2="9" y2="21" />
+                        </svg>
+                    </button>
+                    <!-- Workspace Tab Buttons -->
+                    <button class="ab-item ws-tab-btn active" data-tab="empty" title="主页">
+                        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                            <polyline points="9 22 9 12 15 12 15 22" />
+                        </svg>
+                    </button>
+                    <button class="ab-item ws-tab-btn" data-tab="files" title="目录树">
+                        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                        </svg>
+                    </button>
+                    <button class="ab-item ws-tab-btn" data-tab="preview" title="预览">
+                        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2">
                             <rect x="2" y="3" width="20" height="14" rx="2" />
                             <line x1="8" y1="21" x2="16" y2="21" />
                             <line x1="12" y1="17" x2="12" y2="21" />
                         </svg>
-                        <p>暂无预览</p>
-                        <span>HTML/Markdown 预览将显示在这里</span>
+                    </button>
+                    <button class="ab-item ws-tab-btn" data-tab="editor" title="编辑器">
+                        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                            <path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4z" />
+                        </svg>
+                    </button>
+                </div>
+                <div class="activity-bar-bottom">
+                    <div class="ab-item placeholder" title="搜索 (Coming Soon)">
+                        <div class="ab-placeholder-dot"></div>
+                    </div>
+                    <div class="ab-item placeholder" title="设置与主题 (Coming Soon)">
+                        <div class="ab-placeholder-dot"></div>
+                    </div>
+                </div>
+            </aside>
+
+            <!-- ============================================================
+               2. Collapsible Session Sidebar
+               ============================================================ -->
+            <aside id="sessionSidebar" class="sidebar">
+                <!-- 新建会话按钮 -->
+                <div class="sidebar-new-chat">
+                    <button id="newChatBtn" class="new-chat-btn" title="新建会话">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <line x1="12" y1="5" x2="12" y2="19" />
+                            <line x1="5" y1="12" x2="19" y2="12" />
+                        </svg>
+                        <span>新建会话</span>
+                    </button>
+                </div>
+
+                <!-- 会话列表 -->
+                <div class="sidebar-sessions">
+                    <div class="sidebar-section-title">会话列表</div>
+                    <div id="sessionList" class="session-list">
+                        <!-- 动态填充 -->
+                    </div>
+                </div>
+            </aside>
+
+            <!-- ============================================================
+               3. Left-Center Workspace Panel (文档预览区域)
+               ============================================================ -->
+            <aside id="workspacePanel" class="workspace-panel">
+                <!-- No header tabs — tabs moved to activity bar -->
+                <div class="workspace-content">
+                    <!-- Tab: Default Landing -->
+                    <div class="workspace-tab-content active" data-tab="empty">
+                        <div class="workspace-landing">
+                            <div class="workspace-landing-text">文档预览</div>
+                        </div>
+                    </div>
+
+                    <!-- Tab: Files Tree -->
+                    <div class="workspace-tab-content" data-tab="files">
+                        <div class="workspace-empty">
+                            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="1.5">
+                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                <polyline points="14 2 14 8 20 8" />
+                            </svg>
+                            <p>暂无文件目录</p>
+                            <span>OnlyOffice 或 kkfileview 项目目录将在此加载</span>
+                        </div>
+                    </div>
+
+                    <!-- Tab: Preview -->
+                    <div class="workspace-tab-content" data-tab="preview">
+                        <div class="workspace-empty">
+                            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="1.5">
+                                <rect x="2" y="3" width="20" height="14" rx="2" />
+                                <line x1="8" y1="21" x2="16" y2="21" />
+                                <line x1="12" y1="17" x2="12" y2="21" />
+                            </svg>
+                            <p>暂无预览内容</p>
+                            <span>生成的 HTML / Markdown 预览文件将显示在此</span>
+                        </div>
+                    </div>
+
+                    <!-- Tab: Editor (OnlyOffice stub) -->
+                    <div class="workspace-tab-content" data-tab="editor">
+                        <div class="workspace-empty">
+                            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="1.5">
+                                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                                <path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4z" />
+                            </svg>
+                            <p>OnlyOffice 文档编辑器已就绪</p>
+                            <span>编辑的多文档 tab 容器区域将在此集成</span>
+                        </div>
+                    </div>
+                </div>
+            </aside>
+
+
+
+            <!-- ============================================================
+               4. Right Agent Chat Panel
+               ============================================================ -->
+            <div class="main-panel chat-panel empty-chat" id="chatPanel">
+                <!-- Agent Dialog scrollable content area -->
+                <main id="chatContainer" class="chat-container">
+                    <!-- Message list bubbles -->
+                    <div id="messageList" class="message-list"></div>
+                </main>
+
+                <!-- Dynamic Input Container -->
+                <div class="dynamic-input-container" id="dynamicInputContainer">
+                    <div class="centered-chat-title" id="centeredChatTitle">你好，我是 MyAgent</div>
+
+                    <!-- Active Status Indicator: above input card -->
+                    <div class="status-floating-container">
+                        <span id="statusIndicator" class="status-badge status-disconnected">未连接</span>
+                    </div>
+
+                    <div class="input-card glass">
+                        <!-- Input area -->
+                        <textarea id="userInput" placeholder="输入您的问题..." rows="1" autofocus></textarea>
+
+                        <!-- Bottom control row inside card -->
+                        <div class="input-card-bottom">
+                            <div class="input-card-left-toolbar">
+                                <button class="icon-btn-upload" title="上传文件 (Reserved)">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                        stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <line x1="12" y1="5" x2="12" y2="19" />
+                                        <line x1="5" y1="12" x2="19" y2="12" />
+                                    </svg>
+                                </button>
+                                <div class="input-dropdown">
+                                    <select id="modelSelect">
+                                        <option value="glm-5.1" selected>GLM 5.1</option>
+                                        <option value="glm-4-plus">GLM 4 Plus</option>
+                                        <option value="glm-4-flash">GLM 4 Flash</option>
+                                    </select>
+                                    <svg class="dropdown-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none"
+                                        stroke="currentColor" stroke-width="2.5">
+                                        <polyline points="6 9 12 15 18 9" />
+                                    </svg>
+                                </div>
+                            </div>
+                            <div class="input-card-right-toolbar">
+                                <button id="sendBtn" class="send-btn-circle" title="发送">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                        stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                        <line x1="5" y1="12" x2="19" y2="12" />
+                                        <polyline points="12 5 19 12 12 19" />
+                                    </svg>
+                                </button>
+                                <button id="stopBtn" class="send-btn-circle stop-btn-circle" title="停止"
+                                    style="display:none;">
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+                                        <rect x="4" y="4" width="16" height="16" rx="2" />
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="input-disclaimer">
+                        AI 可能犯错，请检查结果.
                     </div>
                 </div>
             </div>
-        </aside>
+        </div>
     </div>
 
-    <!-- HITL 审批弹窗（全局备选） -->
+    <!-- HITL Human-in-the-loop modal overlay -->
     <div id="hitlModal" class="modal-overlay" style="display: none;">
         <div class="modal-card glass">
             <div class="modal-header">

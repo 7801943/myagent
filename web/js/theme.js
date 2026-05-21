@@ -4,10 +4,8 @@
  */
 
 export function initTheme() {
-    const saved = localStorage.getItem("myagent-theme");
-    if (saved) {
-        document.documentElement.dataset.theme = saved;
-    }
+    const saved = localStorage.getItem("myagent-theme") || "dark";
+    document.documentElement.dataset.theme = saved;
 }
 
 export function initThemeToggle() {

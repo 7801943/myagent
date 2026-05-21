@@ -10,7 +10,6 @@ import { switchSession, deleteSession } from './session.js';
 // ── DOM 元素 ──
 let sidebar;
 let sidebarToggle;
-let sidebarOpenBtn;
 let newChatBtn;
 let sessionListEl;
 let headerConnDot;
@@ -21,7 +20,6 @@ let statusIndicator;
 export function initHeader() {
     sidebar = document.querySelector(".sidebar");
     sidebarToggle = document.getElementById("sidebarToggle");
-    sidebarOpenBtn = document.getElementById("sidebarOpenBtn");
     newChatBtn = document.getElementById("newChatBtn");
     sessionListEl = document.getElementById("sessionList");
     headerConnDot = document.getElementById("headerConnDot");
@@ -33,12 +31,17 @@ export function initHeader() {
     initSidebar();
 
     // 新建会话按钮
-    if (newChatBtn) {
-        newChatBtn.addEventListener("click", function () {
-            import('./session.js').then(function (m) {
-                m.createNewSession();
-            });
+    const newChatHeaderBtn = document.getElementById("newChatHeaderBtn");
+    const triggerNewChat = function () {
+        import('./session.js').then(function (m) {
+            m.createNewSession();
         });
+    };
+    if (newChatBtn) {
+        newChatBtn.addEventListener("click", triggerNewChat);
+    }
+    if (newChatHeaderBtn) {
+        newChatHeaderBtn.addEventListener("click", triggerNewChat);
     }
 
     // 监听连接状态事件（来自 chat.js setStatus）
@@ -72,31 +75,52 @@ function updateHeaderConnStatus(cls, text) {
     if (headerConnText) {
         headerConnText.textContent = text;
     }
+    // 动态切换标题栏渐变色
+    updateHeaderGradient(cls === "connected");
+}
+
+function updateHeaderGradient(isConnected) {
+    const header = document.querySelector(".global-header");
+    if (!header) return;
+    if (isConnected) {
+        header.classList.add("connected");
+    } else {
+        header.classList.remove("connected");
+    }
 }
 
 // ── Sidebar Toggle ──
 
+export function toggleSidebar() {
+    if (!sidebar) return;
+    const isCollapsed = sidebar.classList.contains("collapsed");
+
+    if (isCollapsed) {
+        sidebar.classList.remove("collapsed");
+        localStorage.setItem("myagent-sidebar", "expanded");
+        if (sidebarToggle) sidebarToggle.classList.add("active");
+    } else {
+        sidebar.classList.add("collapsed");
+        localStorage.setItem("myagent-sidebar", "collapsed");
+        if (sidebarToggle) sidebarToggle.classList.remove("active");
+    }
+}
+
 function initSidebar() {
     if (!sidebar) return;
     const saved = localStorage.getItem("myagent-sidebar");
+
     if (saved === "collapsed") {
         sidebar.classList.add("collapsed");
-        if (sidebarOpenBtn) sidebarOpenBtn.style.display = "flex";
+        if (sidebarToggle) sidebarToggle.classList.remove("active");
+    } else {
+        sidebar.classList.remove("collapsed");
+        if (sidebarToggle) sidebarToggle.classList.add("active");
     }
 
     if (sidebarToggle) {
         sidebarToggle.addEventListener("click", function () {
-            sidebar.classList.add("collapsed");
-            if (sidebarOpenBtn) sidebarOpenBtn.style.display = "flex";
-            localStorage.setItem("myagent-sidebar", "collapsed");
-        });
-    }
-
-    if (sidebarOpenBtn) {
-        sidebarOpenBtn.addEventListener("click", function () {
-            sidebar.classList.remove("collapsed");
-            sidebarOpenBtn.style.display = "none";
-            localStorage.setItem("myagent-sidebar", "expanded");
+            toggleSidebar();
         });
     }
 }

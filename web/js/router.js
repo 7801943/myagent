@@ -6,7 +6,7 @@
 
 import { state, on, emit } from './state.js';
 import { requestSessionList, createNewSession } from './session.js';
-import { resetProcessingState, loadHistoryMessages, finalizeAssistantMessage, appendTextDelta, appendThinkingDelta, appendErrorMessage, setStatus, getCurrentAssistantEl } from './chat.js';
+import { resetProcessingState, loadHistoryMessages, finalizeAssistantMessage, appendTextDelta, appendThinkingDelta, appendErrorMessage, setStatus, getCurrentAssistantEl, updateChatEmptyState } from './chat.js';
 import { appendToolStart, appendToolEnd, appendToolError, appendSafetyBlocked, showHitlApproval } from './tool-chip.js';
 import { updateContextProgress, setStateAnimation } from './context-bar.js';
 import { handleConversationState, handleStateChange, updateSessionList } from './header.js';
@@ -38,6 +38,7 @@ function handleMessage(data) {
                 const welcomeMsg = document.getElementById("welcomeMsg");
                 if (messageList) messageList.innerHTML = "";
                 if (welcomeMsg) welcomeMsg.classList.remove("hidden");
+                updateChatEmptyState(true);
             }
 
             requestSessionList();
@@ -56,6 +57,7 @@ function handleMessage(data) {
                 if (messageList) messageList.innerHTML = "";
                 if (welcomeMsg) welcomeMsg.classList.remove("hidden");
             }
+            updateChatEmptyState(true);
             resetProcessingState();
             requestSessionList();
             break;
