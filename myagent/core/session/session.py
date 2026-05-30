@@ -1,0 +1,455 @@
+"""
+Session：一等公民 Web 会话容器。
+
+瘦会话层：状态容器 + 转发 + 持久化。
+WS 多客户端管理和审批桥接委托给 ClientBridge。
+Harness 为 per-session 独占实例。
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, Callable, Awaitable
+from uuid import uuid4
+
+from myagent.context.manager import ContextManager
+from myagent.core.session.client_bridge import ClientBridge, ClientHandle
+from myagent.core.hook import HookHandle
+from myagent.core.harness import AgentHarness
+from myagent.core.session.serializer import serialize_messages
+from myagent.core.models import UserContext, SessionData, SessionState, AgentRunState
+from myagent.utils.logging import get_logger
+
+if TYPE_CHECKING:
+    from myagent.core.workspace import WorkspaceManager, WorkspaceState
+    from myagent.context.state import StateStore
+    from myagent.prompt.renderer import PromptRenderer
+
+logger = get_logger(__name__)
+
+
+class Session:
+    """
+    一等公民 Web 会话容器。
+
+    持有 AgentHarness 引用（调度中枢），通过 harness.run() 执行交互。
+    WS 多客户端管理和审批桥接委托给 ClientBridge。
+    """
+
+    def __init__(
+        self,
+        *,
+        session_id: str | None = None,
+        harness: AgentHarness,
+        user: UserContext,
+        state_store: "StateStore | None" = None,
+        system_prompt: str | None = None,
+        max_tokens_budget: int = 200000,
+        context_window_size: int = 200000,
+        tool_result_max_chars: int = 200000,
+        workspace_root: str | None = None,
+        name: str | None = "新会话",
+    ):
+        self.id: str = session_id or uuid4().hex[:16]
+        self.created_at: datetime = datetime.now(timezone.utc)
+        self.user = user
+        self.last_active_at: datetime = datetime.now(timezone.utc)
+        self.name = name
+
+        # ── 唯一状态容器 ──
+        self.data = SessionData(
+            user={"user_id": user.user_id, "username": user.username},
+            context={
+                "token_usage": {"used": 0, "total": context_window_size},
+                "agent_run_state": AgentRunState.IDLE.value,
+                "session_state": SessionState.ACTIVE.value,
+                "stop_reason": "",
+                "cancelled": False,
+            },
+        )
+
+        # 共享 Harness 引用
+        self._harness = harness
+        self._state_store = state_store
+
+        # Per-session ContextManager（带实时持久化）
+        self._context = ContextManager(
+            max_tokens_budget=max_tokens_budget,
+            context_window_size=context_window_size,
+            tool_result_max_chars=tool_result_max_chars,
+            state_store=state_store,
+            session_id=self.id,
+        )
+
+        self._running_task: asyncio.Task | None = None
+        self._cancel_reason: str = ""
+        self._cancel_detail: str = ""
+
+        # WS 多客户端管理 + 审批桥接（委托给 ClientBridge）
+        self._bridge = ClientBridge(harness.hooks, self.id)
+
+        # 审批回调：默认使用 ClientBridge（Web 场景），CLI 可覆盖
+        self._approval_handler: Callable[[list], Awaitable[list[bool]]] | None = (
+            self._bridge.approval_handler
+        )
+
+        # PromptRenderer（由 SessionManager 注入）
+        self._prompt_renderer: "PromptRenderer | None" = None
+
+        # WorkspaceManager
+        self.workspace: "WorkspaceManager | None" = None
+        if workspace_root:
+            from myagent.core.workspace import WorkspaceManager
+            self.workspace = WorkspaceManager(workspace_root)
+            self.workspace.set_on_change(self._on_workspace_change)
+
+        if system_prompt:
+            self._context.set_system(system_prompt)
+
+        # ── 从 Harness 采集初始状态 ──
+        self._init_meta_from_harness()
+
+        # 注册状态同步 hook
+        self._hook_handles: list[HookHandle] = []
+        self._hook_handles.append(
+            harness.hooks.on("state_change", self._on_state_change, topic=self.id)
+        )
+        self._hook_handles.append(
+            harness.hooks.on("tool_end", self._on_tool_end, topic=self.id)
+        )
+
+        # ── 内置并发锁 ──
+        self._chat_lock = asyncio.Lock()
+
+        # 系统指令处理器
+        self._system_command_handler = None
+
+    # ── Hook 取消注册 ──
+
+    def unregister_hooks(self) -> None:
+        """取消注册所有 hook 回调（Session 销毁时调用）。"""
+        for handle in self._hook_handles:
+            handle.unregister()
+        self._hook_handles.clear()
+
+    # ── 空会话判定 ──
+
+    def has_user_message(self) -> bool:
+        """判断会话中是否存在用户消息（用于空会话过滤）。"""
+        return any(m.role == "user" for m in self._context.messages)
+
+    # ── 兼容属性 ──
+
+    @property
+    def session_state(self) -> SessionState:
+        try:
+            return SessionState(self.data.context.session_state)
+        except ValueError:
+            return SessionState.ACTIVE
+
+    @session_state.setter
+    def session_state(self, value: SessionState) -> None:
+        self.data.context.session_state = value.value
+
+    @property
+    def agent_run_state(self) -> AgentRunState:
+        try:
+            return AgentRunState(self.data.context.agent_run_state)
+        except ValueError:
+            return AgentRunState.IDLE
+
+    @agent_run_state.setter
+    def agent_run_state(self, value: AgentRunState) -> None:
+        self.data.context.agent_run_state = value.value
+
+    @property
+    def metadata(self) -> dict:
+        return self.data.model_dump()
+
+    @property
+    def context(self) -> ContextManager:
+        return self._context
+
+    @property
+    def harness(self) -> AgentHarness:
+        """公开 getter：获取关联的 AgentHarness 实例。"""
+        return self._harness
+
+    # ── 从 Harness 初始化 meta ──
+
+    def _init_meta_from_harness(self) -> None:
+        """从 AgentHarness 采集初始状态到 data（模型列表、工具列表等）。"""
+        router = self._harness.router
+
+        # 采集模型信息
+        current_provider = router.current_provider
+        available_models: list[dict] = []
+        active_model: dict = {}
+
+        for p in router.providers:
+            ptype = type(p).__name__.replace("Provider", "").lower()
+            cws = getattr(p, "_context_window_size", 128000)
+            is_current = (current_provider is not None and p.name == current_provider.name)
+            info = {
+                "provider_name": p.name,
+                "model_id": p.model,
+                "provider_type": ptype,
+                "context_window_size": cws,
+                "is_active": is_current,
+            }
+            available_models.append(info)
+            if is_current:
+                active_model = info
+
+        if not active_model.get("provider_name") and available_models:
+            active_model = available_models[0]
+            active_model["is_active"] = True
+
+        self.data.model.active = active_model
+        self.data.model.available = available_models
+
+        active_cws = active_model.get("context_window_size", 200000)
+        self.data.context.token_usage.total = active_cws
+
+        # 采集工具列表
+        tools: list[dict] = []
+        tm = self._harness.tool_manager
+        if tm:
+            for record in tm.list_schemas() or []:
+                tools.append({
+                    "name": record.name,
+                    "description": record.description,
+                    "parameters_schema": getattr(record, "parameters_schema", {}),
+                    "source": record.source,
+                })
+        self.data.tool.tools = tools
+
+    # ── PromptRenderer 注入 ──
+
+    def set_prompt_renderer(self, renderer: "PromptRenderer") -> None:
+        self._prompt_renderer = renderer
+
+    # ── 工具统一管理 ──
+
+    async def update_tools(self, source: str = "agent") -> None:
+        """从 ToolManager 重新采集工具列表，同步到 meta。"""
+        from myagent.prompt.variables import _summarize_parameters
+
+        tools: list[dict] = []
+        tm = self._harness.tool_manager
+        if tm:
+            for record in tm.list_schemas() or []:
+                tools.append({
+                    "name": record.name,
+                    "description": record.description,
+                    "parameters_schema": getattr(record, "parameters_schema", {}),
+                    "parameters_summary": _summarize_parameters(
+                        getattr(record, "parameters_schema", {})
+                    ),
+                    "source": record.source,
+                    "category": getattr(record.meta, "category", "") if hasattr(record, "meta") and record.meta else "",
+                })
+        self.data.tool.tools = tools
+
+    # ── Hook 回调 ──
+
+    async def _on_state_change(self, ctx, state: str) -> None:
+        self.data.context.agent_run_state = state
+
+    async def _on_tool_end(self, ctx, tool_name: str, result: Any, call_id: str, latency_ms: float) -> None:
+        if not self.workspace:
+            return
+        file_tools = {"file_write", "file_read", "cli_execute"}
+        if tool_name in file_tools:
+            await self.workspace.update("agent", "files_changed", {})
+        if tool_name == "file_read" and hasattr(result, 'metadata'):
+            file_path = result.metadata.get("path", "") if isinstance(result.metadata, dict) else ""
+            if file_path:
+                import os
+                root = self.workspace.root_path
+                if file_path.startswith(root):
+                    rel_path = os.path.relpath(file_path, root)
+                else:
+                    rel_path = file_path
+                await self.workspace.update("agent", "mark_llm_read", {"path": rel_path})
+
+    # ── 核心对话 ──
+
+    async def chat(self, user_input: str | list) -> str:
+        """发起一轮对话。内置并发锁。"""
+        if not self._chat_lock.locked():
+            async with self._chat_lock:
+                return await self._chat_inner(user_input)
+        else:
+            raise RuntimeError("Session is busy, please wait")
+
+    async def _chat_inner(self, user_input: str | list) -> str:
+        """
+        chat 的实际实现（在锁内执行）。
+
+        职责：
+          1. 渲染 System Prompt
+          2. 写入用户消息
+          3. 转发到 harness.run()
+          4. 状态持久化
+
+        result.text 已被 Harness 内部的 finalize_content 处理过。
+        """
+        self.last_active_at = datetime.now(timezone.utc)
+        self._running_task = asyncio.current_task()
+        self._cancel_reason = ""
+        self._cancel_detail = ""
+
+        logger.info(f"Session chat start: {self.id}")
+
+        try:
+            # 1. 渲染动态 system prompt（SSPT）
+            if self._prompt_renderer:
+                from myagent.prompt.variables import VariableCollector
+                variables = await VariableCollector.collect(self)
+                rendered_prompt = self._prompt_renderer.render(variables)
+                self._context.set_system(rendered_prompt)
+
+            # 2. 写入用户消息
+            if isinstance(user_input, list):
+                await self._context.add_user_message(user_input)
+            elif user_input:
+                await self._context.add_user_message(user_input)
+
+            # 3. 调用无状态执行引擎
+            result = await self._harness.run(
+                context=self._context,
+                session_id=self.id,
+                session_data=self.data,
+                command_handler=self._system_command_handler,
+                approval_handler=self._approval_handler,
+            )
+
+            logger.info(f"Session chat end: {self.id}, reason={result.stop_reason}")
+
+            # 4. 状态持久化
+            self.data.context.stop_reason = result.stop_reason or "completed"
+            await self._persist_state(AgentRunState.IDLE)
+
+            return result.text or ""
+
+        except asyncio.CancelledError:
+            reason = self._cancel_reason or "user_cancelled"
+            cancel_msg = f"[系统] 操作已取消 — {reason}"
+            if self._cancel_detail:
+                cancel_msg += f": {self._cancel_detail}"
+            logger.info(f"Session chat cancelled (session-level): {reason}")
+            try:
+                self.data.context.cancelled = True
+                self.data.extra["cancel_reason"] = reason
+                await asyncio.shield(self._persist_state(AgentRunState.IDLE))
+            except Exception:
+                pass
+            return cancel_msg
+
+        except Exception as e:
+            logger.error(f"Session chat error: {e}", exc_info=True)
+            await self._persist_state(AgentRunState.ERROR)
+            raise
+
+        finally:
+            self._running_task = None
+
+    def request_cancel(
+        self,
+        reason: str = "user_cancelled",
+        detail: str = "",
+    ) -> None:
+        """供外部（CLI/WebSocket）调用的取消入口。"""
+        self._cancel_reason = reason
+        self._cancel_detail = detail
+        if self._running_task and not self._running_task.done():
+            self._running_task.cancel()
+            logger.info(f"Session cancel requested: {reason} — {detail}")
+
+    def update_metadata(self, key: str, value) -> None:
+        self.data.extra[key] = value
+
+    # ── 持久化 ──
+
+    async def _persist_state(self, state: AgentRunState | None = None):
+        """Session 负责的 SessionData 状态持久化（消息由 ContextManager 自动持久化）。"""
+        if state is not None:
+            self.data.context.agent_run_state = state.value
+        self.data.context.token_usage.used = self._context.last_usage_input_tokens
+        if self.workspace:
+            self.data.workspace.state = self.workspace.snapshot().to_dict()
+        if self._state_store:
+            await self._state_store.save_state(
+                self.id,
+                self.agent_run_state,
+                self.data.model_dump(),
+                self.session_state,
+            )
+
+    async def save(self) -> None:
+        """TTL 驱逐 / WS 断开时调用：状态持久化 + 强制刷消息。"""
+        await self._persist_state(self.agent_run_state)
+        if self._state_store:
+            if self.workspace:
+                ws_json = json.dumps(self.workspace.snapshot().to_dict(), ensure_ascii=False)
+                await self._state_store.save_workspace(self.id, ws_json)
+            await self._context.flush()
+
+    async def load_messages(self) -> list:
+        if not self._state_store:
+            return []
+        return await self._state_store.load_messages(self.id)
+
+    def make_command_handler(self):
+        """创建系统指令处理器并保存为实例属性。"""
+        session = self
+
+        async def _system_command_handler(cmd: str, args: str, ctx) -> None:
+            if cmd == "new":
+                logger.info(f"System command: /new — clearing context for session {session.id}")
+                session._context.clear()
+            elif cmd == "model":
+                provider_name = args.strip()
+                if provider_name and hasattr(session._harness, 'router'):
+                    try:
+                        session._harness.router.set_provider(provider_name)
+                        available = session.data.model.available
+                        for m in available:
+                            m["is_active"] = (m.get("provider_name") == provider_name)
+                            if m["is_active"]:
+                                session.data.model.active = m
+                        logger.info(f"System command: /model → {provider_name}")
+                    except Exception as e:
+                        logger.warning(f"Failed to switch model: {e}")
+            else:
+                logger.debug(f"Unknown system command: /{cmd} {args}")
+
+        self._system_command_handler = _system_command_handler
+
+    # ── Workspace 回调 ──
+
+    async def _on_workspace_change(self, state: "WorkspaceState", source: str) -> None:
+        if self.has_user_message() and self._state_store:
+            ws_json = json.dumps(state.to_dict(), ensure_ascii=False)
+            await self._state_store.save_workspace(self.id, ws_json)
+        if source == "agent":
+            await self._bridge.notify_clients("workspace_state", state.to_dict())
+
+    # ── 委托 ClientBridge ──
+
+    def attach_client(self, sender) -> ClientHandle:
+        """将一个 WS 客户端接入本会话。委托给 ClientBridge。"""
+        return self._bridge.attach_client(sender)
+
+    # ── 消息序列化 ──
+
+    def serialize_messages(self) -> list[dict]:
+        return serialize_messages(self._context.messages)
+
+    # ── 前端推送 ──
+
+    async def push_conversation_state(self) -> None:
+        if self._bridge.has_clients:
+            await self._bridge.notify_clients("conversation_state", self.data.model_dump())

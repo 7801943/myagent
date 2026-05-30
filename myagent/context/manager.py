@@ -181,10 +181,19 @@ class ContextManager:
                 self._system_prompt = msg.content if isinstance(msg.content, str) else None
                 break
 
+    def clear(self) -> None:
+        """清空所有消息和 system prompt（供 /new 系统指令使用）。"""
+        self._messages.clear()
+        self._system_prompt = None
+        self._last_usage_input_tokens = 0
+
     async def _persist_messages(self) -> None:
         """实时写入数据库。调用端无需关心。"""
         if self._state_store and self._session_id:
-            await self._state_store.save_messages(self._session_id, self._messages)
+            try:
+                await self._state_store.save_messages(self._session_id, self._messages)
+            except Exception:
+                logger.warning(f"Failed to persist messages for session {self._session_id}")
 
     async def flush(self) -> None:
         """强制刷新（供 Session 在状态变更时调用）。"""

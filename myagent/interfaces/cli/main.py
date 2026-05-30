@@ -207,11 +207,8 @@ async def _chat(
     cli_hook_handles.append(harness.hooks.on("error", _on_error))
     cli_hook_handles.append(harness.hooks.on("timeout_warning", _on_timeout_warning))
 
-    # 启动工具热加载
-    try:
-        await harness.tool_interface.start_hot_reload()
-    except Exception as e:
-        logger.warning(f"Hot reload start failed (non-fatal): {e}")
+    # 工具热加载已在 SessionManager.create_session() 中通过
+    # harness.tool_interface.start() 启动，无需重复调用
 
     try:
         if images:
@@ -246,9 +243,9 @@ async def _chat(
         else:
             await interactive_loop(session)
     finally:
-        # 清理：停止热加载器
+        # 清理：停止 ToolManager（含热加载 + Proxy）
         try:
-            await harness.tool_interface.stop_hot_reload()
+            await harness.tool_interface.stop()
         except Exception:
             pass
 

@@ -1,21 +1,26 @@
 """
-Agent 核心调度器 (AgentHarness) — ReAct 中枢
+Agent 核心调度器 (AgentHarness) — 无状态纯执行引擎
+
+设计原则：
+  - Harness 保持无状态——不持有 ContextManager、不持有 StateStore、不管理 session 生命周期
+  - Session 把 context 作为参数传入 run()，Harness 只负责拿到上下文后执行 ReAct 循环
+  - 每个 Session 拥有独立的 Harness 实例 (per-session)
+  - PromptRenderer 由 Session 持有和调用，Harness 不感知
 
 职责：
 1. 持有 LLMClient + ToolInterface + HookManager
 2. 驱动 ReAct 循环：系统指令检查 → LLM 推理 → 工具执行 → 循环
-3. 协作式取消检查
-4. 关键节点派发 Event（通过 HookManager）
-5. 管理转发 session、llm、tools 之间的交互
+3. 内部组装 HookContext（Session 不感知）
+4. 内化 finalize_content（StreamResult.text 返回已 finalized 的文本）
+5. 协作式取消检查
+6. 关键节点派发 Event（通过 HookManager）
 
-工具执行与审批已移至 ToolInterface.execute_with_approval()，
-harness 仅负责调用并将结果写入 context + 发射 hook 事件。
-
-删除 Turn 抽象后，循环逻辑直接内联在此处。
+审批策略：
+  - approval_handler 由 Session 在 run() 调用时通过参数传入（Web 用 ClientBridge，CLI 用自定义函数）
+  - Harness 不持有 approval_handler 状态
 """
 import asyncio
-import re
-from typing import Callable, Awaitable
+from typing import Callable, Awaitable, TYPE_CHECKING
 
 from myagent.core.llm import LLMClient, StreamResult
 from myagent.core.tools import ToolInterface, ExecutedTool
@@ -25,23 +30,26 @@ from myagent.context.manager import ContextManager
 from myagent.context.message import ToolCall, ToolResult as MsgToolResult, ContentBlock
 from myagent.utils.logging import get_logger
 
+if TYPE_CHECKING:
+    from myagent.core.models import SessionData
+
 logger = get_logger(__name__)
 
 
 class AgentHarness:
     """
-    Agent 核心调度器。依赖注入所有组件。
-    
-    职责定位为调度中心：
-      - 管理 session ↔ LLM ↔ tools 之间的交互
+    无状态纯执行引擎。依赖注入所有组件。
+
+    职责定位为 ReAct 循环调度：
+      - 管理 LLM ↔ tools 之间的交互
       - 日志、取消管理
       - Hook 事件分发
-    
+
     工具执行和审批逻辑由 ToolInterface.execute_with_approval() 负责。
-    
+
     用法：
         harness = AgentHarness(llm_client=llm, tool_interface=tools, hooks=hooks)
-        result = await harness.run(context, ctx)
+        result = await harness.run(context, session_id, session_data, command_handler)
     """
 
     def __init__(
@@ -56,7 +64,6 @@ class AgentHarness:
         self._tools = tool_interface
         self._hooks = hooks
         self._max_iterations = max_iterations
-        self._approval_handler: Callable[[list], Awaitable[list[bool]]] | None = None
 
     @property
     def hooks(self) -> HookManager:
@@ -68,7 +75,7 @@ class AgentHarness:
 
     @property
     def router(self):
-        """向后兼容：暴露 ProviderRouter（Session._init_meta_from_agent 需要）。"""
+        """向后兼容：暴露 ProviderRouter（Session._init_meta_from_harness 需要）。"""
         return self._llm.router
 
     @property
@@ -83,13 +90,35 @@ class AgentHarness:
 
     # ── 主入口 ──
 
-    async def run(self, context: ContextManager, ctx: HookContext) -> StreamResult:
+    async def run(
+        self,
+        context: ContextManager,
+        session_id: str,
+        session_data: "SessionData",
+        command_handler: Callable | None = None,
+        approval_handler: Callable[[list], Awaitable[list[bool]]] | None = None,
+    ) -> StreamResult:
         """
         驱动 ReAct 循环：系统指令检查 → LLM 推理 → 工具执行 → 循环。
-        
+
+        Harness 内部组装 HookContext，Session 不需要感知 HookContext 的存在。
+
+        注意：
+          - Prompt 渲染 + 用户消息写入已在 Session.chat() 中完成并写入 context
+          - StreamResult.text 返回的是已 finalized 的文本，Session 无需二次处理
+          - run() 内不做 SessionData 状态持久化（由 Session 在 run() 返回后 / 异常时触发）
+          - 除 CancelledError 外的 Exception 将被直接透传抛出，由上层 Session catch
+
         Returns:
-            StreamResult: 最终的 LLM 聚合结果（text + stop_reason）
+            StreamResult: 最终的 LLM 聚合结果（text 已 finalized + stop_reason）
         """
+        # Harness 内部组装执行上下文（Session 不感知 HookContext）
+        ctx = HookContext(
+            session_id=session_id,
+            session_meta=session_data,
+            system_command_handler=command_handler,
+        )
+
         try:
             for iteration in range(self._max_iterations):
                 ctx.iteration = iteration + 1
@@ -102,7 +131,8 @@ class AgentHarness:
                 await check_system_commands(context, ctx, self._hooks)
 
                 # 步骤 B：LLM 推理（LLMClient 内部完成流式聚合 + Hook 转发）
-                tools = ctx.session_meta.tool.tools if ctx.session_meta else self._tools.list_schemas()
+                # 注意：直接从 ToolInterface 获取实时工具 schema 列表（含热加载发现的新工具）
+                tools = self._tools.list_schemas()
                 messages = context.get_messages()
                 llm_result = await self._llm.generate(messages, tools, ctx)
 
@@ -117,22 +147,26 @@ class AgentHarness:
                 # 无工具调用 → 循环结束
                 if not llm_result.tool_calls:
                     await self._hooks.emit("state_change", ctx, state="idle")
-                    return llm_result
+                    # 结束前内化 finalize_content 钩子处理
+                    final_text = self._hooks.finalize_content(ctx, llm_result.text)
+                    return StreamResult(text=final_text or "", stop_reason=llm_result.stop_reason)
 
                 # 步骤 C：工具执行（含安全分拣 + 人工审批）
-                await self._execute_tools(context, ctx, llm_result.tool_calls)
+                await self._execute_tools(context, ctx, llm_result.tool_calls, approval_handler)
 
             # 达到最大迭代次数
             logger.warning(f"Harness reached max iterations ({self._max_iterations})")
             msg = "达到最大迭代次数限制，终止执行。"
             await context.add_assistant_message(content=msg, tool_calls=None)
-            return StreamResult(text=msg, stop_reason="max_iterations")
+            final_text = self._hooks.finalize_content(ctx, msg)
+            return StreamResult(text=final_text or "", stop_reason="max_iterations")
 
         except asyncio.CancelledError:
             cancel_msg = "[系统] 操作已取消"
             logger.info(f"Harness cancelled at iteration {getattr(ctx, 'iteration', 0)}")
             await context.add_assistant_message(content=cancel_msg, tool_calls=None)
-            return StreamResult(text=cancel_msg, stop_reason="cancelled")
+            final_text = self._hooks.finalize_content(ctx, cancel_msg)
+            return StreamResult(text=final_text or "", stop_reason="cancelled")
 
     # ── 取消检查 ──
 
@@ -149,10 +183,11 @@ class AgentHarness:
         context: ContextManager,
         ctx: HookContext,
         tool_calls: list[ToolCall],
+        approval_handler: Callable[[list], Awaitable[list[bool]]] | None = None,
     ) -> None:
         """
         工具执行入口：发射 tool_start → 委托 ToolInterface 完成全部执行+审批 → 写入结果+发射 hook。
-        
+
         工具的实际执行、安全分拣、人工审批由 ToolInterface.execute_with_approval() 统一处理，
         harness 仅负责 hook 事件管理和结果写入 context。
         """
@@ -165,13 +200,13 @@ class AgentHarness:
 
         # 如果有待审批工具，发射 approval_needed hook 事件
         # （注意：实际的审批判断在 ToolInterface 内部完成，这里仅做事件通知）
-        if self._approval_handler:
+        if approval_handler:
             await self._hooks.emit("approval_needed", ctx, tool_calls=tool_calls)
 
         # 委托 ToolInterface 完成全部执行管线（含安全检查 + 人工审批 + 批准后重执行）
         executed_tools = await self._tools.execute_with_approval(
             tool_calls,
-            approval_handler=self._approval_handler,
+            approval_handler=approval_handler,
         )
 
         # 将执行结果写入 context 并发射对应的 hook 事件

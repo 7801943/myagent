@@ -1,25 +1,28 @@
 """MyAgent Core：ReAct 调度中枢 + Hook 体系 + 会话管理。
 
-Harness 重构后：
-  - core/harness.py: AgentHarness（ReAct 调度中枢）
-  - core/llm.py: LLMClient（LLM 通信层，屏蔽流式/路由/参数格式化细节）
+重构后文件结构：
+  - core/harness.py: AgentHarness（无状态执行引擎，per-session）
+  - core/llm.py: LLMClient（LLM 通信层）
   - core/tools.py: ToolInterface（工具执行适配层）
-  - core/models.py: 数据容器（StreamResult, SessionState 等）
-  - core/session.py: Session + SessionManager（会话管理，不再依赖 AgentFactory）
+  - core/models.py: 数据容器（SessionData, SessionState 等）
+  - core/session/: 会话包
+      session.py: Session（瘦会话容器）
+      manager.py: SessionManager（组件构建 + TTL）
+      client_bridge.py: ClientBridge（WS 多客户端管理 + 审批桥接）
+      serializer.py: 消息序列化纯函数
   - core/hook.py: HookManager + HookContext
+  - core/events.py: 类型安全事件定义
   - core/workspace.py: WorkspaceManager
-
-已删除：
-  - agent.py（逻辑迁移至 harness.py + llm.py + tools.py）
-  - turns.py（Turn 抽象扁平化到 harness.py 中）
 """
 from myagent.core.harness import AgentHarness
 from myagent.core.llm import LLMClient, StreamResult
 from myagent.core.tools import ToolInterface
 from myagent.core.hook import HookContext, HookManager, HookHandle
 from myagent.core.session import Session, SessionManager
+from myagent.core.session.client_bridge import ClientBridge, ClientHandle
 from myagent.core.models import UserContext, SessionData
 from myagent.core.workspace import WorkspaceManager
+from myagent.core import events
 
 __all__ = [
     "AgentHarness",
@@ -31,7 +34,10 @@ __all__ = [
     "HookHandle",
     "Session",
     "SessionManager",
+    "ClientBridge",
+    "ClientHandle",
     "SessionData",
     "UserContext",
     "WorkspaceManager",
+    "events",
 ]

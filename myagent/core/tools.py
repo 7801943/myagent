@@ -306,6 +306,34 @@ class ToolInterface:
 
     # ── Schema 查询 ──
 
-    def list_schemas(self) -> list | None:
-        """获取所有已注册工具的 schema 列表。"""
-        return self._tool_manager.list_schemas() if self._tool_manager else None
+    def list_schemas(self) -> list[dict]:
+        """
+        获取所有已注册工具的 schema 列表。
+        返回与 Provider.format_tools() 兼容的 dict 格式（含热加载发现的工具）。
+        """
+        if not self._tool_manager:
+            return []
+        records = self._tool_manager.list_schemas()
+        if not records:
+            return []
+        return [
+            {
+                "name": r.name,
+                "description": r.description,
+                "parameters_schema": r.parameters_schema,
+                "source": r.source,
+            }
+            for r in records
+        ]
+
+    # ── 生命周期委托 ──
+
+    async def start(self) -> None:
+        """启动 ToolManager（创建 JsonRpcProxy + 热加载扫描）。"""
+        if self._tool_manager:
+            await self._tool_manager.start()
+
+    async def stop(self) -> None:
+        """停止 ToolManager（关闭 Proxy + 停止热加载扫描）。"""
+        if self._tool_manager:
+            await self._tool_manager.stop()

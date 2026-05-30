@@ -44,7 +44,8 @@ from uuid import uuid4
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from myagent.core.session import Session, SessionManager, ClientHandle
+from myagent.core.session import Session, SessionManager
+from myagent.core.session.client_bridge import ClientHandle
 from myagent.core.models import UserContext
 from myagent.context.state import StateStore
 from myagent.interfaces.web.ws_models import INCOMING_MESSAGE_TYPES
@@ -119,15 +120,11 @@ class WebSocketHandler:
             return
 
         self._session_id = self._session.id
-        is_new = len(self._session._ws_notifiers) == 0
+        is_new = not self._session._bridge.has_clients
         logger.info(f"WebSocket joined session: {self._session_id} (new={is_new})")
 
-        # 启动工具热加载（仅首个客户端连接时）
-        if is_new:
-            try:
-                await self._session.harness.tool_interface._tool_manager.start()
-            except Exception as e:
-                logger.warning(f"Hot reload start failed (non-fatal): {e}")
+        # 工具热加载已在 SessionManager.create_session() 中通过
+        # harness.tool_interface.start() 启动，无需重复调用
 
         # ── 3. 通过 attach_client 统一注册 Hook + ws_notify ──
         self._client_handle = self._session.attach_client(self._send_json)
@@ -282,14 +279,14 @@ class WebSocketHandler:
         session.request_cancel("user_cancelled", "用户通过 WebSocket 取消")
 
     def _handle_approval_response(self, data: dict) -> None:
-        """处理人工审批回复（通过 Session 内置 VirtualApprovalHandler）。"""
+        """处理人工审批回复（通过 ClientBridge）。"""
         ticket_id = data.get("ticket_id", "") or data.get("call_id", "")
         decisions = data.get("decisions", [])
         # 兼容旧前端格式：单个 approved → 转为 decisions 列表
         if not decisions and "approved" in data:
             decisions = [data.get("approved", False)]
         if self._session and ticket_id:
-            self._session._approval_handler.resolve(ticket_id, decisions)
+            self._session._bridge.resolve_approval(ticket_id, decisions)
 
     async def _handle_session_list(self) -> None:
         """处理会话列表请求。"""
