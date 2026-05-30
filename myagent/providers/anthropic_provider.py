@@ -1,4 +1,5 @@
 """Anthropic 流式 Provider 实现。将 Anthropic SDK 事件统一转为 StreamEvent。"""
+import asyncio
 import json
 from typing import AsyncIterator
 
@@ -122,6 +123,10 @@ class AnthropicProvider(BaseProvider):
                 tool_call_buffers: dict[str, dict] = {}  # tool_use_id -> {id, name, args_json}
 
                 async for event in stream:
+                    # 每个 event 后检查取消信号
+                    if asyncio.current_task() is not None and asyncio.current_task().cancelled():
+                        raise asyncio.CancelledError()
+
                     # 文本增量
                     if event.type == "content_block_delta":
                         if hasattr(event.delta, "text"):

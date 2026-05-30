@@ -1,4 +1,5 @@
 """OpenAI 流式 Provider 实现。将 OpenAI SDK 事件统一转为 StreamEvent。"""
+import asyncio
 import json
 from typing import AsyncIterator
 
@@ -152,6 +153,10 @@ class OpenAIProvider(BaseProvider):
             tool_call_buffers: dict[int, dict] = {}  # index -> {id, name, args_delta}
 
             async for chunk in stream:
+                # 每个 chunk 后检查取消信号
+                if asyncio.current_task() is not None and asyncio.current_task().cancelled():
+                    raise asyncio.CancelledError()
+
                 if not chunk.choices:
                     # OpenAI stream_options={"include_usage": True} 时，
                     # 最后一个 chunk 没有 choices 但携带 usage 数据

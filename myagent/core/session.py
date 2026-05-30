@@ -1,41 +1,16 @@
 """
 Session + SessionManager：一等公民 Web 会话容器 & 多用户会话管理。
 
-Phase 1 重构：
-  - Session：从 Agent 管理的内部对象 → 一等公民会话容器
-  - 新增 UserContext 数据类（用户身份+凭证）
-  - 新增 SessionManager 管理 Session 的 CRUD
-  - 每用户维护一个 Agent 实例
-  - 会话持久化（StateStore 集成）
+Harness 重构：
+  - Session._agent → Session._harness (AgentHarness)
+  - SessionManager 不再依赖 AgentFactory，直接构建 ProviderRouter / ToolManager / SafetyGuard
+  - 删除 AgentFactory
 
-Phase 2 重构：
-  - WorkspaceManager 集成（工作空间状态容器）
-  - system_command_handler 扩展（/workspace 指令）
+保留：
+  - VirtualApprovalHandler / ClientHandle
   - Session TTL 过期清理
-  - ws_notify 前端推送回调
-
-Phase 3 重构：
-  - WorkspaceManager 统一 update() 入口
-  - 删除 permission 检查
-  - agent 操作目录同步到前端，user 操作目录同步到 LLM 上下文
-
-Phase 4 重构：
-  - SessionData 作为唯一状态容器（扁平化嵌套 dict 结构）
-  - 初始化时从 Agent 实例采集模型、工具等信息
-  - 运行时更新由 Hook 信号驱动（Phase 2 完善）
-
-Phase 5 重构（多用户 Bug 修复）：
-  - Hook 回调保存 HookHandle，Session 销毁时取消注册（Bug #6）
-  - Hook 回调增加 session_id 过滤（Bug #5）
-  - chat() 不再写入 Agent 属性，通过 HookContext 传递状态（Bug #2）
-  - make_command_handler 保存为实例属性，不写入 Agent（Bug #3）
-  - ws_notify 改为观察者列表，支持多客户端（Bug #4）
-  - SessionManager 销毁/TTL 清理时取消 hook 注册
-
-Phase 6 重构（领域模型解耦）：
-  - SessionState / AgentRunState 迁移到 core/models.py
-  - UserContext / SessionData 迁移到 core/models.py
-  - session.py 仅保留 Session 核心流转 + SessionManager 管理
+  - Hook Topic 路由（per-session 隔离，多客户端共享）
+  - 消息序列化 / 持久化
 """
 from __future__ import annotations
 
@@ -43,20 +18,30 @@ import asyncio
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable, Awaitable
 from uuid import uuid4
 
-from dataclasses import dataclass
+import yaml
 
 from myagent.context.manager import ContextManager
 from myagent.context.message import ContentBlock, ToolCall
-from myagent.core.hook import HookContext, HookHandle
+from myagent.core.hook import HookContext, HookHandle, HookManager
+from myagent.core.harness import AgentHarness
+from myagent.core.llm import LLMClient, StreamResult
+from myagent.core.tools import ToolInterface
 from myagent.core.models import UserContext, SessionData, SessionState, AgentRunState
+from myagent.providers.router import ProviderRouter
+from myagent.providers.openai_provider import OpenAIProvider
+from myagent.providers.anthropic_provider import AnthropicProvider
+from myagent.tools.manager import ToolManager
+from myagent.safety.policy import PolicyEngine
+from myagent.safety.cli_fence import CLIFence
+from myagent.safety.content_rules import InputContentFilter, OutputContentFilter
+from myagent.safety.secrets import SecretManager
+from myagent.utils.config import load_yaml_config, AgentConfig
 from myagent.utils.logging import get_logger
 
 if TYPE_CHECKING:
-    from myagent.core.agent import Agent, AgentFactory
-    from myagent.core.hook import HookManager
     from myagent.core.workspace import WorkspaceManager, WorkspaceState
     from myagent.context.state import StateStore
     from myagent.prompt.renderer import PromptRenderer
@@ -111,11 +96,11 @@ def _serialize_messages(messages: list) -> list[dict]:
 
 # ─── VirtualApprovalHandler + ClientHandle ────────────────────
 
-@dataclass
 class PendingApproval:
     """等待审批的工单。"""
-    future: asyncio.Future
-    tool_calls: list
+    def __init__(self, future: asyncio.Future, tool_calls: list):
+        self.future = future
+        self.tool_calls = tool_calls
 
 
 class VirtualApprovalHandler:
@@ -125,7 +110,7 @@ class VirtualApprovalHandler:
     """
 
     def __init__(self, broadcast):
-        self._broadcast = broadcast  # session._notify_clients
+        self._broadcast = broadcast
         self._pending: dict[str, PendingApproval] = {}
 
     async def __call__(self, tool_calls: list[ToolCall]) -> list[bool]:
@@ -179,25 +164,14 @@ class Session:
     """
     一等公民 Web 会话容器。
 
-    职责：
-    1. 持有 per-session 的 ContextManager
-    2. 持有 Agent 引用（共享组件）
-    3. 提供 chat(user_input) 执行一轮交互
-    4. 管理生命周期：取消、持久化、恢复
-    5. 持有 SessionData（唯一状态容器）
-    6. 持有 WorkspaceManager（工作空间状态容器）
-
-    状态管理：
-      - self.data: SessionData — 唯一状态载体（可序列化到 DB / 推送前端）
-      - 初始化时从 Agent 实例采集模型列表、工具列表等
-      - 运行时通过 meta 属性直接访问
+    持有 AgentHarness 引用（调度中枢），通过 harness.run() 执行交互。
     """
 
     def __init__(
         self,
         *,
         session_id: str | None = None,
-        agent: "Agent",
+        harness: AgentHarness,
         user: UserContext,
         state_store: "StateStore | None" = None,
         system_prompt: str | None = None,
@@ -226,8 +200,8 @@ class Session:
             },
         )
 
-        # 共享 Agent 引用
-        self._agent = agent
+        # 共享 Harness 引用
+        self._harness = harness
         self._state_store = state_store
 
         # Per-session ContextManager（带实时持久化）
@@ -246,10 +220,10 @@ class Session:
         # 前端通知回调（支持多客户端订阅同一 Session）
         self._ws_notifiers: list = []
 
-        # PromptRenderer（由 SessionManager 注入，SSPT 动态渲染）
+        # PromptRenderer（由 SessionManager 注入）
         self._prompt_renderer: "PromptRenderer | None" = None
 
-        # WorkspaceManager（工作空间状态容器，不做文件 I/O）
+        # WorkspaceManager
         self.workspace: "WorkspaceManager | None" = None
         if workspace_root:
             from myagent.core.workspace import WorkspaceManager
@@ -259,29 +233,25 @@ class Session:
         if system_prompt:
             self._context.set_system(system_prompt)
 
-        # ── 从 Agent 实例采集初始状态 ──
-        self._init_meta_from_agent()
+        # ── 从 Harness 采集初始状态 ──
+        self._init_meta_from_harness()
 
-        # 注册状态同步 hook：监听 state_change 事件更新 meta
-        # 保存 HookHandle，用于 Session 销毁时取消注册
-        # topic=self.id 确保只接收本 Session 的事件（Topic 路由）
+        # 注册状态同步 hook
         self._hook_handles: list[HookHandle] = []
         self._hook_handles.append(
-            agent.hooks.on("state_change", self._on_state_change, topic=self.id)
+            harness.hooks.on("state_change", self._on_state_change, topic=self.id)
         )
-
-        # 注册 tool_end hook：文件操作工具执行后自动刷新 workspace
         self._hook_handles.append(
-            agent.hooks.on("tool_end", self._on_tool_end, topic=self.id)
+            harness.hooks.on("tool_end", self._on_tool_end, topic=self.id)
         )
 
-        # ── 内置审批 handler（与 WebSocket 连接解耦） ──
+        # ── 内置审批 handler ──
         self._approval_handler = VirtualApprovalHandler(self._notify_clients)
 
-        # ── 内置并发锁（防止多客户端同时 chat） ──
+        # ── 内置并发锁 ──
         self._chat_lock = asyncio.Lock()
 
-        # 系统指令处理器（由 make_command_handler 创建）
+        # 系统指令处理器
         self._system_command_handler = None
 
     # ── Hook 取消注册 ──
@@ -302,7 +272,6 @@ class Session:
 
     @property
     def session_state(self) -> SessionState:
-        """兼容属性：从 meta 读取 session_state。"""
         try:
             return SessionState(self.data.context.session_state)
         except ValueError:
@@ -314,7 +283,6 @@ class Session:
 
     @property
     def agent_run_state(self) -> AgentRunState:
-        """兼容属性：从 meta 读取 agent_run_state。"""
         try:
             return AgentRunState(self.data.context.agent_run_state)
         except ValueError:
@@ -326,7 +294,6 @@ class Session:
 
     @property
     def metadata(self) -> dict:
-        """返回 meta 的字典形式（只读视图）。"""
         return self.data.model_dump()
 
     @property
@@ -334,20 +301,17 @@ class Session:
         return self._context
 
     @property
-    def agent(self) -> "Agent":
-        """公开 getter：获取关联的 Agent 实例。"""
-        return self._agent
+    def harness(self) -> AgentHarness:
+        """公开 getter：获取关联的 AgentHarness 实例。"""
+        return self._harness
 
-    # ── 从 Agent 初始化 meta ──
+    # ── 从 Harness 初始化 meta ──
 
-    def _init_meta_from_agent(self) -> None:
-        """
-        从 Agent 实例采集初始状态到 data（模型列表、工具列表等）。
-        仅在 Session 创建时调用一次。
-        """
-        router = self._agent.router
+    def _init_meta_from_harness(self) -> None:
+        """从 AgentHarness 采集初始状态到 data（模型列表、工具列表等）。"""
+        router = self._harness.router
 
-        # ── 1. 采集模型信息 ──
+        # 采集模型信息
         current_provider = router.current_provider
         available_models: list[dict] = []
         active_model: dict = {}
@@ -367,7 +331,6 @@ class Session:
             if is_current:
                 active_model = info
 
-        # 如果没有匹配到 active_model，取第一个
         if not active_model.get("provider_name") and available_models:
             active_model = available_models[0]
             active_model["is_active"] = True
@@ -375,14 +338,12 @@ class Session:
         self.data.model.active = active_model
         self.data.model.available = available_models
 
-        # 同步 token_usage.total 为当前 active provider 的 context_window_size
-        # [Pydantic 迁移] 直接属性赋值，不再通过 get()["key"] = value
         active_cws = active_model.get("context_window_size", 200000)
         self.data.context.token_usage.total = active_cws
 
-        # ── 2. 采集工具列表（含 parameters_schema 供 API 调用和 prompt 渲染使用） ──
+        # 采集工具列表
         tools: list[dict] = []
-        tm = self._agent.tool_manager
+        tm = self._harness.tool_manager
         if tm:
             for record in tm.list_schemas() or []:
                 tools.append({
@@ -396,21 +357,16 @@ class Session:
     # ── PromptRenderer 注入 ──
 
     def set_prompt_renderer(self, renderer: "PromptRenderer") -> None:
-        """注入 PromptRenderer（由 SessionManager 在创建 Session 后调用）。"""
         self._prompt_renderer = renderer
 
     # ── 工具统一管理 ──
 
     async def update_tools(self, source: str = "agent") -> None:
-        """从 ToolManager 重新采集工具列表，同步到 meta。
-
-        Args:
-            source: "agent" → LLM 触发的变更, "user" → 用户操作触发
-        """
+        """从 ToolManager 重新采集工具列表，同步到 meta。"""
         from myagent.prompt.variables import _summarize_parameters
 
         tools: list[dict] = []
-        tm = self._agent.tool_manager
+        tm = self._harness.tool_manager
         if tm:
             for record in tm.list_schemas() or []:
                 tools.append({
@@ -428,18 +384,14 @@ class Session:
     # ── Hook 回调 ──
 
     async def _on_state_change(self, ctx, state: str) -> None:
-        """Hook 回调：同步 agent_run_state 到 meta。Topic 路由已确保仅收到本 session 事件。"""
         self.data.context.agent_run_state = state
 
     async def _on_tool_end(self, ctx, tool_name: str, result: Any, call_id: str, latency_ms: float) -> None:
-        """Hook 回调：文件操作工具执行后自动刷新 workspace。Topic 路由已确保仅收到本 session 事件。"""
         if not self.workspace:
             return
-
         file_tools = {"file_write", "file_read", "cli_execute"}
         if tool_name in file_tools:
             await self.workspace.update("agent", "files_changed", {})
-
         if tool_name == "file_read" and hasattr(result, 'metadata'):
             file_path = result.metadata.get("path", "") if isinstance(result.metadata, dict) else ""
             if file_path:
@@ -454,21 +406,7 @@ class Session:
     # ── 核心对话 ──
 
     async def chat(self, user_input: str | list[ContentBlock]) -> str:
-        """
-        发起一轮对话。内置并发锁，多客户端同时调用时排队执行。
-
-        Args:
-            user_input: 用户输入，支持三种形式：
-                - str: 纯文本消息
-                - list[ContentBlock]: 多模态内容（文本 + 图像混合）
-                - 空字符串 "": 跳过添加用户消息（用于已预注入 context 的场景）
-
-        Returns:
-            Agent 的最终回复文本
-
-        Raises:
-            RuntimeError: Session 正忙（另一轮对话进行中）
-        """
+        """发起一轮对话。内置并发锁。"""
         if not self._chat_lock.locked():
             async with self._chat_lock:
                 return await self._chat_inner(user_input)
@@ -477,15 +415,14 @@ class Session:
 
     async def _chat_inner(self, user_input: str | list[ContentBlock]) -> str:
         """chat 的实际实现（在锁内执行）。"""
-        # 注入 Session 内置的 VirtualApprovalHandler 到 Agent
-        self._agent._approval_handler = self._approval_handler
+        # 注入 VirtualApprovalHandler 到 Harness
+        self._harness._approval_handler = self._approval_handler
 
         self.last_active_at = datetime.now(timezone.utc)
         self._running_task = asyncio.current_task()
         self._cancel_reason = ""
         self._cancel_detail = ""
 
-        # 构建 HookContext，将所有会话级状态注入 ctx（不再写入 Agent）
         ctx = HookContext(
             session_id=self.id,
             session_meta=self.data,
@@ -495,7 +432,7 @@ class Session:
         logger.info(f"Session chat start: {self.id}")
 
         try:
-            # ── 渲染动态 system prompt（SSPT） ──
+            # 渲染动态 system prompt（SSPT）
             if self._prompt_renderer:
                 from myagent.prompt.variables import VariableCollector
                 variables = await VariableCollector.collect(self)
@@ -507,13 +444,12 @@ class Session:
             elif user_input:
                 await self._context.add_user_message(user_input)
 
-            result = await self._agent.run(self._context, ctx)
+            result = await self._harness.run(self._context, ctx)
 
-            final_content = self._agent.hooks.finalize_content(ctx, result.text)
+            final_content = self._harness.hooks.finalize_content(ctx, result.text)
 
             logger.info(f"Session chat end: {self.id}, reason={result.stop_reason}")
 
-            # 更新 meta 并持久化
             self.data.context.stop_reason = result.stop_reason or "completed"
             await self._persist(AgentRunState.IDLE)
 
@@ -527,7 +463,6 @@ class Session:
             logger.info(f"Session chat cancelled (session-level): {reason}")
             try:
                 self.data.context.cancelled = True
-                # [Pydantic 迁移] extra 仍是 dict，直接用属性访问
                 self.data.extra["cancel_reason"] = reason
                 await asyncio.shield(self._persist(AgentRunState.IDLE))
             except Exception:
@@ -536,7 +471,7 @@ class Session:
 
         except Exception as e:
             logger.error(f"Session chat error: {e}", exc_info=True)
-            await self._agent.hooks.emit("error", ctx, error=e)
+            await self._harness.hooks.emit("error", ctx, error=e)
             await self._persist(AgentRunState.ERROR)
             raise
 
@@ -556,29 +491,16 @@ class Session:
             logger.info(f"Session cancel requested: {reason} — {detail}")
 
     def update_metadata(self, key: str, value) -> None:
-        """更新会话扩展元数据（存入 meta.extra）。"""
-        # [Pydantic 迁移] extra 仍是 dict，直接用属性访问
         self.data.extra[key] = value
 
     # ── 持久化 ──
 
     async def _persist(self, state: AgentRunState | None = None):
-        """
-        内部持久化入口。
-        同步运行时状态到 meta，然后序列化到 StateStore。
-        """
-        # 同步 agent_run_state
         if state is not None:
             self.data.context.agent_run_state = state.value
-
-        # 同步 token 使用量
-        # [Pydantic 迁移] 直接属性赋值
         self.data.context.token_usage.used = self._context.last_usage_input_tokens
-
-        # 同步 workspace 快照
         if self.workspace:
             self.data.workspace.state = self.workspace.snapshot().to_dict()
-
         if self._state_store:
             await self._state_store.save_state(
                 self.id,
@@ -588,13 +510,10 @@ class Session:
             )
 
     async def save(self) -> None:
-        """持久化会话状态和消息。"""
         if self._state_store:
-            # [Pydantic 迁移] 直接属性赋值
             self.data.context.token_usage.used = self._context.last_usage_input_tokens
             if self.workspace:
                 self.data.workspace.state = self.workspace.snapshot().to_dict()
-
             await self._state_store.save_state(
                 self.id,
                 self.agent_run_state,
@@ -607,14 +526,12 @@ class Session:
                 await self._state_store.save_workspace(self.id, ws_json)
 
     async def load_messages(self) -> list:
-        """加载该会话的全部消息历史。"""
         if not self._state_store:
             return []
         return await self._state_store.load_messages(self.id)
 
-    # 命令系统待迁移到独立文件 command.py，计划中
     def make_command_handler(self):
-        """创建系统指令处理器并保存为实例属性（不写入 Agent）。"""
+        """创建系统指令处理器并保存为实例属性。"""
         session = self
 
         async def _system_command_handler(cmd: str, args: str, ctx: HookContext) -> None:
@@ -623,10 +540,9 @@ class Session:
                 session._context.clear()
             elif cmd == "model":
                 provider_name = args.strip()
-                if provider_name and hasattr(session._agent, '_router'):
+                if provider_name and hasattr(session._harness, 'router'):
                     try:
-                        session._agent._router.set_provider(provider_name)
-                        # 更新 meta 中的 active_model
+                        session._harness.router.set_provider(provider_name)
                         available = session.data.model.available
                         for m in available:
                             m["is_active"] = (m.get("provider_name") == provider_name)
@@ -638,14 +554,11 @@ class Session:
             else:
                 logger.debug(f"Unknown system command: /{cmd} {args}")
 
-        # 保存为 Session 实例属性，不再写入 Agent
         self._system_command_handler = _system_command_handler
 
     # ── Workspace 回调 ──
 
     async def _on_workspace_change(self, state: "WorkspaceState", source: str) -> None:
-        """WorkspaceManager 状态变更回调。"""
-        # 持久化 workspace 状态到 DB（空会话不触发）
         if self.has_user_message() and self._state_store:
             ws_json = json.dumps(state.to_dict(), ensure_ascii=False)
             await self._state_store.save_workspace(self.id, ws_json)
@@ -655,40 +568,24 @@ class Session:
     # ── 多客户端通知 ──
 
     def add_ws_notify(self, callback) -> None:
-        """添加一个客户端通知回调（支持多客户端订阅同一 Session）。"""
         if callback not in self._ws_notifiers:
             self._ws_notifiers.append(callback)
 
     def remove_ws_notify(self, callback) -> None:
-        """移除一个客户端通知回调（客户端断开时调用）。"""
         if callback in self._ws_notifiers:
             self._ws_notifiers.remove(callback)
 
     def set_ws_notify(self, callback) -> None:
-        """向后兼容：内部调用 add_ws_notify。"""
         self.add_ws_notify(callback)
 
     def attach_client(self, sender) -> ClientHandle:
         """
         将一个客户端（WebSocket）接入本会话。
-        内部完成 Hook 绑定 + ws_notify 注册，返回 ClientHandle。
-
-        所有回调通过 topic=self.id 注册到 HookManager，
-        emit 时自动按 ctx.session_id 路由，无需手动过滤。
-
-        Args:
-            sender: 异步函数，接收 dict 并发给客户端
-
-        Returns:
-            ClientHandle，断开时调用 handle.detach()
+        所有回调通过 topic=self.id 注册到 Harness.hooks。
         """
-        hooks = self._agent.hooks
+        hooks = self._harness.hooks
         sid = self.id
         handles: list[HookHandle] = []
-
-        # ── Topic 路由：所有回调注册时传入 topic=sid ──
-        # emit 时 HookManager 自动匹配 ctx.session_id == sid 的回调，
-        # 无需在每个回调内做 if ctx.session_id == sid 判断。
 
         async def _on_stream(ctx, delta):
             await sender({"type": "text_delta", "text": delta})
@@ -740,7 +637,6 @@ class Session:
         handles.append(hooks.on("safety_blocked", _on_safety_blocked, topic=sid))
         handles.append(hooks.on("timeout_warning", _on_timeout_warning, topic=sid))
 
-        # ws_notify 回调签名是 (msg_type, data)，需要适配为 sender(dict)
         async def _ws_notify_wrapper(msg_type: str, data: dict) -> None:
             await sender({"type": msg_type, **data})
 
@@ -748,8 +644,7 @@ class Session:
         return ClientHandle(handles, self, _ws_notify_wrapper)
 
     async def _notify_clients(self, msg_type: str, data: dict) -> None:
-        """向所有订阅的客户端推送通知。"""
-        for notify in list(self._ws_notifiers):  # 复制列表防止迭代中修改
+        for notify in list(self._ws_notifiers):
             try:
                 await notify(msg_type, data)
             except Exception:
@@ -758,13 +653,11 @@ class Session:
     # ── 消息序列化 ──
 
     def serialize_messages(self) -> list[dict]:
-        """序列化当前会话消息历史为前端格式。"""
         return _serialize_messages(self._context.messages)
 
     # ── 前端推送 ──
 
     async def push_conversation_state(self) -> None:
-        """推送 meta 快照到前端（通过 ws_notifiers）。"""
         if self._ws_notifiers:
             await self._notify_clients("conversation_state", self.data.model_dump())
 
@@ -774,33 +667,50 @@ class Session:
 class SessionManager:
     """
     顶层会话管理器。
-    职责：
-    1. 管理 Session 的 CRUD（create/get/list/delete）
-    2. 每用户维护一个 Agent 实例
-    3. 会话持久化（StateStore 集成）
-    4. 用户隔离
-    5. Session TTL 过期清理
+    不再依赖 AgentFactory，直接构建 ProviderRouter / ToolManager / SafetyGuard 等组件。
     """
 
     def __init__(
         self,
-        factory: "AgentFactory",
+        *,
+        config_path: str = "config.yaml",
         state_store: "StateStore | None" = None,
         session_ttl_seconds: int = 3600,
     ):
-        self._factory = factory
+        self._config_path = config_path
         self._state_store = state_store
         self._sessions: dict[str, Session] = {}
-        self._user_agents: dict[str, "Agent"] = {}
+        self._user_harnesses: dict[str, AgentHarness] = {}
 
         self._session_ttl = session_ttl_seconds
         self._cleanup_interval = 300
         self._running = False
         self._cleanup_task: asyncio.Task | None = None
 
+        # ── 加载配置并缓存 ──
+        self._raw = load_yaml_config(config_path)
+        app_config = self._raw.get("agent", self._raw) if self._raw else {}
+        self._config = AgentConfig(**app_config)
+
+        # 预加载系统提示词
+        self._system_prompt: str = self._load_system_prompt()
+
     @property
-    def factory(self) -> "AgentFactory":
-        return self._factory
+    def context_window_size(self) -> int:
+        if self._config.providers:
+            for p in self._config.providers:
+                if p.priority == 1:
+                    return p.context_window_size
+            return self._config.providers[0].context_window_size
+        return 128000
+
+    @property
+    def system_prompt(self) -> str:
+        return self._system_prompt
+
+    @property
+    def config(self) -> AgentConfig:
+        return self._config
 
     async def start(self) -> None:
         self._running = True
@@ -831,7 +741,6 @@ class SessionManager:
         for sid in to_evict:
             session = self._sessions.pop(sid)
             session.unregister_hooks()
-            # 空会话（无用户消息）直接丢弃，不持久化；同时清理 DB 中可能存在的残余记录
             if not session.has_user_message():
                 if self._state_store:
                     await self._state_store.clear_session(sid)
@@ -840,25 +749,125 @@ class SessionManager:
                 await session.save()
                 logger.info(f"Session evicted (TTL): {sid}")
 
-    def _get_or_create_agent(
+    # ── 组件构建（替代 AgentFactory） ──
+
+    def _build_router(self) -> ProviderRouter:
+        providers = []
+        for p_cfg in self._config.providers:
+            if p_cfg.type.lower() == "openai":
+                p = OpenAIProvider(
+                    name=p_cfg.name,
+                    model=p_cfg.model,
+                    api_key=p_cfg.api_key or "sk-dummy",
+                    api_base=p_cfg.api_base,
+                )
+            elif p_cfg.type.lower() == "anthropic":
+                p = AnthropicProvider(
+                    name=p_cfg.name,
+                    model=p_cfg.model,
+                    api_key=p_cfg.api_key or "sk-dummy",
+                )
+            else:
+                continue
+            p._context_window_size = p_cfg.context_window_size
+            providers.append(p)
+        if not providers:
+            raise RuntimeError("未配置任何 Provider，请检查 config.yaml")
+        return ProviderRouter(providers)
+
+    def _load_system_prompt(self) -> str:
+        sys_prompt = self._config.system_prompt or "你是一个智能助手，可以帮助用户完成各种任务。"
+        if self._config.system_prompt_file:
+            prompt_path = Path(self._config.system_prompt_file)
+            if prompt_path.exists():
+                lines = []
+                with open(prompt_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        stripped = line.strip()
+                        if not stripped or stripped.startswith("#") or stripped.startswith("//"):
+                            continue
+                        lines.append(line.rstrip('\n'))
+                sys_prompt = "\n".join(lines)
+            else:
+                logger.warning(f"system_prompt_file {self._config.system_prompt_file} not found.")
+        return sys_prompt
+
+    def _build_safety_components(self, no_safety: bool = False) -> tuple[PolicyEngine | None, list] | None:
+        """构建安全策略引擎和规则链，返回 (policy_engine, rules) 或 None。"""
+        safety_cfg = self._config.safety
+        if no_safety or not safety_cfg.enabled:
+            logger.info("Safety disabled by config or flag")
+            return None
+        rules_path = safety_cfg.rules_path
+        rules_cfg = {}
+        if Path(rules_path).exists():
+            with open(rules_path) as f:
+                rules_cfg = yaml.safe_load(f) or {}
+        else:
+            logger.warning(f"Safety rules file not found: {rules_path}.")
+        policy_cfg = rules_cfg.get("policy_engine", {})
+        policy_engine = PolicyEngine(
+            tool_policies=policy_cfg.get("tool_policies", []),
+            default_action=policy_cfg.get("default_action", safety_cfg.default_action),
+        )
+        cli_fence_cfg = rules_cfg.get("cli_fence", {})
+        rules = [
+            CLIFence(
+                allowed_commands=cli_fence_cfg.get("allowed_commands"),
+                approval_commands=cli_fence_cfg.get("approval_commands"),
+                denied_patterns=cli_fence_cfg.get("denied_patterns"),
+                denied_paths=cli_fence_cfg.get("denied_paths"),
+            ),
+            InputContentFilter(),
+            OutputContentFilter(),
+        ]
+        logger.info(f"Safety enabled: policy_engine + {len(rules)} rules loaded")
+        return policy_engine, rules
+
+    def _build_secret_manager(self) -> SecretManager:
+        secrets_cfg = self._config.secrets
+        return SecretManager(
+            env_prefix=secrets_cfg.env_prefix,
+            sensitive_fields=secrets_cfg.sensitive_fields or None,
+        )
+
+    def _build_tool_manager(self) -> ToolManager:
+        hr_cfg = self._config.hot_reload
+        tools_dir = (hr_cfg.watch_dir if hr_cfg and hr_cfg.enabled else "myagent/tools/tools_store")
+        runner_cfg = self._config.sandbox.model_dump()
+        manager = ToolManager(tools_dir=tools_dir, runner_config=runner_cfg)
+        manager._register_builtin_tools()
+        return manager
+
+    def _get_or_create_harness(
         self,
         user_id: str,
-        approval_handler=None,
         no_safety: bool = False,
-    ) -> "Agent":
-        """
-        获取或创建用户的 Agent 实例。
-        Agent 始终自建 HookManager（共享广播中心），外部通过 agent.hooks.on() 注册回调。
-        同一用户复用同一个 Agent，确保 HookManager 共享。
-        """
-        if user_id not in self._user_agents:
-            agent = self._factory.create_agent(
-                approval_handler=approval_handler,
-                no_safety=no_safety,
+    ) -> AgentHarness:
+        """获取或创建用户的 AgentHarness 实例。"""
+        if user_id not in self._user_harnesses:
+            router = self._build_router()
+            safety_parts = self._build_safety_components(no_safety=no_safety)
+            secret_manager = self._build_secret_manager()
+            tool_manager = self._build_tool_manager()
+            hooks = HookManager()
+
+            llm_client = LLMClient(router=router, hooks=hooks)
+            tool_interface = ToolInterface(
+                tool_manager=tool_manager,
+                policy_engine=safety_parts[0] if safety_parts else None,
+                rules=safety_parts[1] if safety_parts else None,
+                secret_manager=secret_manager,
             )
-            self._user_agents[user_id] = agent
-            logger.info(f"Agent created for user: {user_id}")
-        return self._user_agents[user_id]
+            harness = AgentHarness(
+                llm_client=llm_client,
+                tool_interface=tool_interface,
+                hooks=hooks,
+                max_iterations=self._config.max_iterations,
+            )
+            self._user_harnesses[user_id] = harness
+            logger.info(f"Harness created for user: {user_id}")
+        return self._user_harnesses[user_id]
 
     async def create_session(
         self,
@@ -872,23 +881,17 @@ class SessionManager:
         no_safety: bool = False,
         workspace_root: str | None = None,
     ) -> Session:
-        """
-        创建新会话。
-        Agent 始终自建 HookManager，不再接受外部 hooks 参数。
-        外部（如 ws_handler）通过 agent.hooks.on() 注册自己的回调。
-        """
-        agent = self._get_or_create_agent(user.user_id, approval_handler, no_safety=no_safety)
-        effective_prompt = system_prompt or self._factory.system_prompt
+        harness = self._get_or_create_harness(user.user_id, no_safety=no_safety)
+        effective_prompt = system_prompt or self._system_prompt
 
-        # 如果没有显式传入 workspace_root，从配置读取 root_dir 作为默认值
         if not workspace_root:
-            root_dir = self._factory.config.root_dir
+            root_dir = self._config.root_dir
             if root_dir:
                 workspace_root = str(Path(root_dir).expanduser())
 
         session = Session(
             session_id=session_id,
-            agent=agent,
+            harness=harness,
             user=user,
             state_store=self._state_store,
             system_prompt=effective_prompt,
@@ -899,19 +902,21 @@ class SessionManager:
         )
         self._sessions[session.id] = session
 
+        # 如果提供了外部审批 handler（如 CLI），覆盖默认的 VirtualApprovalHandler
+        if approval_handler:
+            session._approval_handler = approval_handler
+
         session.make_command_handler()
 
-        # ── 注入 PromptRenderer（SSPT 动态渲染） ──
+        # 注入 PromptRenderer（SSPT 动态渲染）
         try:
-            renderer = self._factory.create_prompt_renderer()
+            renderer = self.create_prompt_renderer()
             session.set_prompt_renderer(renderer)
         except Exception as e:
-            logger.warning(f"Failed to create PromptRenderer, using static prompt: {e}")
+            logger.warning(f"Failed to create PromptRenderer: {e}")
 
         if workspace_root and session.workspace:
-            # 使用统一的 update 入口扫描根目录（触发通知链 + 状态同步）
             await session.workspace.update("user", "set_root", {"root_path": workspace_root})
-            # 同步 workspace 快照到 meta，确保首次 _push_conversation_state 包含文件列表
             session.data.workspace.state = session.workspace.snapshot().to_dict()
 
         logger.info(f"Session created: {session.id} for user: {user.user_id}")
@@ -929,22 +934,16 @@ class SessionManager:
         context_window_size: int = 128000,
         tool_result_max_chars: int = 100000,
     ) -> Session:
-        """
-        从 StateStore 恢复会话。
-        复用用户的 Agent（含共享 HookManager），不再接受外部 hooks。
-        """
         if not self._state_store:
             raise RuntimeError("No StateStore configured")
 
-        agent = self._get_or_create_agent(user.user_id, approval_handler)
+        harness = self._get_or_create_harness(user.user_id)
 
-        # 加载会话状态
         agent_run_state, metadata_dict = await self._state_store.load_state(session_id)
 
-        # 创建 Session
         session = Session(
             session_id=session_id,
-            agent=agent,
+            harness=harness,
             user=user,
             state_store=self._state_store,
             max_tokens_budget=max_tokens_budget,
@@ -952,27 +951,19 @@ class SessionManager:
             tool_result_max_chars=tool_result_max_chars,
         )
 
-        # 从持久化的 dict 恢复 meta
         if isinstance(metadata_dict, dict):
             restored_data = SessionData.model_validate(metadata_dict)
-            # 保留从 Agent 采集的 available_models / tools（可能已变化）
             restored_data.model.available = session.data.model.available
             restored_data.tool.tools = session.data.tool.tools
             session.data = restored_data
-
-            # 回填 ContextManager 的 token 使用量
-            # [Pydantic 迁移] 直接属性访问，不再通过 get()
             session._context._last_usage_input_tokens = restored_data.context.token_usage.used
         else:
-            # 兼容旧格式
             session.agent_run_state = agent_run_state
 
-        # 恢复消息历史
         messages = await self._state_store.load_messages(session_id)
         if messages:
             session._context.restore_from(messages)
 
-        # 恢复 workspace 状态
         workspace_json = await self._state_store.load_workspace(session_id)
         if workspace_json:
             try:
@@ -982,9 +973,8 @@ class SessionManager:
                 session.workspace = WorkspaceManager()
                 session.workspace.restore_from(ws_state)
                 session.workspace.set_on_change(session._on_workspace_change)
-                logger.info(f"Workspace restored for session {session_id}: {ws_state.root_path}")
             except Exception as e:
-                logger.warning(f"Failed to restore workspace for session {session_id}: {e}")
+                logger.warning(f"Failed to restore workspace: {e}")
 
         session.make_command_handler()
 
@@ -999,24 +989,11 @@ class SessionManager:
         config_override: dict | None = None,
         approval_handler=None,
     ) -> Session:
-        """
-        会话接入统一入口。调用方只需提供 user + 可选 session_id，
-        内部按优先级自动决策：内存命中 > DB恢复 > 用户活跃态 > 新建。
-
-        Args:
-            user: 用户上下文
-            session_id: 客户端指定的会话ID（None 表示不指定）
-            config_override: 覆盖默认配置（context_window_size 等）
-            approval_handler: 审批 handler（Phase B 后将由 VirtualApprovalHandler 替代）
-        """
         cfg = config_override or {}
 
-        # 1. 命中内存
         if session_id and session_id in self._sessions:
-            logger.info(f"join_session: memory hit {session_id}")
             return self._sessions[session_id]
 
-        # 2. 命中持久化
         if session_id and self._state_store:
             try:
                 session = await self.restore_session(
@@ -1025,44 +1002,27 @@ class SessionManager:
                     approval_handler=approval_handler,
                     **cfg,
                 )
-                logger.info(f"join_session: restored {session_id}")
                 return session
             except Exception as e:
                 logger.warning(f"join_session: restore failed ({e}), fallback to create")
 
-        # 3. 无 session_id → 强制新建
-        # (移除查用户活跃态的逻辑，确保刷新页面时默认新建空白会话)
-        # if not session_id:
-        #     active = self.get_user_active_session(user.user_id)
-        #     if active:
-        #         logger.info(f"join_session: reuse active {active.id}")
-        #         return active
-
-        # 4. 降级新建
         session = await self.create_session(
             user=user,
             session_id=session_id,
             approval_handler=approval_handler,
             **cfg,
         )
-        logger.info(f"join_session: created new {session.id}")
         return session
 
     async def delete_session(self, session_id: str) -> None:
         session = self._sessions.pop(session_id, None)
         if session:
             session.unregister_hooks()
-        # 无论是否在内存中，都尝试从 DB 清理
         if self._state_store:
             await self._state_store.clear_session(session_id)
         logger.info(f"Session deleted: {session_id}")
 
     def get_user_active_session(self, user_id: str) -> Session | None:
-        """
-        获取用户的活跃会话（供 WS 连接复用）。
-        优先返回最近活跃的会话，用于多客户端共享同一 Session。
-        """
-        # 反向遍历，优先返回最近使用的
         for sid in reversed(list(self._sessions.keys())):
             session = self._sessions.get(sid)
             if session and session.user.user_id == user_id:
@@ -1072,8 +1032,6 @@ class SessionManager:
     async def list_sessions(self, user_id: str | None = None) -> list[dict]:
         if self._state_store:
             sessions = await self._state_store.list_all_sessions()
-            if user_id:
-                pass  # TODO: 按 user_id 过滤
             return sessions
         result = []
         for sid, session in self._sessions.items():
@@ -1092,3 +1050,18 @@ class SessionManager:
         if self._state_store:
             return await self._state_store.load_messages(session_id)
         return []
+
+    # ── SSPT: Prompt 模板 ──
+
+    def load_prompt_template(self):
+        from myagent.prompt.template import PromptTemplate
+        template_path = self._config.prompt_template_path
+        if Path(template_path).exists():
+            return PromptTemplate.from_yaml(template_path)
+        logger.warning(f"prompt_template.yaml not found at {template_path}, using default")
+        return PromptTemplate.default()
+
+    def create_prompt_renderer(self):
+        from myagent.prompt.renderer import PromptRenderer
+        template = self.load_prompt_template()
+        return PromptRenderer(template)

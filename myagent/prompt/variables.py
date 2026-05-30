@@ -113,7 +113,7 @@ def _get_platform_info() -> dict:
 def _get_safety_summary(session: "Session") -> str:
     """提取安全策略摘要。"""
     try:
-        guard = session._agent._safety_guard
+        guard = session._harness.safety_guard
         if guard is None:
             return ""
         return "已启用安全策略，部分敏感操作可能需要审批"

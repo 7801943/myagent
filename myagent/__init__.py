@@ -1,5 +1,5 @@
 """MyAgent：基于 ReAct 循环的 AI Agent 框架。"""
-from myagent.core.agent import Agent
+from myagent.core.harness import AgentHarness
 from myagent.core.hook import HookContext
 
-__all__ = ["Agent", "HookContext"]
+__all__ = ["AgentHarness", "HookContext"]

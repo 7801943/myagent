@@ -107,8 +107,7 @@ class WebSocketHandler:
         user = self._authenticate_user()
 
         # ── 2. 获取或创建 Session（通过 join_session 统一入口） ──
-        factory = self._session_manager.factory
-        cfg = {"context_window_size": factory.context_window_size}
+        cfg = {"context_window_size": self._session_manager.context_window_size}
         try:
             self._session = await self._session_manager.join_session(
                 user, config_override=cfg,
@@ -126,7 +125,7 @@ class WebSocketHandler:
         # 启动工具热加载（仅首个客户端连接时）
         if is_new:
             try:
-                await self._session.agent.start_hot_reload()
+                await self._session.harness.tool_interface._tool_manager.start()
             except Exception as e:
                 logger.warning(f"Hot reload start failed (non-fatal): {e}")
 
@@ -134,7 +133,7 @@ class WebSocketHandler:
         self._client_handle = self._session.attach_client(self._send_json)
 
         # ── 4. 发送连接确认（含历史消息，用于恢复会话） ──
-        context_window_size = factory.context_window_size
+        context_window_size = self._session_manager.context_window_size
         history = self._session.serialize_messages()
         await self._send_json({
             "type": "connected",
@@ -334,11 +333,10 @@ class WebSocketHandler:
 
         # 通过 SessionManager 创建新会话
         user = self._authenticate_user()
-        factory = self._session_manager.factory
         self._session = await self._session_manager.create_session(
             user=user,
             session_id=new_session_id,
-            context_window_size=factory.context_window_size,
+            context_window_size=self._session_manager.context_window_size,
         )
         self._session_id = new_session_id
 
@@ -360,8 +358,7 @@ class WebSocketHandler:
 
         try:
             user = self._authenticate_user()
-            factory = self._session_manager.factory
-            cfg = {"context_window_size": factory.context_window_size}
+            cfg = {"context_window_size": self._session_manager.context_window_size}
             new_session = await self._session_manager.join_session(
                 user, target_id, cfg,
             )

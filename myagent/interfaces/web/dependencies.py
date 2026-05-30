@@ -1,12 +1,11 @@
 """
 FastAPI 依赖注入：管理共享服务实例。
 
-Phase 1 变更：
-  - 导入路径 myagent.core.agent.AgentFactory
-  - AgentFactory 不再接受 state_store 参数
+Harness 重构：
+  - 移除 AgentFactory 引用
+  - SessionManager 直接构建所有组件（ProviderRouter / ToolManager / SafetyGuard）
 """
 from myagent.context.state import SQLiteStateStore
-from myagent.core.agent import AgentFactory
 from myagent.core.session import SessionManager
 from myagent.core.models import UserContext
 
@@ -14,16 +13,14 @@ from myagent.core.models import UserContext
 # ── 全局单例（由 app.py lifespan 管理生命周期）──
 
 _state_store: SQLiteStateStore | None = None
-_agent_factory: AgentFactory | None = None
 _session_manager: SessionManager | None = None
 
 
 def init_services(config_path: str = "config.yaml") -> None:
     """初始化全局服务实例（在 lifespan startup 时调用）。"""
-    global _state_store, _agent_factory, _session_manager
+    global _state_store, _session_manager
     _state_store = SQLiteStateStore()
-    _agent_factory = AgentFactory(config_path=config_path)
-    _session_manager = SessionManager(factory=_agent_factory, state_store=_state_store)
+    _session_manager = SessionManager(config_path=config_path, state_store=_state_store)
 
 
 async def startup() -> None:
@@ -31,7 +28,6 @@ async def startup() -> None:
     global _state_store
     if _state_store:
         await _state_store.initialize()
-    # Phase 2: 启动 Session TTL 清理
     if _session_manager:
         await _session_manager.start()
 
@@ -39,7 +35,6 @@ async def startup() -> None:
 async def shutdown() -> None:
     """清理资源。"""
     global _state_store
-    # Phase 2: 停止 Session TTL 清理
     if _session_manager:
         await _session_manager.stop()
     if _state_store:
@@ -52,13 +47,6 @@ def get_state_store() -> SQLiteStateStore:
     if _state_store is None:
         raise RuntimeError("StateStore not initialized. Call init_services() first.")
     return _state_store
-
-
-def get_agent_factory() -> AgentFactory:
-    """获取 AgentFactory 实例。"""
-    if _agent_factory is None:
-        raise RuntimeError("AgentFactory not initialized. Call init_services() first.")
-    return _agent_factory
 
 
 def get_session_manager() -> SessionManager:

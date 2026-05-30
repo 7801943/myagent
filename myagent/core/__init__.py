@@ -1,29 +1,31 @@
-"""MyAgent Core：ReAct 循环引擎 + Hook 体系 + 会话管理。
+"""MyAgent Core：ReAct 调度中枢 + Hook 体系 + 会话管理。
 
-Phase 1 重构：
-  - AgentLoop → Agent（loop 逻辑内联到 Agent）
-  - 新增 Session（一等公民会话容器）
-  - 新增 SessionManager（会话生命周期管理）
-  - 新增 AgentFactory（从 myagent/factory.py 移入）
-  - Turn 相关类型从 loop.py 移到 turns.py
+Harness 重构后：
+  - core/harness.py: AgentHarness（ReAct 调度中枢）
+  - core/llm.py: LLMClient（LLM 通信层，屏蔽流式/路由/参数格式化细节）
+  - core/tools.py: ToolInterface（工具执行适配层）
+  - core/models.py: 数据容器（StreamResult, SessionState 等）
+  - core/session.py: Session + SessionManager（会话管理，不再依赖 AgentFactory）
+  - core/hook.py: HookManager + HookContext
+  - core/workspace.py: WorkspaceManager
 
-Phase 2 增强：
-  - 新增 WorkspaceManager（工作空间文件管理）
-  - Session 集成 workspace / command_handler / TTL
-
-Phase 3 重构：
-  - 删除 permissions（权限管理将通过其他方式实现）
+已删除：
+  - agent.py（逻辑迁移至 harness.py + llm.py + tools.py）
+  - turns.py（Turn 抽象扁平化到 harness.py 中）
 """
-from myagent.core.agent import Agent
+from myagent.core.harness import AgentHarness
+from myagent.core.llm import LLMClient, StreamResult
+from myagent.core.tools import ToolInterface
 from myagent.core.hook import HookContext, HookManager, HookHandle
 from myagent.core.session import Session, SessionManager
 from myagent.core.models import UserContext, SessionData
-from myagent.core.agent import AgentFactory
-from myagent.core.turns import BaseTurn, TurnKind, TurnResult, StreamResult
 from myagent.core.workspace import WorkspaceManager
 
 __all__ = [
-    "Agent",
+    "AgentHarness",
+    "LLMClient",
+    "StreamResult",
+    "ToolInterface",
     "HookContext",
     "HookManager",
     "HookHandle",
@@ -31,11 +33,5 @@ __all__ = [
     "SessionManager",
     "SessionData",
     "UserContext",
-    "AgentFactory",
-    "BaseTurn",
-    "TurnKind",
-    "TurnResult",
-    "StreamResult",
-    # Phase 2
     "WorkspaceManager",
 ]
