@@ -4,7 +4,7 @@ LLM 通信层（LLMClient）
 职责：
 1. 封装与 Provider 的全部通信细节
 2. 流式聚合：将 AsyncIterator[StreamEvent] → StreamResult
-3. 实时 Hook 转发：每个 chunk 到达时直接 emit 到前端（不经过 Harness 中转）
+3. 实时 EventBus 转发：每个 chunk 到达时直接 publish 到前端（不经过 Harness 中转）
 4. 取消检查：每个 chunk 后检查 asyncio 取消信号
 5. 屏蔽 Provider 路由、参数格式化、多模态内容处理等细节
 
@@ -12,12 +12,20 @@ Harness 只需调用 LLMClient.generate(messages, tools, ctx) 即可获得聚合
 """
 import asyncio
 from dataclasses import dataclass
-from typing import Any
 
 from myagent.providers.base import StreamEvent
 from myagent.providers.router import ProviderRouter
 from myagent.context.message import ToolCall
-from myagent.core.hook import HookContext, HookManager
+from myagent.core.events import (
+    Error,
+    EventBus,
+    ExecutionContext,
+    StateChange,
+    StreamDelta,
+    StreamEnd,
+    StreamStart,
+    ThinkingDelta,
+)
 from myagent.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -50,18 +58,25 @@ class LLMClient:
     内部完成：
       1. 调用 ProviderRouter.stream() 获取流
       2. 逐 chunk 累积到内部缓冲区（text / reasoning / tool_calls）
-      3. 逐 chunk 实时 emit Hook 事件（stream / thinking_stream 等）
+      3. 逐 chunk 实时 publish 事件（StreamDelta / ThinkingDelta 等）
       4. 每个 chunk 后检查 asyncio 取消信号
       5. 流结束后构建 StreamResult 返回
 
     用法：
-        client = LLMClient(router, hooks)
+        client = LLMClient(router, events)
         result = await client.generate(messages, tools, ctx)
     """
 
-    def __init__(self, router: ProviderRouter, hooks: HookManager):
+    def __init__(
+        self,
+        router: ProviderRouter,
+        events: EventBus | None = None,
+        hooks: EventBus | None = None,
+    ):
         self._router = router
-        self._hooks = hooks
+        self._events = events or hooks
+        if self._events is None:
+            raise ValueError("LLMClient requires an EventBus")
 
         # ── 流式聚合缓冲区 ──
         self._text_parts: list[str] = []
@@ -82,23 +97,23 @@ class LLMClient:
         self,
         messages: list,
         tools: list | None,
-        ctx: HookContext,
+        ctx: ExecutionContext,
     ) -> StreamResult:
         """
         流式调用 LLM 并返回聚合结果。
-        Hook 事件在 chunk 到达时实时转发到前端。
+        EventBus 事件在 chunk 到达时实时转发到前端。
         每个 chunk 后检查取消信号，被取消时立即抛出 CancelledError。
         """
         self._reset()
 
         # 通知前端：Agent 正在思考
-        await self._hooks.emit("state_change", ctx, state="thinking")
+        await self._events.publish(ctx.event(StateChange, state="thinking"))
 
         logger.debug(f"LLMClient generate: session={ctx.session_id}, messages={len(messages)}, tools={bool(tools)}")
 
         # 如果有流式订阅者，发送 stream_start
-        if self._hooks.wants_streaming():
-            await self._hooks.emit("stream_start", ctx)
+        if self._events.wants_streaming():
+            await self._events.publish(ctx.event(StreamStart))
 
         content_started = False  # 标记是否已收到第一个文本内容
 
@@ -110,9 +125,9 @@ class LLMClient:
             # 首次收到文本时，切换状态为 generating
             if not content_started and event.type == "text_delta" and event.text:
                 content_started = True
-                await self._hooks.emit("state_change", ctx, state="generating")
+                await self._events.publish(ctx.event(StateChange, state="generating"))
 
-            # 实时分发事件给 Hook 订阅者（前端流式展示）
+            # 实时分发事件给 EventBus 订阅者（前端流式展示）
             await self._dispatch_event(event, ctx)
 
             # 每个 chunk 后检查取消信号
@@ -123,8 +138,8 @@ class LLMClient:
         result = self._build_result()
 
         # 流式结束事件
-        if self._hooks.wants_streaming():
-            await self._hooks.emit("stream_end", ctx, resuming=bool(result.tool_calls))
+        if self._events.wants_streaming():
+            await self._events.publish(ctx.event(StreamEnd, resuming=bool(result.tool_calls)))
 
         logger.debug(f"LLMClient generate done: stop_reason={result.stop_reason}, usage={result.usage}")
 
@@ -169,17 +184,17 @@ class LLMClient:
             if event.usage:
                 self._usage = event.usage
 
-    async def _dispatch_event(self, event: StreamEvent, ctx: HookContext) -> None:
-        """将关键事件通过 HookManager 广播给 UI 等订阅方。"""
+    async def _dispatch_event(self, event: StreamEvent, ctx: ExecutionContext) -> None:
+        """将关键事件通过 EventBus 广播给 UI 等订阅方。"""
         try:
             if event.type == "text_delta" and event.text:
-                await self._hooks.emit("stream", ctx, delta=event.text)
+                await self._events.publish(ctx.event(StreamDelta, delta=event.text))
             elif event.type == "thinking_delta" and event.text:
-                await self._hooks.emit("thinking_stream", ctx, delta=event.text)
+                await self._events.publish(ctx.event(ThinkingDelta, delta=event.text))
             elif event.type == "error" and event.error:
-                await self._hooks.emit("error", ctx, error=event.error)
+                await self._events.publish(ctx.event(Error, error=event.error))
         except Exception as e:
-            logger.warning(f"LLMClient hook dispatch error: {e}")
+            logger.warning(f"LLMClient event dispatch error: {e}")
 
     def _build_result(self) -> StreamResult:
         """从内部缓冲区构建最终的 StreamResult。"""

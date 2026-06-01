@@ -16,7 +16,7 @@ import yaml
 
 from myagent.core.session.session import Session
 from myagent.core.harness import AgentHarness
-from myagent.core.hook import HookManager
+from myagent.core.events import EventBus
 from myagent.core.models import UserContext, SessionData
 from myagent.providers.router import ProviderRouter
 from myagent.providers.openai_provider import OpenAIProvider
@@ -111,7 +111,7 @@ class SessionManager:
                 to_evict.append(sid)
         for sid in to_evict:
             session = self._sessions.pop(sid)
-            session.unregister_hooks()
+            session.unregister_events()
             if not session.has_user_message():
                 if self._state_store:
                     await self._state_store.clear_session(sid)
@@ -216,18 +216,18 @@ class SessionManager:
     ) -> AgentHarness:
         """
         创建独立的 per-session AgentHarness 实例。
-        每个 Session 独占一套 LLMClient + ToolInterface + HookManager。
+        每个 Session 独占一套 LLMClient + ToolInterface + EventBus。
         """
         router = self._build_router()
         safety_parts = self._build_safety_components(no_safety=no_safety)
         secret_manager = self._build_secret_manager()
         tool_manager = self._build_tool_manager()
-        hooks = HookManager()
+        events = EventBus()
 
         from myagent.core.llm import LLMClient
         from myagent.core.tools import ToolInterface
 
-        llm_client = LLMClient(router=router, hooks=hooks)
+        llm_client = LLMClient(router=router, events=events)
         tool_interface = ToolInterface(
             tool_manager=tool_manager,
             policy_engine=safety_parts[0] if safety_parts else None,
@@ -237,7 +237,7 @@ class SessionManager:
         harness = AgentHarness(
             llm_client=llm_client,
             tool_interface=tool_interface,
-            hooks=hooks,
+            events=events,
             max_iterations=self._config.max_iterations,
         )
         logger.info("Per-session Harness created")
@@ -404,7 +404,7 @@ class SessionManager:
     async def delete_session(self, session_id: str) -> None:
         session = self._sessions.pop(session_id, None)
         if session:
-            session.unregister_hooks()
+            session.unregister_events()
         if self._state_store:
             await self._state_store.clear_session(session_id)
         logger.info(f"Session deleted: {session_id}")

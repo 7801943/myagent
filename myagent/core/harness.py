@@ -8,12 +8,12 @@ Agent 核心调度器 (AgentHarness) — 无状态纯执行引擎
   - PromptRenderer 由 Session 持有和调用，Harness 不感知
 
 职责：
-1. 持有 LLMClient + ToolInterface + HookManager
+1. 持有 LLMClient + ToolInterface + EventBus
 2. 驱动 ReAct 循环：系统指令检查 → LLM 推理 → 工具执行 → 循环
-3. 内部组装 HookContext（Session 不感知）
+3. 内部组装 ExecutionContext（Session 不感知）
 4. 内化 finalize_content（StreamResult.text 返回已 finalized 的文本）
 5. 协作式取消检查
-6. 关键节点派发 Event（通过 HookManager）
+6. 关键节点派发 Event（通过 EventBus）
 
 审批策略：
   - approval_handler 由 Session 在 run() 调用时通过参数传入（Web 用 ClientBridge，CLI 用自定义函数）
@@ -23,8 +23,17 @@ import asyncio
 from typing import Callable, Awaitable, TYPE_CHECKING
 
 from myagent.core.llm import LLMClient, StreamResult
-from myagent.core.tools import ToolInterface, ExecutedTool
-from myagent.core.hook import HookContext, HookManager
+from myagent.core.tools import ToolInterface
+from myagent.core.events import (
+    ApprovalNeeded,
+    EventBus,
+    ExecutionContext,
+    SafetyBlocked,
+    StateChange,
+    ToolEnd,
+    ToolError,
+    ToolStart,
+)
 from myagent.core.commander import check_system_commands
 from myagent.context.manager import ContextManager
 from myagent.context.message import ToolCall, ToolResult as MsgToolResult, ContentBlock
@@ -43,12 +52,12 @@ class AgentHarness:
     职责定位为 ReAct 循环调度：
       - 管理 LLM ↔ tools 之间的交互
       - 日志、取消管理
-      - Hook 事件分发
+      - EventBus 事件分发
 
     工具执行和审批逻辑由 ToolInterface.execute_with_approval() 负责。
 
     用法：
-        harness = AgentHarness(llm_client=llm, tool_interface=tools, hooks=hooks)
+        harness = AgentHarness(llm_client=llm, tool_interface=tools, events=events)
         result = await harness.run(context, session_id, session_data, command_handler)
     """
 
@@ -57,17 +66,25 @@ class AgentHarness:
         *,
         llm_client: LLMClient,
         tool_interface: ToolInterface,
-        hooks: HookManager,
+        events: EventBus | None = None,
+        hooks: EventBus | None = None,
         max_iterations: int = 100,
     ):
         self._llm = llm_client
         self._tools = tool_interface
-        self._hooks = hooks
+        self._events = events or hooks
+        if self._events is None:
+            raise ValueError("AgentHarness requires an EventBus")
         self._max_iterations = max_iterations
 
     @property
-    def hooks(self) -> HookManager:
-        return self._hooks
+    def events(self) -> EventBus:
+        return self._events
+
+    @property
+    def hooks(self) -> EventBus:
+        """Backward-compatible alias for EventBus."""
+        return self._events
 
     @property
     def tool_interface(self) -> ToolInterface:
@@ -101,7 +118,7 @@ class AgentHarness:
         """
         驱动 ReAct 循环：系统指令检查 → LLM 推理 → 工具执行 → 循环。
 
-        Harness 内部组装 HookContext，Session 不需要感知 HookContext 的存在。
+        Harness 内部组装 ExecutionContext，Session 不需要感知 ExecutionContext 的存在。
 
         注意：
           - Prompt 渲染 + 用户消息写入已在 Session.chat() 中完成并写入 context
@@ -112,8 +129,8 @@ class AgentHarness:
         Returns:
             StreamResult: 最终的 LLM 聚合结果（text 已 finalized + stop_reason）
         """
-        # Harness 内部组装执行上下文（Session 不感知 HookContext）
-        ctx = HookContext(
+        # Harness 内部组装执行上下文（Session 不感知 ExecutionContext）
+        ctx = ExecutionContext(
             session_id=session_id,
             session_meta=session_data,
             system_command_handler=command_handler,
@@ -128,9 +145,9 @@ class AgentHarness:
                 await self._check_cancelled()
 
                 # 步骤 A：系统指令检查（/model, /new, /clear 等）
-                await check_system_commands(context, ctx, self._hooks)
+                await check_system_commands(context, ctx, self._events)
 
-                # 步骤 B：LLM 推理（LLMClient 内部完成流式聚合 + Hook 转发）
+                # 步骤 B：LLM 推理（LLMClient 内部完成流式聚合 + EventBus 转发）
                 # 注意：直接从 ToolInterface 获取实时工具 schema 列表（含热加载发现的新工具）
                 tools = self._tools.list_schemas()
                 messages = context.get_messages()
@@ -146,9 +163,9 @@ class AgentHarness:
 
                 # 无工具调用 → 循环结束
                 if not llm_result.tool_calls:
-                    await self._hooks.emit("state_change", ctx, state="idle")
-                    # 结束前内化 finalize_content 钩子处理
-                    final_text = self._hooks.finalize_content(ctx, llm_result.text)
+                    await self._events.publish(ctx.event(StateChange, state="idle"))
+                    # 迁移期保留 finalize_content 兼容；新逻辑应走直接调用。
+                    final_text = self._events.finalize_content(ctx, llm_result.text)
                     return StreamResult(text=final_text or "", stop_reason=llm_result.stop_reason)
 
                 # 步骤 C：工具执行（含安全分拣 + 人工审批）
@@ -158,14 +175,14 @@ class AgentHarness:
             logger.warning(f"Harness reached max iterations ({self._max_iterations})")
             msg = "达到最大迭代次数限制，终止执行。"
             await context.add_assistant_message(content=msg, tool_calls=None)
-            final_text = self._hooks.finalize_content(ctx, msg)
+            final_text = self._events.finalize_content(ctx, msg)
             return StreamResult(text=final_text or "", stop_reason="max_iterations")
 
         except asyncio.CancelledError:
             cancel_msg = "[系统] 操作已取消"
             logger.info(f"Harness cancelled at iteration {getattr(ctx, 'iteration', 0)}")
             await context.add_assistant_message(content=cancel_msg, tool_calls=None)
-            final_text = self._hooks.finalize_content(ctx, cancel_msg)
+            final_text = self._events.finalize_content(ctx, cancel_msg)
             return StreamResult(text=final_text or "", stop_reason="cancelled")
 
     # ── 取消检查 ──
@@ -181,27 +198,32 @@ class AgentHarness:
     async def _execute_tools(
         self,
         context: ContextManager,
-        ctx: HookContext,
+        ctx: ExecutionContext,
         tool_calls: list[ToolCall],
         approval_handler: Callable[[list], Awaitable[list[bool]]] | None = None,
     ) -> None:
         """
-        工具执行入口：发射 tool_start → 委托 ToolInterface 完成全部执行+审批 → 写入结果+发射 hook。
+        工具执行入口：发射 ToolStart → 委托 ToolInterface 完成全部执行+审批 → 写入结果+发射事件。
 
         工具的实际执行、安全分拣、人工审批由 ToolInterface.execute_with_approval() 统一处理，
-        harness 仅负责 hook 事件管理和结果写入 context。
+        harness 仅负责事件分发和结果写入 context。
         """
-        await self._hooks.emit("state_change", ctx, state="waiting_tool")
+        await self._events.publish(ctx.event(StateChange, state="waiting_tool"))
 
         # 为每个工具发射 tool_start 事件
         for tc in tool_calls:
-            await self._hooks.emit("tool_start", ctx, tool_name=tc.name, args=tc.arguments, call_id=tc.id)
+            await self._events.publish(ctx.event(
+                ToolStart,
+                tool_name=tc.name,
+                args=tc.arguments,
+                call_id=tc.id,
+            ))
             logger.debug(f"Tool start: {tc.name} (call_id={tc.id})")
 
-        # 如果有待审批工具，发射 approval_needed hook 事件
+        # 如果有待审批工具，发射 ApprovalNeeded 事件
         # （注意：实际的审批判断在 ToolInterface 内部完成，这里仅做事件通知）
         if approval_handler:
-            await self._hooks.emit("approval_needed", ctx, tool_calls=tool_calls)
+            await self._events.publish(ctx.event(ApprovalNeeded, tool_calls=tool_calls))
 
         # 委托 ToolInterface 完成全部执行管线（含安全检查 + 人工审批 + 批准后重执行）
         executed_tools = await self._tools.execute_with_approval(
@@ -209,7 +231,7 @@ class AgentHarness:
             approval_handler=approval_handler,
         )
 
-        # 将执行结果写入 context 并发射对应的 hook 事件
+        # 将执行结果写入 context 并发射对应事件
         for et in executed_tools:
             tc, tr = et.tool_call, et.result
             lat = tr.metadata.get("latency_ms", 0)
@@ -228,17 +250,35 @@ class AgentHarness:
                 tool_call_id=tc.id, tool_name=tc.name, content=content, metadata={"latency_ms": lat}
             ))
 
-            # 2. 发射 hook 事件与日志记录
+            # 2. 发射事件与日志记录
             if et.status == "rejected" or tr.is_error:
                 if tr.is_error and "denied_by" in tr.metadata:
-                    await self._hooks.emit("safety_blocked", ctx, rule=tr.metadata["denied_by"], reason=str(tr.content), action="deny", call_id=tc.id, tool_name=tc.name)
+                    await self._events.publish(ctx.event(
+                        SafetyBlocked,
+                        rule=tr.metadata["denied_by"],
+                        reason=str(tr.content),
+                        action="deny",
+                        call_id=tc.id,
+                        tool_name=tc.name,
+                    ))
                     logger.info(f"Safety blocked: {tc.name} by {tr.metadata['denied_by']}")
-                await self._hooks.emit("tool_error", ctx, tool_name=tc.name, error=Exception(tr.content), call_id=tc.id)
+                await self._events.publish(ctx.event(
+                    ToolError,
+                    tool_name=tc.name,
+                    error=Exception(tr.content),
+                    call_id=tc.id,
+                ))
                 
                 if et.status == "rejected":
                     logger.info(f"Tool rejected: {tc.name} (call_id={tc.id})")
                 else:
                     logger.debug(f"Tool error: {tc.name} (call_id={tc.id}): {tr.content}")
             else:
-                await self._hooks.emit("tool_end", ctx, tool_name=tc.name, result=tr, call_id=tc.id, latency_ms=lat)
+                await self._events.publish(ctx.event(
+                    ToolEnd,
+                    tool_name=tc.name,
+                    result=tr,
+                    call_id=tc.id,
+                    latency_ms=lat,
+                ))
                 logger.debug(f"Tool end: {tc.name} (call_id={tc.id}), latency={lat}ms")

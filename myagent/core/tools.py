@@ -21,7 +21,7 @@ from typing import Any, Callable, Awaitable
 
 from myagent.tools.manager import ToolManager
 from myagent.tools.api import ToolResult
-from myagent.safety.base import BaseRule, SafetyContext, GuardResult, PolicyDecision
+from myagent.safety.base import BaseRule, SafetyContext, GuardResult
 from myagent.safety.policy import PolicyEngine
 from myagent.utils.logging import get_logger
 
@@ -219,7 +219,7 @@ class ToolInterface:
         工具执行全流程编排：批量执行 → 安全分拣 → 人工审批 → 批准后重执行。
         
         Harness 只需调用此方法即可获得所有工具的最终执行结果（含审批状态），
-        然后负责写入 context 和发射 hook 事件。
+        然后负责写入 context 和发射事件。
 
         Args:
             tool_calls: 待执行的工具调用列表（list[ToolCall]）

@@ -11,11 +11,18 @@ from __future__ import annotations
 
 import asyncio
 import click
-import sys
 from pathlib import Path
 
 from myagent.core.session import Session, SessionManager
 from myagent.core.models import UserContext
+from myagent.core.events import (
+    Error,
+    StreamDelta,
+    ThinkingDelta,
+    TimeoutWarning,
+    ToolEnd,
+    ToolStart,
+)
 from myagent.context.message import ToolCall
 from myagent.interfaces.cli.ui import CliUI, print_warning
 from myagent.utils.logging import get_logger, setup_logging
@@ -144,8 +151,8 @@ async def _chat(
     # 准备 UI
     ui = CliUI(show_tools=show_tools)
 
-    # CLI 回调列表（注册后保存 HookHandle，用于 finally 清理）
-    cli_hook_handles = []
+    # CLI 回调列表（注册后保存 EventHandle，用于 finally 清理）
+    cli_event_handles = []
 
     # 构建 CLI 审批 handler
     hitl_cfg = session_manager.config.hitl
@@ -179,33 +186,33 @@ async def _chat(
         workspace_root=root_dir,
     )
 
-    # 将 CLI hooks 注册到 session 的 harness HookManager 上（全局 topic=None）
+    # 将 CLI 事件注册到 session 的 EventBus 上（全局 topic=None）
     harness = session.harness
 
-    def _on_stream(ctx, delta):
-        ui.print_stream_delta(delta)
+    def _on_stream(event: StreamDelta):
+        ui.print_stream_delta(event.delta)
 
-    async def _on_thinking_stream(ctx, delta):
-        ui.print_thinking_delta(delta)
+    async def _on_thinking_stream(event: ThinkingDelta):
+        ui.print_thinking_delta(event.delta)
 
-    def _on_tool_start(ctx, tool_name, args, call_id):
-        ui.print_tool_call(tool_name, args, call_id)
+    def _on_tool_start(event: ToolStart):
+        ui.print_tool_call(event.tool_name, event.args, event.call_id)
 
-    def _on_tool_end(ctx, tool_name, result, call_id, latency_ms):
-        ui.print_tool_result(tool_name, result.content, latency_ms)
+    def _on_tool_end(event: ToolEnd):
+        ui.print_tool_result(event.tool_name, event.result.content, event.latency_ms)
 
-    def _on_error(ctx, error):
-        ui.print_error(str(error))
+    def _on_error(event: Error):
+        ui.print_error(str(event.error))
 
-    def _on_timeout_warning(ctx, **kw):
-        print_warning(kw.get("message", "操作超时"))
+    def _on_timeout_warning(event: TimeoutWarning):
+        print_warning(event.message or "操作超时")
 
-    cli_hook_handles.append(harness.hooks.on("stream", _on_stream))
-    cli_hook_handles.append(harness.hooks.on("thinking_stream", _on_thinking_stream))
-    cli_hook_handles.append(harness.hooks.on("tool_start", _on_tool_start))
-    cli_hook_handles.append(harness.hooks.on("tool_end", _on_tool_end))
-    cli_hook_handles.append(harness.hooks.on("error", _on_error))
-    cli_hook_handles.append(harness.hooks.on("timeout_warning", _on_timeout_warning))
+    cli_event_handles.append(harness.events.on(StreamDelta, _on_stream))
+    cli_event_handles.append(harness.events.on(ThinkingDelta, _on_thinking_stream))
+    cli_event_handles.append(harness.events.on(ToolStart, _on_tool_start))
+    cli_event_handles.append(harness.events.on(ToolEnd, _on_tool_end))
+    cli_event_handles.append(harness.events.on(Error, _on_error))
+    cli_event_handles.append(harness.events.on(TimeoutWarning, _on_timeout_warning))
 
     # 工具热加载已在 SessionManager.create_session() 中通过
     # harness.tool_interface.start() 启动，无需重复调用
@@ -243,6 +250,8 @@ async def _chat(
         else:
             await interactive_loop(session)
     finally:
+        for handle in cli_event_handles:
+            handle.unregister()
         # 清理：停止 ToolManager（含热加载 + Proxy）
         try:
             await harness.tool_interface.stop()

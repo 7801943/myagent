@@ -2,18 +2,31 @@
 ClientBridge: WS 多客户端管理 + 审批桥接。
 
 职责：
-1. 管理多个 WS 客户端的 Hook 回调注册 / 取消
+1. 管理多个 WS 客户端的 EventBus 回调注册 / 取消
 2. 事件广播到所有已连接的 WS 客户端
 3. 人工审批桥接（Future 管理 + 广播审批请求到 WS → 等待客户端响应）
 
 从 Session 提取，使 Session 退化为纯状态容器 + 转发层。
 """
 import asyncio
-from typing import Any
 from uuid import uuid4
 
 from myagent.context.message import ToolCall
-from myagent.core.hook import HookHandle, HookManager
+from myagent.core.events import (
+    Error,
+    EventBus,
+    EventHandle,
+    SafetyBlocked,
+    StateChange,
+    StreamDelta,
+    StreamEnd,
+    StreamStart,
+    ThinkingDelta,
+    TimeoutWarning,
+    ToolEnd,
+    ToolError,
+    ToolStart,
+)
 from myagent.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -24,16 +37,16 @@ logger = get_logger(__name__)
 class ClientHandle:
     """代表一个客户端的连接句柄，断开时调用 detach() 清理。"""
 
-    def __init__(self, hook_handles: list[HookHandle], bridge: "ClientBridge", sender):
-        self._hook_handles = hook_handles
+    def __init__(self, event_handles: list[EventHandle], bridge: "ClientBridge", sender):
+        self._event_handles = event_handles
         self._bridge = bridge
         self._sender = sender
 
     def detach(self) -> None:
         """断开连接时清理所有注册。"""
-        for h in self._hook_handles:
+        for h in self._event_handles:
             h.unregister()
-        self._hook_handles.clear()
+        self._event_handles.clear()
         self._bridge.remove_ws_notify(self._sender)
 
 
@@ -43,14 +56,14 @@ class ClientBridge:
     """
     WS 多客户端管理器。
 
-    持有 HookManager 引用 + session_id，负责：
-      - attach_client: 注册 WS 事件回调到 HookManager
+    持有 EventBus 引用 + session_id，负责：
+      - attach_client: 注册 WS 事件回调到 EventBus
       - notify_clients: 广播自定义消息到所有 WS 客户端
       - approval_handler / resolve_approval: 人工审批 Future 桥接
     """
 
-    def __init__(self, hooks: HookManager, session_id: str):
-        self._hooks = hooks
+    def __init__(self, events: EventBus, session_id: str):
+        self._events = events
         self._session_id = session_id
         self._ws_notifiers: list = []
         self._pending_approvals: dict[str, _PendingApproval] = {}
@@ -82,61 +95,61 @@ class ClientBridge:
     def attach_client(self, sender) -> ClientHandle:
         """
         将一个客户端（WebSocket）接入。
-        所有回调通过 topic=session_id 注册到 HookManager。
+        所有回调通过 topic=session_id 注册到 EventBus。
         """
-        hooks = self._hooks
+        events = self._events
         sid = self._session_id
-        handles: list[HookHandle] = []
+        handles: list[EventHandle] = []
 
-        async def _on_stream(ctx, delta):
-            await sender({"type": "text_delta", "text": delta})
+        async def _on_stream(event: StreamDelta):
+            await sender({"type": "text_delta", "text": event.delta})
 
-        async def _on_thinking_stream(ctx, delta):
-            await sender({"type": "thinking_delta", "text": delta})
+        async def _on_thinking_stream(event: ThinkingDelta):
+            await sender({"type": "thinking_delta", "text": event.delta})
 
-        async def _on_stream_start(ctx):
+        async def _on_stream_start(event: StreamStart):
             await sender({"type": "stream_start"})
 
-        async def _on_stream_end(ctx, resuming=False):
-            await sender({"type": "stream_end", "resuming": resuming})
+        async def _on_stream_end(event: StreamEnd):
+            await sender({"type": "stream_end", "resuming": event.resuming})
 
-        async def _on_tool_start(ctx, tool_name, args, call_id):
-            await sender({"type": "tool_start", "tool_name": tool_name,
-                          "args": args, "call_id": call_id})
+        async def _on_tool_start(event: ToolStart):
+            await sender({"type": "tool_start", "tool_name": event.tool_name,
+                          "args": event.args, "call_id": event.call_id})
 
-        async def _on_tool_end(ctx, tool_name, result, call_id, latency_ms):
-            await sender({"type": "tool_end", "tool_name": tool_name,
-                          "result": result.content, "latency_ms": latency_ms,
-                          "call_id": call_id})
+        async def _on_tool_end(event: ToolEnd):
+            await sender({"type": "tool_end", "tool_name": event.tool_name,
+                          "result": event.result.content, "latency_ms": event.latency_ms,
+                          "call_id": event.call_id})
 
-        async def _on_tool_error(ctx, tool_name, error, call_id):
-            await sender({"type": "tool_error", "tool_name": tool_name,
-                          "error": str(error), "call_id": call_id})
+        async def _on_tool_error(event: ToolError):
+            await sender({"type": "tool_error", "tool_name": event.tool_name,
+                          "error": str(event.error), "call_id": event.call_id})
 
-        async def _on_state_change(ctx, state):
-            await sender({"type": "state_change", "state": state})
+        async def _on_state_change(event: StateChange):
+            await sender({"type": "state_change", "state": event.state})
 
-        async def _on_error(ctx, error):
-            await sender({"type": "error", "message": str(error)})
+        async def _on_error(event: Error):
+            await sender({"type": "error", "message": str(event.error)})
 
-        async def _on_safety_blocked(ctx, rule, reason, action, call_id="", tool_name=""):
-            await sender({"type": "safety_blocked", "rule": rule,
-                          "reason": reason, "action": action})
+        async def _on_safety_blocked(event: SafetyBlocked):
+            await sender({"type": "safety_blocked", "rule": event.rule,
+                          "reason": event.reason, "action": event.action})
 
-        async def _on_timeout_warning(ctx, **kw):
-            await sender({"type": "timeout_warning", **kw})
+        async def _on_timeout_warning(event: TimeoutWarning):
+            await sender({"type": "timeout_warning", **event.payload()})
 
-        handles.append(hooks.on("stream", _on_stream, topic=sid))
-        handles.append(hooks.on("thinking_stream", _on_thinking_stream, topic=sid))
-        handles.append(hooks.on("stream_start", _on_stream_start, topic=sid))
-        handles.append(hooks.on("stream_end", _on_stream_end, topic=sid))
-        handles.append(hooks.on("tool_start", _on_tool_start, topic=sid))
-        handles.append(hooks.on("tool_end", _on_tool_end, topic=sid))
-        handles.append(hooks.on("tool_error", _on_tool_error, topic=sid))
-        handles.append(hooks.on("state_change", _on_state_change, topic=sid))
-        handles.append(hooks.on("error", _on_error, topic=sid))
-        handles.append(hooks.on("safety_blocked", _on_safety_blocked, topic=sid))
-        handles.append(hooks.on("timeout_warning", _on_timeout_warning, topic=sid))
+        handles.append(events.on(StreamDelta, _on_stream, topic=sid))
+        handles.append(events.on(ThinkingDelta, _on_thinking_stream, topic=sid))
+        handles.append(events.on(StreamStart, _on_stream_start, topic=sid))
+        handles.append(events.on(StreamEnd, _on_stream_end, topic=sid))
+        handles.append(events.on(ToolStart, _on_tool_start, topic=sid))
+        handles.append(events.on(ToolEnd, _on_tool_end, topic=sid))
+        handles.append(events.on(ToolError, _on_tool_error, topic=sid))
+        handles.append(events.on(StateChange, _on_state_change, topic=sid))
+        handles.append(events.on(Error, _on_error, topic=sid))
+        handles.append(events.on(SafetyBlocked, _on_safety_blocked, topic=sid))
+        handles.append(events.on(TimeoutWarning, _on_timeout_warning, topic=sid))
 
         async def _ws_notify_wrapper(msg_type: str, data: dict) -> None:
             await sender({"type": msg_type, **data})

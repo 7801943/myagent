@@ -2,14 +2,14 @@
 WebSocket Handler：处理 WebSocket 连接的完整生命周期。
 
 ═══════════════════════════════════════════════════════════════
-  架构（V2 共享 HookManager + 多客户端共享 Session）
+  架构（V2 共享 EventBus + 多客户端共享 Session）
 ═══════════════════════════════════════════════════════════════
 
   三层职责划分：
 
   ┌─ ws_handler.py ─ "入口层 / 传输层" ─────────────────────┐
   │  1. 初始化 Session（获取现有的 or 创建新的）              │
-  │  2. 将本连接的 WS 回调注册到 Agent 共享 HookManager       │
+  │  2. 将本连接的 WS 回调注册到 Session 共享 EventBus        │
   │  3. 断开时 unregister 本连接的回调                       │
   │  4. 路由前端消息到 Session 方法                          │
   └────────────────────────────────────────────────────────┘
@@ -22,14 +22,14 @@ WebSocket Handler：处理 WebSocket 连接的完整生命周期。
 
   ┌─ agent.py ─ "引擎层" ────────────────────────────────┐
   │  1. LLM 调用（run / _create_turn）                    │
-  │  2. HookManager 广播（emit 事件 → 所有 WS 连接）       │
+  │  2. EventBus 广播（publish 事件 → 所有 WS 连接）       │
   │  3. ToolManager 管理（注册/热加载）                    │
   │  4. SafetyGuard 安全检查                               │
   └────────────────────────────────────────────────────────┘
 
   数据流：
-    Agent.emit("stream", delta="你好")
-      → HookManager 广播 → [_on_stream_A, _on_stream_B, ...]
+    EventBus.publish(StreamDelta(delta="你好"))
+      → EventBus 广播 → [_on_stream_A, _on_stream_B, ...]
       → 所有 WS 连接都收到推送
 
   多客户端共享：
@@ -62,10 +62,10 @@ class WebSocketHandler:
 
     ┌────────────────────────────────────────────────────────┐
     │  V2 架构核心：                                          │
-    │  - 每个 WS 连接不再自建 HookManager                     │
-    │  - 回调注册到 Session.agent.hooks（共享广播中心）        │
+    │  - 每个 WS 连接不再自建 EventBus                        │
+    │  - 回调注册到 Session.harness.events（共享广播中心）     │
     │  - Agent emit 时所有连接都收到推送                       │
-    │  - 断开时通过 HookHandle.unregister() 取消注册          │
+    │  - 断开时通过 EventHandle.unregister() 取消注册         │
     │  - 多客户端共享同一个 Session + Agent                    │
     └────────────────────────────────────────────────────────┘
     """
@@ -97,7 +97,7 @@ class WebSocketHandler:
         流程：
         1. 接受连接，认证用户
         2. 获取已有 Session（多客户端共享）或创建新 Session
-        3. 注册本连接的 WS 回调到 Agent 共享 HookManager
+        3. 注册本连接的 WS 回调到 Session 共享 EventBus
         4. 推送初始状态
         5. 进入消息循环
         6. 断开时清理（不删除 Session，其他连接可能还在使用）

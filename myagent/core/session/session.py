@@ -10,12 +10,12 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Callable, Awaitable
+from typing import TYPE_CHECKING, Callable, Awaitable
 from uuid import uuid4
 
 from myagent.context.manager import ContextManager
 from myagent.core.session.client_bridge import ClientBridge, ClientHandle
-from myagent.core.hook import HookHandle
+from myagent.core.events import EventHandle, StateChange, ToolEnd
 from myagent.core.harness import AgentHarness
 from myagent.core.session.serializer import serialize_messages
 from myagent.core.models import UserContext, SessionData, SessionState, AgentRunState
@@ -87,7 +87,7 @@ class Session:
         self._cancel_detail: str = ""
 
         # WS 多客户端管理 + 审批桥接（委托给 ClientBridge）
-        self._bridge = ClientBridge(harness.hooks, self.id)
+        self._bridge = ClientBridge(harness.events, self.id)
 
         # 审批回调：默认使用 ClientBridge（Web 场景），CLI 可覆盖
         self._approval_handler: Callable[[list], Awaitable[list[bool]]] | None = (
@@ -110,13 +110,13 @@ class Session:
         # ── 从 Harness 采集初始状态 ──
         self._init_meta_from_harness()
 
-        # 注册状态同步 hook
-        self._hook_handles: list[HookHandle] = []
-        self._hook_handles.append(
-            harness.hooks.on("state_change", self._on_state_change, topic=self.id)
+        # 注册状态同步事件
+        self._event_handles: list[EventHandle] = []
+        self._event_handles.append(
+            harness.events.on(StateChange, self._on_state_change, topic=self.id)
         )
-        self._hook_handles.append(
-            harness.hooks.on("tool_end", self._on_tool_end, topic=self.id)
+        self._event_handles.append(
+            harness.events.on(ToolEnd, self._on_tool_end, topic=self.id)
         )
 
         # ── 内置并发锁 ──
@@ -125,13 +125,17 @@ class Session:
         # 系统指令处理器
         self._system_command_handler = None
 
-    # ── Hook 取消注册 ──
+    # ── 事件取消注册 ──
+
+    def unregister_events(self) -> None:
+        """取消注册所有事件回调（Session 销毁时调用）。"""
+        for handle in self._event_handles:
+            handle.unregister()
+        self._event_handles.clear()
 
     def unregister_hooks(self) -> None:
-        """取消注册所有 hook 回调（Session 销毁时调用）。"""
-        for handle in self._hook_handles:
-            handle.unregister()
-        self._hook_handles.clear()
+        """Backward-compatible alias for unregister_events()."""
+        self.unregister_events()
 
     # ── 空会话判定 ──
 
@@ -252,14 +256,16 @@ class Session:
                 })
         self.data.tool.tools = tools
 
-    # ── Hook 回调 ──
+    # ── 事件回调 ──
 
-    async def _on_state_change(self, ctx, state: str) -> None:
-        self.data.context.agent_run_state = state
+    async def _on_state_change(self, event: StateChange) -> None:
+        self.data.context.agent_run_state = event.state
 
-    async def _on_tool_end(self, ctx, tool_name: str, result: Any, call_id: str, latency_ms: float) -> None:
+    async def _on_tool_end(self, event: ToolEnd) -> None:
         if not self.workspace:
             return
+        tool_name = event.tool_name
+        result = event.result
         file_tools = {"file_write", "file_read", "cli_execute"}
         if tool_name in file_tools:
             await self.workspace.update("agent", "files_changed", {})

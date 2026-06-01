@@ -1,4 +1,4 @@
-"""MyAgent Core：ReAct 调度中枢 + Hook 体系 + 会话管理。
+"""MyAgent Core：ReAct 调度中枢 + EventBus 体系 + 会话管理。
 
 重构后文件结构：
   - core/harness.py: AgentHarness（无状态执行引擎，per-session）
@@ -10,25 +10,31 @@
       manager.py: SessionManager（组件构建 + TTL）
       client_bridge.py: ClientBridge（WS 多客户端管理 + 审批桥接）
       serializer.py: 消息序列化纯函数
-  - core/hook.py: HookManager + HookContext
-  - core/events.py: 类型安全事件定义
+  - core/events.py: 类型安全事件定义 + EventBus
   - core/workspace.py: WorkspaceManager
 """
 from myagent.core.harness import AgentHarness
 from myagent.core.llm import LLMClient, StreamResult
 from myagent.core.tools import ToolInterface
-from myagent.core.hook import HookContext, HookManager, HookHandle
+from myagent.core.events import EventBus, EventHandle, ExecutionContext
 from myagent.core.session import Session, SessionManager
 from myagent.core.session.client_bridge import ClientBridge, ClientHandle
 from myagent.core.models import UserContext, SessionData
 from myagent.core.workspace import WorkspaceManager
 from myagent.core import events
 
+HookContext = ExecutionContext
+HookManager = EventBus
+HookHandle = EventHandle
+
 __all__ = [
     "AgentHarness",
     "LLMClient",
     "StreamResult",
     "ToolInterface",
+    "ExecutionContext",
+    "EventBus",
+    "EventHandle",
     "HookContext",
     "HookManager",
     "HookHandle",
