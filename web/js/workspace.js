@@ -79,7 +79,7 @@ function applyLayoutMode(mode) {
         default:
             layoutContainer.classList.add("layout-split");
             panel.classList.add("open");
-            panel.style.width = "60%";
+            panel.style.width = "50%";
             break;
     }
 }

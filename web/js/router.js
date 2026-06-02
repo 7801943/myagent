@@ -138,6 +138,7 @@ function handleMessage(data) {
                 updateContextProgress(data.context_usage);
             }
             finalizeAssistantMessage(data.stop_reason || "completed");
+            requestSessionList();
             break;
 
         case "error":
