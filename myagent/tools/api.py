@@ -8,6 +8,7 @@ MyAgent 工具 API 层 V3。
 - @tool: 工具声明装饰器
 - generate_schema: 函数自省 → JSON Schema
 """
+import enum
 import inspect
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol, runtime_checkable
@@ -242,14 +243,31 @@ def _safe_get_type_hints(func: Callable) -> dict | None:
 
 
 def _py_type_to_property(py_type: type | None) -> dict:
-    """Python 类型 → JSON Schema property。"""
+    """
+    Python 类型 → JSON Schema property。
+
+    [FIX] 扩展支持以下复合类型：
+    - Literal["a", "b"] → {"enum": ["a", "b"]}
+    - Enum 子类 → {"type": "string", "enum": [e.value, ...]}
+    - list[str] → {"type": "array", "items": {"type": "string"}}
+    - dict[str, int] → {"type": "object", "additionalProperties": {"type": "integer"}}
+    """
     if py_type is None:
         return {"type": "string"}
 
+    # ── 基本类型直接映射 ──
     if py_type in _TYPE_MAP:
         return {"type": _TYPE_MAP[py_type]}
 
-    # str 类型注解（如 "int", "str" 等）
+    # ── Enum 子类 → {"type": "string", "enum": [...]} ──
+    if isinstance(py_type, type) and issubclass(py_type, enum.Enum):
+        enum_values = [e.value for e in py_type]
+        # 推断 value 的 JSON 类型
+        if enum_values and isinstance(enum_values[0], int):
+            return {"type": "integer", "enum": enum_values}
+        return {"type": "string", "enum": enum_values}
+
+    # ── 字符串形式的类型注解（前向引用） ──
     if isinstance(py_type, str):
         name_map = {"str": str, "int": int, "float": float, "bool": bool, "list": list, "dict": dict}
         resolved = name_map.get(py_type)
@@ -257,14 +275,58 @@ def _py_type_to_property(py_type: type | None) -> dict:
             return {"type": _TYPE_MAP[resolved]}
         return {"type": "string"}
 
-    # Optional[T] / Union[T, None]
+    # ── 泛型origin处理：list[str], dict[str, T], Optional[T], Literal 等 ──
     origin = getattr(py_type, "__origin__", None)
     if origin is not None:
         from typing import get_args
 
         args = get_args(py_type)
+
+        # Literal["a", "b", 3] → {"enum": ["a", "b", 3]}
+        # typing.Literal 的 origin 在 3.8+ 是 Literal 本身（非 types.UnionType）
+        # 需要检查 origin 是否为 Literal
+        try:
+            from typing import Literal as _Literal
+            if origin is _Literal:
+                return {"enum": list(args)}
+        except ImportError:
+            pass
+
+        # list[T] → {"type": "array", "items": {...}}
+        if origin is list:
+            if args:
+                item_prop = _py_type_to_property(args[0])
+                return {"type": "array", "items": item_prop}
+            return {"type": "array"}
+
+        # dict[K, V] → {"type": "object", "additionalProperties": {...}}
+        if origin is dict:
+            if len(args) >= 2:
+                val_prop = _py_type_to_property(args[1])
+                return {"type": "object", "additionalProperties": val_prop}
+            return {"type": "object"}
+
+        # tuple[T, ...] → {"type": "array", "items": {...}}
+        if origin is tuple:
+            if args:
+                # 不定长 tuple[T, ...] 只有一个元素类型
+                if len(args) == 2 and args[1] is Ellipsis:
+                    return {"type": "array", "items": _py_type_to_property(args[0])}
+                # 定长 tuple[T1, T2, ...] → prefixItems
+                return {
+                    "type": "array",
+                    "prefixItems": [_py_type_to_property(a) for a in args],
+                    "minItems": len(args),
+                    "maxItems": len(args),
+                }
+            return {"type": "array"}
+
+        # Optional[T] / Union[T, None] / T | None → 递归处理非 None 分支
         non_none = [a for a in args if a is not type(None)]
         if non_none:
+            # 如果有多个非 None 类型（纯 Union），用 anyOf
+            if len(non_none) > 1:
+                return {"anyOf": [_py_type_to_property(a) for a in non_none]}
             return _py_type_to_property(non_none[0])
 
     return {"type": "string"}

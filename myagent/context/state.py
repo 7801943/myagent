@@ -19,7 +19,8 @@ from pathlib import Path
 
 import aiosqlite
 
-from myagent.context.message import Message, ToolCall, ToolResult
+# [FIX] ToolResult → ToolResultMessage，消除与 api.py:ToolResult 的二义性
+from myagent.context.message import Message, ToolCall, ToolResultMessage
 from myagent.core.models import SessionState, AgentRunState, _LEGACY_STATE_MAP
 from myagent.utils.logging import get_logger
 
@@ -52,10 +53,10 @@ class StateStore(ABC):
     async def load_pending_tool_calls(self, session_id: str) -> list[ToolCall]: ...
 
     @abstractmethod
-    async def save_tool_result(self, session_id: str, tool_call_id: str, result: ToolResult) -> None: ...
+    async def save_tool_result(self, session_id: str, tool_call_id: str, result: ToolResultMessage) -> None: ...
 
     @abstractmethod
-    async def load_tool_results(self, session_id: str) -> dict[str, ToolResult]:
+    async def load_tool_results(self, session_id: str) -> dict[str, ToolResultMessage]:
         """返回 {tool_call_id: ToolResult}，用于幂等缓存检查。"""
         ...
 
@@ -227,7 +228,7 @@ class SQLiteStateStore(StateStore):
             rows = await cursor.fetchall()
             return [ToolCall.model_validate_json(row[0]) for row in rows]
 
-    async def save_tool_result(self, session_id: str, tool_call_id: str, result: ToolResult) -> None:
+    async def save_tool_result(self, session_id: str, tool_call_id: str, result: ToolResultMessage) -> None:
         await self._db.execute(
             """UPDATE pending_tool_calls SET status = 'completed', result_json = ?
                WHERE session_id = ? AND tool_call_id = ?""",
@@ -235,13 +236,13 @@ class SQLiteStateStore(StateStore):
         )
         await self._db.commit()
 
-    async def load_tool_results(self, session_id: str) -> dict[str, ToolResult]:
+    async def load_tool_results(self, session_id: str) -> dict[str, ToolResultMessage]:
         async with self._db.execute(
             "SELECT tool_call_id, result_json FROM pending_tool_calls WHERE session_id = ? AND status = 'completed'",
             (session_id,),
         ) as cursor:
             rows = await cursor.fetchall()
-            return {row[0]: ToolResult.model_validate_json(row[1]) for row in rows}
+            return {row[0]: ToolResultMessage.model_validate_json(row[1]) for row in rows}
 
     async def list_all_sessions(self) -> list[dict]:
         """返回所有会话的摘要信息列表，按更新时间倒序。"""

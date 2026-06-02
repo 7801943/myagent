@@ -22,8 +22,22 @@ class ToolCall(BaseModel):
     name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
 
-class ToolResult(BaseModel):
-    """工具执行结果。"""
+class ToolResultMessage(BaseModel):
+    """
+    工具执行结果的 Pydantic 消息模型。
+    
+    [FIX] 原名 ToolResult，与 api.py:ToolResult（dataclass）同名导致二义性。
+    重命名为 ToolResultMessage 以明确语义差异：
+    - api.py:ToolResult（dataclass）= 工具函数的返回值封装
+    - message.py:ToolResultMessage（Pydantic BaseModel）= 存入对话历史的消息记录
+    
+    Attributes:
+        tool_call_id: 对应的 ToolCall.id
+        tool_name: 工具名称（可选）
+        content: 结果内容（文本或多模态内容块）
+        is_error: 是否为错误结果
+        metadata: 扩展元数据
+    """
     tool_call_id: str
     tool_name: str | None = None
     content: str | list[ContentBlock]

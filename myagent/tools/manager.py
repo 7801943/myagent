@@ -494,14 +494,15 @@ class ToolManager:
         )
         self._tools["cli_execute"] = cli_record
 
-        from myagent.tools.builtin.file_tools import file_read, file_write
+        from myagent.tools.builtin.file_tools import file_read, file_write, file_edit
 
         base = str(Path(__file__).parent / "builtin" / "file_tools.py")
         self._register_file_tool(base, file_read)
         self._register_file_tool(base, file_write)
+        self._register_file_tool(base, file_edit)
 
         logger.info(
-            "Registered builtin tools: cli_execute, file_read, file_write")
+            "Registered builtin tools: cli_execute, file_read, file_write, file_edit")
 
     # ── MCP ──
 

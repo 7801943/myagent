@@ -9,6 +9,8 @@ import csv
 import io
 import logging
 import mimetypes
+import os
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -1037,3 +1039,836 @@ async def file_write(path: str, content: str,
         )
     except Exception as e:
         return ToolResult(content=f"写入文件失败: {e}", is_error=True)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# file_edit — 精确搜索替换编辑
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# ── 注释风格映射 ──
+_COMMENT_STYLES: dict[str, tuple[str, str]] = {
+    # (prefix, suffix) — 行注释用 (prefix, "")，块注释用 (prefix, suffix)
+    ".py":  ("# ", ""),
+    ".sh":  ("# ", ""),
+    ".bash": ("# ", ""),
+    ".zsh": ("# ", ""),
+    ".fish": ("# ", ""),
+    ".rb":  ("# ", ""),
+    ".rs":  ("// ", ""),
+    ".js":  ("// ", ""),
+    ".ts":  ("// ", ""),
+    ".jsx": ("// ", ""),
+    ".tsx": ("// ", ""),
+    ".java": ("// ", ""),
+    ".go":  ("// ", ""),
+    ".c":   ("// ", ""),
+    ".cpp": ("// ", ""),
+    ".h":   ("// ", ""),
+    ".hpp": ("// ", ""),
+    ".swift": ("// ", ""),
+    ".kt":  ("// ", ""),
+    ".scala": ("// ", ""),
+    ".css":  ("/* ", " */"),
+    ".html": ("<!-- ", " -->"),
+    ".xml":  ("<!-- ", " -->"),
+    ".md":   ("<!-- ", " -->"),
+    ".lua":  ("-- ", ""),
+    ".vim":  ("\" ", ""),
+    ".sql":  ("-- ", ""),
+    ".r":    ("# ", ""),
+    ".m":    ("% ", ""),
+    ".ini":  ("; ", ""),
+    ".toml": ("# ", ""),
+    ".yaml": ("# ", ""),
+    ".yml":  ("# ", ""),
+    ".conf": ("# ", ""),
+    ".dockerfile": ("# ", ""),
+}
+
+# JSON 等不支持注释的格式
+_NO_COMMENT_EXTENSIONS = {".json", ".csv", ".tsv"}
+
+
+def _get_comment_style(path: Path) -> tuple[str, str] | None:
+    """根据扩展名返回注释风格 (prefix, suffix)，不支持则返回 None。"""
+    ext = path.suffix.lower()
+    if ext in _NO_COMMENT_EXTENSIONS:
+        return None
+    return _COMMENT_STYLES.get(ext, ("# ", ""))  # 默认用 # 注释
+
+
+def _build_diff_preview(
+    original: str, replaced: str, match_pos: int
+) -> str:
+    """构建替换位置 ±3 行的 diff 预览。"""
+    orig_lines = original.split("\n")
+    # 找到匹配所在的行号
+    before_text = original[:match_pos]
+    match_line = before_text.count("\n")
+
+    # 计算新文本中替换区域的行号（近似）
+    repl_lines = replaced.split("\n")
+
+    ctx_start = max(0, match_line - 3)
+    ctx_end = min(len(repl_lines), match_line + 4)
+
+    preview_lines = []
+    for i in range(ctx_start, ctx_end):
+        marker = ">" if match_line <= i < match_line + max(1, 1) else " "
+        preview_lines.append(f"  {marker} {i + 1:>{len(str(ctx_end))}} | {repl_lines[i]}")
+
+    return "\n".join(preview_lines)
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """原子写入纯文本文件。"""
+    import tempfile
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8",
+        dir=str(path.parent), suffix=".tmp", delete=False,
+    )
+    try:
+        tmp.write(content)
+        tmp.close()
+        os.replace(tmp.name, str(path))
+    except Exception:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+        raise
+
+
+def _atomic_write_binary(path: Path, data: bytes) -> None:
+    """原子写入二进制文件。"""
+    import tempfile
+    tmp = tempfile.NamedTemporaryFile(
+        dir=str(path.parent), suffix=".tmp", delete=False,
+    )
+    try:
+        tmp.write(data)
+        tmp.close()
+        os.replace(tmp.name, str(path))
+    except Exception:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+        raise
+
+
+# ── 纯文本编辑 ──
+
+async def _edit_text(
+    path: Path,
+    target_content: str,
+    replacement_content: str,
+    start_line: int | None,
+    end_line: int | None,
+    allow_multiple: bool,
+    highlight: str | None,
+    comment: str | None,
+) -> ToolResult:
+    """纯文本文件的精确搜索替换。"""
+    enc = _detect_encoding(path)
+    if enc == "binary":
+        return ToolResult(content="文件似乎是二进制格式，无法进行文本编辑。", is_error=True)
+
+    try:
+        with open(path, "r", encoding=enc, errors="replace") as f:
+            original = f.read()
+    except Exception as e:
+        return ToolResult(content=f"读取文件失败: {e}", is_error=True)
+
+    # ── 行号范围约束 ──
+    search_text = original
+    offset = 0  # 原始文本中的字符偏移
+    if start_line is not None or end_line is not None:
+        lines = original.split("\n")
+        total_lines = len(lines)
+        s = max(1, start_line or 1)
+        e = min(end_line or total_lines, total_lines) if end_line else total_lines
+        if s > total_lines:
+            return ToolResult(
+                content=f"文件共 {total_lines} 行，start_line={s} 超出范围。",
+                is_error=True,
+            )
+        # 计算偏移量
+        offset = sum(len(lines[i]) + 1 for i in range(s - 1))
+        search_text = "\n".join(lines[s - 1:e])
+
+    # ── 精确匹配 ──
+    count = search_text.count(target_content)
+    if count == 0:
+        hint = ""
+        if start_line is not None:
+            hint = f"（在行 {start_line}-{end_line or '末尾'} 范围内）"
+        return ToolResult(
+            content=f"未找到目标内容{hint}。请使用 file_read 确认文件最新内容后重试。",
+            is_error=True,
+            metadata={"path": str(path.resolve()), "match_count": 0},
+        )
+    if count > 1 and not allow_multiple:
+        return ToolResult(
+            content=f"找到 {count} 个匹配，请提供更精确的 target_content，"
+                    f"或使用 start_line/end_line 缩小范围，或设置 allow_multiple=True。",
+            is_error=True,
+            metadata={"path": str(path.resolve()), "match_count": count},
+        )
+
+    # ── 执行替换 ──
+    if start_line is not None or end_line is not None:
+        new_search_text = search_text.replace(target_content, replacement_content)
+        lines = original.split("\n")
+        total_lines = len(lines)
+        s = max(1, start_line or 1)
+        e = min(end_line or total_lines, total_lines) if end_line else total_lines
+        new_lines = lines[:s - 1] + new_search_text.split("\n") + lines[e:]
+        replaced = "\n".join(new_lines)
+        actual_count = new_search_text.count(replacement_content) if replacement_content != target_content else count
+    else:
+        replaced = original.replace(target_content, replacement_content)
+        actual_count = count
+
+    # ── 批注（在替换位置上方添加注释）──
+    comment_applied = False
+    comment_hint = ""
+    if comment:
+        style = _get_comment_style(path)
+        if style is None:
+            comment_hint = "（该文件类型不支持注释，已忽略 comment 参数）"
+        else:
+            prefix, suffix = style
+            comment_line = f"{prefix}[AGENT COMMENT] {comment}{suffix}\n"
+            # 在第一个替换位置上方插入注释
+            idx = replaced.find(replacement_content)
+            if idx >= 0:
+                # 找到该行的起始位置
+                line_start = replaced.rfind("\n", 0, idx)
+                line_start = line_start + 1 if line_start >= 0 else 0
+                replaced = replaced[:line_start] + comment_line + replaced[line_start:]
+                comment_applied = True
+
+    # ── 原子写入 ──
+    try:
+        _atomic_write_text(path, replaced)
+    except Exception as e:
+        return ToolResult(content=f"写入文件失败: {e}", is_error=True)
+
+    # ── 构建返回信息 ──
+    match_pos = offset if offset else original.find(target_content)
+    diff_preview = _build_diff_preview(original, replaced, max(0, match_pos))
+
+    msg = f"替换成功: {path.name}，共 {actual_count} 处替换。"
+    if highlight:
+        msg += "（纯文本文件不支持标色，已忽略 highlight 参数）"
+    if comment_hint:
+        msg += comment_hint
+    elif comment_applied:
+        msg += " 已添加批注注释。"
+
+    return ToolResult(
+        content=msg + f"\n\n预览:\n{diff_preview}",
+        metadata={
+            "path": str(path.resolve()),
+            "format": "text",
+            "replacements": actual_count,
+            "highlight": highlight,
+            "comment_added": comment_applied,
+        },
+    )
+
+
+# ── DOCX 编辑 ──
+
+def _insert_docx_run_after(anchor_run: Any, text: str, template_run: Any | None = None) -> Any:
+    """Insert a run after `anchor_run`, copying character formatting from `template_run`."""
+    from docx.oxml import OxmlElement
+    from docx.text.run import Run
+
+    template_run = template_run or anchor_run
+    new_r = OxmlElement("w:r")
+    r_pr = template_run._r.rPr
+    if r_pr is not None:
+        new_r.append(deepcopy(r_pr))
+    anchor_run._r.addnext(new_r)
+
+    new_run = Run(new_r, anchor_run._parent)
+    new_run.text = text
+    return new_run
+
+
+def _normalize_docx_edit_text(
+    target_content: str,
+    replacement_content: str,
+) -> tuple[str, str]:
+    """Tolerate a single trailing newline copied from file_read's paragraph output."""
+    if (
+        target_content.endswith("\n")
+        and replacement_content.endswith("\n")
+        and "\n" not in target_content[:-1]
+        and "\n" not in replacement_content[:-1]
+    ):
+        return target_content[:-1], replacement_content[:-1]
+    return target_content, replacement_content
+
+
+async def _edit_docx(
+    path: Path,
+    target_content: str,
+    replacement_content: str,
+    allow_multiple: bool,
+    highlight: str | None,
+    comment: str | None,
+) -> ToolResult:
+    """DOCX 文件的精确搜索替换，保留格式。"""
+    try:
+        from docx import Document
+    except ImportError:
+        return ToolResult(
+            content="缺少 python-docx 库。请安装: pip install python-docx",
+            is_error=True,
+        )
+
+    try:
+        doc = Document(str(path))
+    except Exception as e:
+        return ToolResult(content=f"打开 DOCX 失败: {e}", is_error=True)
+
+    target_content, replacement_content = _normalize_docx_edit_text(
+        target_content,
+        replacement_content,
+    )
+
+    # ── 构建虚拟文本流及 Run 映射 ──
+    virtual_parts: list[str] = []
+    # 每个 entry: (para_idx, run_idx, char_start, char_end)
+    run_map: list[tuple[int, int, int, int]] = []
+    char_pos = 0
+
+    for pi, para in enumerate(doc.paragraphs):
+        if pi > 0:
+            virtual_parts.append("\n")
+            char_pos += 1
+        for ri, run in enumerate(para.runs):
+            text = run.text
+            start = char_pos
+            end = char_pos + len(text)
+            if text:
+                run_map.append((pi, ri, start, end))
+                virtual_parts.append(text)
+                char_pos = end
+
+    virtual_text = "".join(virtual_parts)
+
+    # ── 精确匹配 ──
+    count = virtual_text.count(target_content)
+    if count == 0:
+        return ToolResult(
+            content="未找到目标内容。请使用 file_read 确认文档最新内容后重试。",
+            is_error=True,
+            metadata={"path": str(path.resolve()), "match_count": 0},
+        )
+    if count > 1 and not allow_multiple:
+        return ToolResult(
+            content=f"找到 {count} 个匹配，请提供更精确的 target_content 或设置 allow_multiple=True。",
+            is_error=True,
+            metadata={"path": str(path.resolve()), "match_count": count},
+        )
+
+    matches: list[tuple[int, int, list[tuple[int, int, int, int]]]] = []
+    search_start = 0
+    while search_start < len(virtual_text):
+        match_idx = virtual_text.find(target_content, search_start)
+        if match_idx < 0:
+            break
+        match_end = match_idx + len(target_content)
+        involved = [
+            (pi, ri, cs, ce)
+            for pi, ri, cs, ce in run_map
+            if cs < match_end and ce > match_idx
+        ]
+        if involved:
+            matches.append((match_idx, match_end, involved))
+        search_start = match_end
+        if not allow_multiple:
+            break
+
+    cross_paragraph = [
+        (match_idx, match_end)
+        for match_idx, match_end, involved in matches
+        if involved[0][0] != involved[-1][0]
+    ]
+    if cross_paragraph:
+        return ToolResult(
+            content=(
+                "DOCX 编辑被拒绝：当前安全编辑器只支持单个段落内的替换。"
+                "这次匹配跨越了多个段落，继续写入可能产生额外空行或破坏段落对齐。"
+                "请把 target_content 缩小到一个段落内后重试。"
+            ),
+            is_error=True,
+            metadata={
+                "path": str(path.resolve()),
+                "match_count": count,
+                "cross_paragraph_matches": len(cross_paragraph),
+            },
+        )
+
+    # ── 执行替换（逐个匹配处理）──
+    actual_count = 0
+    comment_count = 0
+    for match_idx, match_end, involved in reversed(matches):
+        first_pi, first_ri, first_cs, first_ce = involved[0]
+        last_pi, last_ri, last_cs, last_ce = involved[-1]
+        first_para = doc.paragraphs[first_pi]
+        first_run = first_para.runs[first_ri]
+
+        # 第一段第一段：保留前缀 + 替换内容
+        prefix = target_content[:0]  # 空
+        if first_cs < match_idx:
+            prefix = first_run.text[:match_idx - first_cs]
+
+        # 最后一段最后一段：保留后缀
+        last_para = doc.paragraphs[last_pi]
+        last_run = last_para.runs[last_ri]
+        suffix = ""
+        if last_ce > match_end:
+            suffix = last_run.text[match_end - last_cs:]
+
+        runs = first_para.runs
+        first_run.text = prefix
+        if first_ri != last_ri:
+            for idx in range(first_ri + 1, last_ri):
+                runs[idx].text = ""
+            last_run.text = ""
+
+        replacement_run = _insert_docx_run_after(first_run, replacement_content)
+        if suffix:
+            _insert_docx_run_after(replacement_run, suffix, last_run)
+
+        # ── 标色 ──
+        if highlight:
+            try:
+                from docx.enum.text import WD_COLOR_INDEX
+                _DOCX_COLOR_MAP = {
+                    "yellow": WD_COLOR_INDEX.YELLOW,
+                    "green": WD_COLOR_INDEX.BRIGHT_GREEN,
+                    "red": WD_COLOR_INDEX.RED,
+                    "pink": WD_COLOR_INDEX.PINK,
+                }
+                color = _DOCX_COLOR_MAP.get(highlight)
+                if color:
+                    replacement_run.font.highlight_color = color
+            except Exception as e:
+                logger.warning("DOCX 标色失败: %s", e)
+
+        # ── 批注 ──
+        if comment:
+            try:
+                if hasattr(doc, "add_comment"):
+                    doc.add_comment(
+                        replacement_run,
+                        text=comment,
+                        author="Agent",
+                        initials="AG",
+                    )
+                    comment_count += 1
+                else:  # pragma: no cover - compatibility with older python-docx
+                    logger.warning("python-docx 版本不支持批注，需要 >= 1.2.0")
+            except Exception as e:
+                logger.warning("DOCX 批注添加失败: %s", e)
+
+        actual_count += 1
+
+    # ── 原子写入 ──
+    try:
+        buf = io.BytesIO()
+        doc.save(buf)
+        _atomic_write_binary(path, buf.getvalue())
+    except Exception as e:
+        return ToolResult(content=f"保存 DOCX 失败: {e}", is_error=True)
+
+    comment_status = ""
+    if comment and comment_count:
+        comment_status = f" 已添加批注 {comment_count} 处。"
+    elif comment:
+        comment_status = " 批注添加失败，已完成文本替换。"
+
+    return ToolResult(
+        content=f"DOCX 替换成功: {path.name}，共 {actual_count} 处替换。"
+                + (" 已标色。" if highlight else "")
+                + comment_status,
+        metadata={
+            "path": str(path.resolve()),
+            "format": "docx",
+            "replacements": actual_count,
+            "highlight": highlight,
+            "comment_added": comment_count > 0,
+            "comments_added": comment_count,
+        },
+    )
+
+
+# ── XLSX 编辑 ──
+
+async def _edit_xlsx(
+    path: Path,
+    target_content: str,
+    replacement_content: str,
+    sheet_name: str | None,
+    allow_multiple: bool,
+    highlight: str | None,
+    comment: str | None,
+) -> ToolResult:
+    """XLSX 文件的单元格级精确搜索替换。"""
+    try:
+        import openpyxl
+        from openpyxl.comments import Comment as XlComment
+    except ImportError:
+        return ToolResult(
+            content="缺少 openpyxl 库。请安装: pip install openpyxl",
+            is_error=True,
+        )
+
+    try:
+        wb = openpyxl.load_workbook(str(path))
+    except Exception as e:
+        return ToolResult(content=f"打开 XLSX 失败: {e}", is_error=True)
+
+    # ── 获取目标 Sheet ──
+    if sheet_name:
+        if sheet_name not in wb.sheetnames:
+            wb.close()
+            return ToolResult(
+                content=f"工作表 \"{sheet_name}\" 不存在。可用: {wb.sheetnames}",
+                is_error=True,
+            )
+        ws = wb[sheet_name]
+    else:
+        ws = wb.active
+
+    # ── 标色映射 ──
+    from openpyxl.styles import PatternFill
+    _XLSX_FILL_MAP = {
+        "yellow": PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid"),
+        "green":  PatternFill(start_color="92D050", end_color="92D050", fill_type="solid"),
+        "red":    PatternFill(start_color="FF6B6B", end_color="FF6B6B", fill_type="solid"),
+        "pink":   PatternFill(start_color="FFB6C1", end_color="FFB6C1", fill_type="solid"),
+    }
+
+    # ── 合并单元格信息 ──
+    merged_ranges = list(ws.merged_cells.ranges)
+    merged_top_left = set()
+    for mr in merged_ranges:
+        merged_top_left.add((mr.min_row, mr.min_col))
+
+    def _is_merged_non_topleft(row: int, col: int) -> bool:
+        for mr in merged_ranges:
+            if (row, col) in mr and (row, col) != (mr.min_row, mr.min_col):
+                return True
+        return False
+
+    # ── 遍历 Cell 匹配 ──
+    actual_count = 0
+    matched_cells: list[str] = []
+    warnings: list[str] = []
+
+    for row in ws.iter_rows():
+        for cell in row:
+            if cell.value is None:
+                continue
+            cell_str = str(cell.value)
+
+            if cell.value == target_content or cell_str == target_content:
+                # 精确匹配整个 Cell
+                if _is_merged_non_topleft(cell.row, cell.column):
+                    warnings.append(
+                        f"Cell {cell.coordinate} 在合并单元格内（非左上角），已跳过"
+                    )
+                    continue
+                cell.value = replacement_content
+                if highlight and highlight in _XLSX_FILL_MAP:
+                    cell.fill = _XLSX_FILL_MAP[highlight]
+                if comment:
+                    cell.comment = XlComment(comment, "Agent")
+                actual_count += 1
+                matched_cells.append(cell.coordinate)
+            elif target_content in cell_str:
+                # 子串匹配
+                if _is_merged_non_topleft(cell.row, cell.column):
+                    warnings.append(
+                        f"Cell {cell.coordinate} 在合并单元格内（非左上角），已跳过"
+                    )
+                    continue
+                new_val = cell_str.replace(target_content, replacement_content)
+                cell.value = new_val
+                if highlight and highlight in _XLSX_FILL_MAP:
+                    cell.fill = _XLSX_FILL_MAP[highlight]
+                if comment:
+                    cell.comment = XlComment(comment, "Agent")
+                actual_count += 1
+                matched_cells.append(cell.coordinate)
+
+            if actual_count > 0 and not allow_multiple:
+                break
+        if actual_count > 0 and not allow_multiple:
+            break
+
+    if actual_count == 0:
+        wb.close()
+        return ToolResult(
+            content="未找到目标内容。请使用 file_read 确认工作表内容后重试。",
+            is_error=True,
+            metadata={"path": str(path.resolve()), "match_count": 0},
+        )
+
+    # ── 原子写入 ──
+    try:
+        import tempfile
+        buf = io.BytesIO()
+        wb.save(buf)
+        wb.close()
+        _atomic_write_binary(path, buf.getvalue())
+    except Exception as e:
+        return ToolResult(content=f"保存 XLSX 失败: {e}", is_error=True)
+
+    msg = f"XLSX 替换成功: {path.name}，共 {actual_count} 处替换。"
+    if matched_cells:
+        msg += f" 匹配单元格: {', '.join(matched_cells[:10])}"
+    if warnings:
+        msg += f" 警告: {'; '.join(warnings[:5])}"
+    if highlight:
+        msg += " 已标色。"
+    if comment:
+        msg += " 已添加批注。"
+
+    return ToolResult(
+        content=msg,
+        metadata={
+            "path": str(path.resolve()),
+            "format": "xlsx",
+            "replacements": actual_count,
+            "highlight": highlight,
+            "comment_added": bool(comment),
+            "matched_cells": matched_cells,
+        },
+    )
+
+
+# ── XLSX 行替换 ──
+
+async def _edit_xlsx_rows(
+    path: Path,
+    target_rows: list[int],
+    replacement_rows: list[list[str]],
+    sheet_name: str | None,
+    highlight: str | None,
+    comment: str | None,
+) -> ToolResult:
+    """XLSX 行级替换。"""
+    try:
+        import openpyxl
+        from openpyxl.comments import Comment as XlComment
+        from openpyxl.styles import PatternFill
+    except ImportError:
+        return ToolResult(
+            content="缺少 openpyxl 库。请安装: pip install openpyxl",
+            is_error=True,
+        )
+
+    if len(target_rows) != len(replacement_rows):
+        return ToolResult(
+            content=f"target_rows 数量({len(target_rows)}) 必须等于 replacement_rows 数量({len(replacement_rows)})。",
+            is_error=True,
+        )
+
+    try:
+        wb = openpyxl.load_workbook(str(path))
+    except Exception as e:
+        return ToolResult(content=f"打开 XLSX 失败: {e}", is_error=True)
+
+    if sheet_name:
+        if sheet_name not in wb.sheetnames:
+            wb.close()
+            return ToolResult(
+                content=f"工作表 \"{sheet_name}\" 不存在。可用: {wb.sheetnames}",
+                is_error=True,
+            )
+        ws = wb[sheet_name]
+    else:
+        ws = wb.active
+
+    _XLSX_FILL_MAP = {
+        "yellow": PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid"),
+        "green":  PatternFill(start_color="92D050", end_color="92D050", fill_type="solid"),
+        "red":    PatternFill(start_color="FF6B6B", end_color="FF6B6B", fill_type="solid"),
+        "pink":   PatternFill(start_color="FFB6C1", end_color="FFB6C1", fill_type="solid"),
+    }
+
+    replaced_rows: list[int] = []
+    for row_idx, new_values in zip(target_rows, replacement_rows):
+        for col_idx, value in enumerate(new_values, start=1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            cell.value = value
+            if highlight and highlight in _XLSX_FILL_MAP:
+                cell.fill = _XLSX_FILL_MAP[highlight]
+            if comment:
+                cell.comment = XlComment(comment, "Agent")
+
+        # 清空多余列
+        max_col = ws.max_column or 0
+        for col_idx in range(len(new_values) + 1, max_col + 1):
+            ws.cell(row=row_idx, column=col_idx).value = None
+
+        replaced_rows.append(row_idx)
+
+    # ── 原子写入 ──
+    try:
+        buf = io.BytesIO()
+        wb.save(buf)
+        wb.close()
+        _atomic_write_binary(path, buf.getvalue())
+    except Exception as e:
+        return ToolResult(content=f"保存 XLSX 失败: {e}", is_error=True)
+
+    return ToolResult(
+        content=f"XLSX 行替换成功: {path.name}，已替换行: {replaced_rows}。"
+                + (" 已标色。" if highlight else "")
+                + (" 已添加批注。" if comment else ""),
+        metadata={
+            "path": str(path.resolve()),
+            "format": "xlsx",
+            "replacements": len(replaced_rows),
+            "replaced_rows": replaced_rows,
+            "highlight": highlight,
+            "comment_added": bool(comment),
+        },
+    )
+
+
+# ── file_edit 主入口 ──
+
+@tool(name="file_edit",
+      description=(
+          "精确编辑已有文件。支持纯文本文件、DOCX、XLSX 三种类型。\n"
+          "通过 target_content 精确匹配原始内容，替换为 replacement_content。\n"
+          "支持对修改位置进行标色（highlight）和添加批注（comment）。\n\n"
+          "对于 XLSX，还支持通过 target_rows 和 replacement_rows 进行整行替换。\n\n"
+          "使用建议：\n"
+          "- 修改已有文件优先使用 file_edit，而非 file_write\n"
+          "- target_content 必须精确匹配原文（含缩进和空白）\n"
+          "- 匹配失败时先 file_read 确认最新内容再重试\n"
+          "- 不支持 .doc / .xls 等旧格式"
+      ))
+async def file_edit(
+    path: str,
+    target_content: str | None = None,
+    replacement_content: str | None = None,
+    sheet_name: str | None = None,
+    start_line: int | None = None,
+    end_line: int | None = None,
+    allow_multiple: bool = False,
+    highlight: str | None = None,
+    comment: str | None = None,
+    target_rows: list[int] | None = None,
+    replacement_rows: list[list[str]] | None = None,
+) -> ToolResult:
+    """
+    精确编辑已有文件。
+
+    Args:
+        path: 文件路径，支持文本/DOCX/XLSX
+        target_content: 要被替换的原始文本（精确匹配），与 target_rows 互斥
+        replacement_content: 替换后的新文本，与 replacement_rows 互斥
+        sheet_name: XLSX 工作表名（多 Sheet 时必填）
+        start_line: 纯文本文件搜索范围起始行（1-based）
+        end_line: 纯文本文件搜索范围结束行
+        allow_multiple: 是否允许替换多个匹配（默认 False）
+        highlight: 标色颜色: "yellow"/"green"/"red"/"pink"/None
+        comment: 批注内容，None=不添加批注
+        target_rows: XLSX 行替换模式：要替换的行号列表（1-based）
+        replacement_rows: XLSX 行替换模式：替换后的行数据
+    """
+    # ── 参数互斥校验 ──
+    text_mode = target_content is not None or replacement_content is not None
+    row_mode = target_rows is not None or replacement_rows is not None
+
+    if text_mode and row_mode:
+        return ToolResult(
+            content="参数冲突：target_content/replacement_content 与 target_rows/replacement_rows 互斥，不能同时使用。",
+            is_error=True,
+        )
+    if not text_mode and not row_mode:
+        return ToolResult(
+            content="缺少参数：必须提供 target_content+replacement_content 或 target_rows+replacement_rows。",
+            is_error=True,
+        )
+    if text_mode and (target_content is None or replacement_content is None):
+        return ToolResult(
+            content="缺少参数：文本替换模式需要同时提供 target_content 和 replacement_content。",
+            is_error=True,
+        )
+    if row_mode and (target_rows is None or replacement_rows is None):
+        return ToolResult(
+            content="缺少参数：行替换模式需要同时提供 target_rows 和 replacement_rows。",
+            is_error=True,
+        )
+
+    # ── highlight 值校验 ──
+    if highlight is not None and highlight not in ("yellow", "green", "red", "pink"):
+        return ToolResult(
+            content=f"不支持的 highlight 颜色: {highlight!r}。可选: yellow, green, red, pink",
+            is_error=True,
+        )
+
+    # ── 文件存在性检查 ──
+    target = Path(path)
+    if not target.exists():
+        return ToolResult(content=f"文件不存在: {path}", is_error=True)
+    if not target.is_file():
+        return ToolResult(content=f"不是文件: {path}", is_error=True)
+
+    # ── 文件类型检测 ──
+    ext = target.suffix.lower()
+
+    # 拦截旧格式
+    if ext == ".doc":
+        return ToolResult(
+            content="不支持旧版 .doc 格式。请转换为 .docx 后重试。",
+            is_error=True,
+        )
+    if ext == ".xls":
+        return ToolResult(
+            content="不支持旧版 .xls 格式。请转换为 .xlsx 后重试。",
+            is_error=True,
+        )
+
+    # ── 路由到对应编辑器 ──
+    file_type = _detect_file_type(target)
+
+    if file_type == "text":
+        return await _edit_text(
+            target, target_content, replacement_content,
+            start_line, end_line, allow_multiple,
+            highlight, comment,
+        )
+    elif file_type == "docx":
+        return await _edit_docx(
+            target, target_content, replacement_content,
+            allow_multiple, highlight, comment,
+        )
+    elif file_type == "xlsx":
+        if row_mode:
+            return await _edit_xlsx_rows(
+                target, target_rows, replacement_rows,
+                sheet_name, highlight, comment,
+            )
+        return await _edit_xlsx(
+            target, target_content, replacement_content,
+            sheet_name, allow_multiple, highlight, comment,
+        )
+    else:
+        return ToolResult(
+            content=f"不支持的文件类型: {ext or '(无扩展名)'}。file_edit 支持纯文本、DOCX、XLSX 格式。",
+            is_error=True,
+        )

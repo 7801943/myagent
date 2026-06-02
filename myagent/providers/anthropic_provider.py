@@ -127,13 +127,35 @@ class AnthropicProvider(BaseProvider):
                     if asyncio.current_task() is not None and asyncio.current_task().cancelled():
                         raise asyncio.CancelledError()
 
-                    # 文本增量
+                    # ── content_block_delta：文本增量 或 工具参数增量 ──
+                    # [FIX] 原来有两个 "content_block_delta" if/elif 分支，
+                    # 第二个永远不会执行（被第一个短路），导致工具参数 partial_json
+                    # 无法累积，tool_call_end 发出的 tool_args 始终为空 dict。
+                    # 现在合并为一个分支，同时处理 text 和 partial_json。
                     if event.type == "content_block_delta":
                         if hasattr(event.delta, "text"):
+                            # 文本增量
                             yield StreamEvent(type="text_delta", text=event.delta.text)
                         elif hasattr(event.delta, "partial_json"):
-                            # tool_use 的参数增量
-                            pass
+                            # 工具调用参数增量（partial_json）
+                            # 需要找到当前正在累积的 tool_call buffer。
+                            # Anthropic SDK 保证 content_block_start(tool_use)
+                            # 先于 content_block_delta(partial_json) 到达，
+                            # 所以 buffers 中至少有一个条目。
+                            partial = event.delta.partial_json or ""
+                            # 使用最近添加的 buffer（即当前活跃的 tool_use block）
+                            # 因为 Anthropic 流式保证 block 顺序与 start 事件一致
+                            if tool_call_buffers:
+                                # 取最后一个 buffer（当前活跃的工具调用块）
+                                active_id = list(tool_call_buffers.keys())[-1]
+                                buf = tool_call_buffers[active_id]
+                                buf["args_json"] += partial
+                                yield StreamEvent(
+                                    type="tool_call_delta",
+                                    tool_call_id=buf["id"],
+                                    tool_name=buf["name"],
+                                    tool_args_delta=partial,
+                                )
 
                     # 工具调用开始
                     elif event.type == "content_block_start":
@@ -149,18 +171,6 @@ class AnthropicProvider(BaseProvider):
                                 tool_call_id=tc_id,
                                 tool_name=event.content_block.name,
                             )
-
-                    # 工具参数增量（通过 get_final_message 获取完整参数）
-                    elif event.type == "content_block_delta":
-                        if hasattr(event.delta, "partial_json"):
-                            for buf in tool_call_buffers.values():
-                                buf["args_json"] += event.delta.partial_json or ""
-                                yield StreamEvent(
-                                    type="tool_call_delta",
-                                    tool_call_id=buf["id"],
-                                    tool_name=buf["name"],
-                                    tool_args_delta=event.delta.partial_json or "",
-                                )
 
                     # 消息结束
                     elif event.type == "message_stop":

@@ -186,11 +186,20 @@ class OpenAIProvider(BaseProvider):
                     for tc_delta in delta.tool_calls:
                         idx = tc_delta.index
                         if idx not in tool_call_buffers:
+                            # [FIX] 首次见到该 tool_call → 发出 tool_call_start 事件
+                            # 原来只创建 buffer 不发 start 事件，与 Anthropic Provider
+                            # 协议不一致，下游 LLMClient 依赖此事件初始化缓冲区。
                             tool_call_buffers[idx] = {
                                 "id": tc_delta.id or "",
                                 "name": tc_delta.function.name if tc_delta.function and tc_delta.function.name else "",
                                 "args_json": "",
                             }
+                            buf = tool_call_buffers[idx]
+                            yield StreamEvent(
+                                type="tool_call_start",
+                                tool_call_id=buf["id"],
+                                tool_name=buf["name"],
+                            )
                         buf = tool_call_buffers[idx]
                         if tc_delta.id:
                             buf["id"] = tc_delta.id

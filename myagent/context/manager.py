@@ -11,7 +11,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from myagent.context.message import Message, ContentBlock, ToolResult
+# [FIX] ToolResult → ToolResultMessage，消除与 api.py:ToolResult 的二义性
+from myagent.context.message import Message, ContentBlock, ToolResultMessage
 from myagent.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -98,7 +99,7 @@ class ContextManager:
         ))
         await self._persist_messages()
 
-    async def add_tool_result(self, tool_call_id: str, result: ToolResult) -> None:
+    async def add_tool_result(self, tool_call_id: str, result: ToolResultMessage) -> None:
         """
         添加工具结果 + 实时持久化。
         V3 关键：强制截断超长工具输出，防止上下文爆窗。

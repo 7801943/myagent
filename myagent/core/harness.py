@@ -36,7 +36,8 @@ from myagent.core.events import (
 )
 from myagent.core.commander import check_system_commands
 from myagent.context.manager import ContextManager
-from myagent.context.message import ToolCall, ToolResult as MsgToolResult, ContentBlock
+# [FIX] ToolResult → ToolResultMessage，消除与 api.py:ToolResult 的二义性
+from myagent.context.message import ToolCall, ToolResultMessage, ContentBlock
 from myagent.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -246,7 +247,7 @@ class AgentHarness:
             else:
                 content = tr.content
 
-            await context.add_tool_result(tc.id, MsgToolResult(
+            await context.add_tool_result(tc.id, ToolResultMessage(
                 tool_call_id=tc.id, tool_name=tc.name, content=content, metadata={"latency_ms": lat}
             ))
 
