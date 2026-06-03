@@ -4,7 +4,8 @@
       "username": "admin",
       "password_hash": "pbkdf2_sha256$100000$dd9bec2ce06703ebd1386a718ead3937$3c52fc076217d00e7f3fde07d2e911fdd908b3814ab4d0c098d95610e31f08cf",
       "active_ips": [
-        "2409:8924:612:62a:f2d9:c930:279f:9158"
+        "2409:8924:612:62a:f2d9:c930:279f:9158",
+        "127.0.0.1"
       ]
     }
   ]

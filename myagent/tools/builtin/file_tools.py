@@ -1488,310 +1488,166 @@ async def _edit_docx(
     )
 
 
-# ── XLSX 编辑 ──
 
-async def _edit_xlsx(
-    path: Path,
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# XLSX 编辑辅助函数
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _normalize_xlsx_row(formatted: str) -> str:
+    """归一化行文本，用于匹配比较。去除首尾空白，压缩 pipe 周围多余空格。"""
+    return " | ".join(c.strip() for c in formatted.split(" | "))
+
+
+def _format_xlsx_row(row) -> str:
+    """将 openpyxl 行数据格式化为 pipe 分隔文本（与 file_read 一致）。"""
+    cells = [str(cell) if cell is not None else "" for cell in row]
+    return " | ".join(cells)
+
+
+def _infer_cell_value(s: str):
+    """尝试将字符串转为合适的 Python 类型。"""
+    s = s.strip()
+    if s == "":
+        return None
+    # 整数
+    try:
+        return int(s)
+    except ValueError:
+        pass
+    # 浮点
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    # 布尔
+    if s.lower() in ("true", "false"):
+        return s.lower() == "true"
+    return s
+
+
+def _check_merge_conflicts(ws, affected_rows: list[int], operation: str) -> str | None:
+    """
+    检查操作是否会影响合并单元格区域。
+
+    Args:
+        ws: 工作表
+        affected_rows: 受影响的行号列表
+        operation: "replace" | "delete" | "insert"
+
+    Returns:
+        冲突描述字符串，无冲突返回 None
+    """
+    conflicts = []
+    for mr in ws.merged_cells.ranges:
+        merge_rows = set(range(mr.min_row, mr.max_row + 1))
+        affected_set = set(affected_rows)
+
+        if operation == "replace":
+            overlap = merge_rows & affected_set
+            if overlap and overlap != merge_rows:
+                conflicts.append(
+                    f"合并区域 {mr} 与替换行 {sorted(overlap)} 部分重叠"
+                )
+
+        elif operation == "delete":
+            overlap = merge_rows & affected_set
+            if overlap and overlap != merge_rows:
+                conflicts.append(
+                    f"删除行 {sorted(overlap)} 会破坏合并区域 {mr}"
+                )
+
+        elif operation == "insert":
+            insert_row = min(affected_rows)
+            if mr.min_row < insert_row <= mr.max_row:
+                conflicts.append(
+                    f"在行 {insert_row} 插入会破坏合并区域 {mr}"
+                )
+
+    if conflicts:
+        return "操作被阻止——涉及合并单元格冲突：\n" + "\n".join(f"  - {c}" for c in conflicts)
+    return None
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# file_edit_table — XLSX 专用编辑工具
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+@tool(name="file_edit_table",
+      description=(
+          "编辑 XLSX 表格文件。通过行级匹配进行精确替换。\n"
+          "target_content 和 replacement_content 均使用 'cell1 | cell2 | cell3' 格式，\n"
+          "与 file_read 输出格式一致。\n\n"
+          "功能：\n"
+          "- 单行替换：匹配一行，替换为新内容\n"
+          "- 多行替换：target_content 和 replacement_content 用 \\n 分隔多行\n"
+          "- 删除行：replacement_content 设为 '__DELETE__'\n"
+          "- 消歧：当多行匹配时，通过 target_rows 指定行号\n\n"
+          "注意：\n"
+          "- 单元格值中若包含 ' | '，匹配时需注意可能的列错位\n"
+          "- 匹配失败时先 file_read 确认最新内容再重试\n"
+          "- 不支持 .xls 旧格式"
+      ))
+async def file_edit_table(
+    path: str,
     target_content: str,
     replacement_content: str,
-    sheet_name: str | None,
-    allow_multiple: bool,
-    highlight: str | None,
-    comment: str | None,
-) -> ToolResult:
-    """XLSX 文件的单元格级精确搜索替换。"""
-    try:
-        import openpyxl
-        from openpyxl.comments import Comment as XlComment
-    except ImportError:
-        return ToolResult(
-            content="缺少 openpyxl 库。请安装: pip install openpyxl",
-            is_error=True,
-        )
-
-    try:
-        wb = openpyxl.load_workbook(str(path))
-    except Exception as e:
-        return ToolResult(content=f"打开 XLSX 失败: {e}", is_error=True)
-
-    # ── 获取目标 Sheet ──
-    if sheet_name:
-        if sheet_name not in wb.sheetnames:
-            wb.close()
-            return ToolResult(
-                content=f"工作表 \"{sheet_name}\" 不存在。可用: {wb.sheetnames}",
-                is_error=True,
-            )
-        ws = wb[sheet_name]
-    else:
-        ws = wb.active
-
-    # ── 标色映射 ──
-    from openpyxl.styles import PatternFill
-    _XLSX_FILL_MAP = {
-        "yellow": PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid"),
-        "green":  PatternFill(start_color="92D050", end_color="92D050", fill_type="solid"),
-        "red":    PatternFill(start_color="FF6B6B", end_color="FF6B6B", fill_type="solid"),
-        "pink":   PatternFill(start_color="FFB6C1", end_color="FFB6C1", fill_type="solid"),
-    }
-
-    # ── 合并单元格信息 ──
-    merged_ranges = list(ws.merged_cells.ranges)
-    merged_top_left = set()
-    for mr in merged_ranges:
-        merged_top_left.add((mr.min_row, mr.min_col))
-
-    def _is_merged_non_topleft(row: int, col: int) -> bool:
-        for mr in merged_ranges:
-            if (row, col) in mr and (row, col) != (mr.min_row, mr.min_col):
-                return True
-        return False
-
-    # ── 遍历 Cell 匹配 ──
-    actual_count = 0
-    matched_cells: list[str] = []
-    warnings: list[str] = []
-
-    for row in ws.iter_rows():
-        for cell in row:
-            if cell.value is None:
-                continue
-            cell_str = str(cell.value)
-
-            if cell.value == target_content or cell_str == target_content:
-                # 精确匹配整个 Cell
-                if _is_merged_non_topleft(cell.row, cell.column):
-                    warnings.append(
-                        f"Cell {cell.coordinate} 在合并单元格内（非左上角），已跳过"
-                    )
-                    continue
-                cell.value = replacement_content
-                if highlight and highlight in _XLSX_FILL_MAP:
-                    cell.fill = _XLSX_FILL_MAP[highlight]
-                if comment:
-                    cell.comment = XlComment(comment, "Agent")
-                actual_count += 1
-                matched_cells.append(cell.coordinate)
-            elif target_content in cell_str:
-                # 子串匹配
-                if _is_merged_non_topleft(cell.row, cell.column):
-                    warnings.append(
-                        f"Cell {cell.coordinate} 在合并单元格内（非左上角），已跳过"
-                    )
-                    continue
-                new_val = cell_str.replace(target_content, replacement_content)
-                cell.value = new_val
-                if highlight and highlight in _XLSX_FILL_MAP:
-                    cell.fill = _XLSX_FILL_MAP[highlight]
-                if comment:
-                    cell.comment = XlComment(comment, "Agent")
-                actual_count += 1
-                matched_cells.append(cell.coordinate)
-
-            if actual_count > 0 and not allow_multiple:
-                break
-        if actual_count > 0 and not allow_multiple:
-            break
-
-    if actual_count == 0:
-        wb.close()
-        return ToolResult(
-            content="未找到目标内容。请使用 file_read 确认工作表内容后重试。",
-            is_error=True,
-            metadata={"path": str(path.resolve()), "match_count": 0},
-        )
-
-    # ── 原子写入 ──
-    try:
-        import tempfile
-        buf = io.BytesIO()
-        wb.save(buf)
-        wb.close()
-        _atomic_write_binary(path, buf.getvalue())
-    except Exception as e:
-        return ToolResult(content=f"保存 XLSX 失败: {e}", is_error=True)
-
-    msg = f"XLSX 替换成功: {path.name}，共 {actual_count} 处替换。"
-    if matched_cells:
-        msg += f" 匹配单元格: {', '.join(matched_cells[:10])}"
-    if warnings:
-        msg += f" 警告: {'; '.join(warnings[:5])}"
-    if highlight:
-        msg += " 已标色。"
-    if comment:
-        msg += " 已添加批注。"
-
-    logger.info("file_edit XLSX成功: path=%s, replacements=%d", path, actual_count)
-    return ToolResult(
-        content=msg,
-        metadata={
-            "path": str(path.resolve()),
-            "format": "xlsx",
-            "replacements": actual_count,
-            "highlight": highlight,
-            "comment_added": bool(comment),
-            "matched_cells": matched_cells,
-        },
-    )
-
-
-# ── XLSX 行替换 ──
-
-async def _edit_xlsx_rows(
-    path: Path,
-    target_rows: list[int],
-    replacement_rows: list[list[str]],
-    sheet_name: str | None,
-    highlight: str | None,
-    comment: str | None,
-) -> ToolResult:
-    """XLSX 行级替换。"""
-    try:
-        import openpyxl
-        from openpyxl.comments import Comment as XlComment
-        from openpyxl.styles import PatternFill
-    except ImportError:
-        return ToolResult(
-            content="缺少 openpyxl 库。请安装: pip install openpyxl",
-            is_error=True,
-        )
-
-    if len(target_rows) != len(replacement_rows):
-        return ToolResult(
-            content=f"target_rows 数量({len(target_rows)}) 必须等于 replacement_rows 数量({len(replacement_rows)})。",
-            is_error=True,
-        )
-
-    try:
-        wb = openpyxl.load_workbook(str(path))
-    except Exception as e:
-        return ToolResult(content=f"打开 XLSX 失败: {e}", is_error=True)
-
-    if sheet_name:
-        if sheet_name not in wb.sheetnames:
-            wb.close()
-            return ToolResult(
-                content=f"工作表 \"{sheet_name}\" 不存在。可用: {wb.sheetnames}",
-                is_error=True,
-            )
-        ws = wb[sheet_name]
-    else:
-        ws = wb.active
-
-    _XLSX_FILL_MAP = {
-        "yellow": PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid"),
-        "green":  PatternFill(start_color="92D050", end_color="92D050", fill_type="solid"),
-        "red":    PatternFill(start_color="FF6B6B", end_color="FF6B6B", fill_type="solid"),
-        "pink":   PatternFill(start_color="FFB6C1", end_color="FFB6C1", fill_type="solid"),
-    }
-
-    replaced_rows: list[int] = []
-    for row_idx, new_values in zip(target_rows, replacement_rows):
-        for col_idx, value in enumerate(new_values, start=1):
-            cell = ws.cell(row=row_idx, column=col_idx)
-            cell.value = value
-            if highlight and highlight in _XLSX_FILL_MAP:
-                cell.fill = _XLSX_FILL_MAP[highlight]
-            if comment:
-                cell.comment = XlComment(comment, "Agent")
-
-        # 清空多余列
-        max_col = ws.max_column or 0
-        for col_idx in range(len(new_values) + 1, max_col + 1):
-            ws.cell(row=row_idx, column=col_idx).value = None
-
-        replaced_rows.append(row_idx)
-
-    # ── 原子写入 ──
-    try:
-        buf = io.BytesIO()
-        wb.save(buf)
-        wb.close()
-        _atomic_write_binary(path, buf.getvalue())
-    except Exception as e:
-        return ToolResult(content=f"保存 XLSX 失败: {e}", is_error=True)
-
-    logger.info("file_edit XLSX行替换成功: path=%s, replaced_rows_count=%d", path, len(replaced_rows))
-    return ToolResult(
-        content=f"XLSX 行替换成功: {path.name}，已替换行: {replaced_rows}。"
-                + (" 已标色。" if highlight else "")
-                + (" 已添加批注。" if comment else ""),
-        metadata={
-            "path": str(path.resolve()),
-            "format": "xlsx",
-            "replacements": len(replaced_rows),
-            "replaced_rows": replaced_rows,
-            "highlight": highlight,
-            "comment_added": bool(comment),
-        },
-    )
-
-
-# ── file_edit 主入口 ──
-
-@tool(name="file_edit",
-      description=(
-          "精确编辑已有文件。支持纯文本文件、DOCX、XLSX 三种类型。\n"
-          "通过 target_content 精确匹配原始内容，替换为 replacement_content。\n"
-          "支持对修改位置进行标色（highlight）和添加批注（comment）。\n\n"
-          "对于 XLSX，还支持通过 target_rows 和 replacement_rows 进行整行替换。\n\n"
-          "使用建议：\n"
-          "- 修改已有文件优先使用 file_edit，而非 file_write\n"
-          "- target_content 必须精确匹配原文（含缩进和空白）\n"
-          "- 匹配失败时先 file_read 确认最新内容再重试\n"
-          "- 不支持 .doc / .xls 等旧格式"
-      ))
-async def file_edit(
-    path: str,
-    target_content: str | None = None,
-    replacement_content: str | None = None,
     sheet_name: str | None = None,
-    start_line: int | None = None,
-    end_line: int | None = None,
+    target_rows: list[int] | None = None,
     allow_multiple: bool = False,
     highlight: str | None = None,
     comment: str | None = None,
-    target_rows: list[int] | None = None,
-    replacement_rows: list[list[str]] | None = None,
 ) -> ToolResult:
     """
-    精确编辑已有文件。
+    编辑 XLSX 表格文件。
 
     Args:
-        path: 文件路径，支持文本/DOCX/XLSX
-        target_content: 要被替换的原始文本（精确匹配），与 target_rows 互斥
-        replacement_content: 替换后的新文本，与 replacement_rows 互斥
-        sheet_name: XLSX 工作表名（多 Sheet 时必填）
-        start_line: 纯文本文件搜索范围起始行（1-based）
-        end_line: 纯文本文件搜索范围结束行
-        allow_multiple: 是否允许替换多个匹配（默认 False）
+        path: 文件路径，仅支持 .xlsx
+        target_content: 要被替换的行内容（与 file_read 输出格式一致）
+            格式: "cell1 | cell2 | cell3"
+            多行: 用 \n 分隔多行
+        replacement_content: 替换后的行内容
+            格式: "cell1 | cell2 | cell3"
+            多行: 用 \n 分隔多行
+            删除行: 使用 "__DELETE__"
+        sheet_name: 工作表名（单 Sheet 自动选择，多 Sheet 必填）
+        target_rows: 可选消歧参数。当 target_content 匹配多行时，
+            通过行号（1-based）指定要替换哪些行
+        allow_multiple: 是否允许替换多个匹配行（默认 False）
         highlight: 标色颜色: "yellow"/"green"/"red"/"pink"/None
         comment: 批注内容，None=不添加批注
-        target_rows: XLSX 行替换模式：要替换的行号列表（1-based）
-        replacement_rows: XLSX 行替换模式：替换后的行数据
     """
-    # ── 参数互斥校验 ──
-    text_mode = target_content is not None or replacement_content is not None
-    row_mode = target_rows is not None or replacement_rows is not None
+    import difflib
 
-    if text_mode and row_mode:
+    try:
+        import openpyxl
+        from openpyxl.comments import Comment as XlComment
+    except ImportError:
         return ToolResult(
-            content="参数冲突：target_content/replacement_content 与 target_rows/replacement_rows 互斥，不能同时使用。",
+            content="缺少 openpyxl 库。请安装: pip install openpyxl",
             is_error=True,
         )
-    if not text_mode and not row_mode:
+
+    # ── 路径安全检查 ──
+    error = _check_path_safety(path)
+    if error:
+        return ToolResult(content=error, is_error=True)
+
+    target = Path(path)
+    if not target.exists():
+        return ToolResult(content=f"文件不存在: {path}", is_error=True)
+    if not target.is_file():
+        return ToolResult(content=f"不是文件: {path}", is_error=True)
+
+    ext = target.suffix.lower()
+    if ext == ".xls":
         return ToolResult(
-            content="缺少参数：必须提供 target_content+replacement_content 或 target_rows+replacement_rows。",
+            content="不支持旧版 .xls 格式。请转换为 .xlsx 后重试。",
             is_error=True,
         )
-    if text_mode and (target_content is None or replacement_content is None):
+    if ext != ".xlsx":
         return ToolResult(
-            content="缺少参数：文本替换模式需要同时提供 target_content 和 replacement_content。",
-            is_error=True,
-        )
-    if row_mode and (target_rows is None or replacement_rows is None):
-        return ToolResult(
-            content="缺少参数：行替换模式需要同时提供 target_rows 和 replacement_rows。",
+            content=f"file_edit_table 仅支持 .xlsx 文件，当前文件类型: {ext or '(无扩展名)'}。",
             is_error=True,
         )
 
@@ -1802,7 +1658,308 @@ async def file_edit(
             is_error=True,
         )
 
-    logger.info("file_edit 开始: path=%s, text_mode=%s, row_mode=%s", path, text_mode, row_mode)
+    logger.info("file_edit_table 开始: path=%s", path)
+
+    try:
+        wb = openpyxl.load_workbook(str(path))
+    except Exception as e:
+        return ToolResult(content=f"打开 XLSX 失败: {e}", is_error=True)
+
+    # ── 获取目标 Sheet ──
+    try:
+        sheet_names = wb.sheetnames
+
+        if sheet_name is None:
+            if len(sheet_names) == 1:
+                ws = wb[sheet_names[0]]
+            else:
+                wb.close()
+                return ToolResult(
+                    content=(
+                        f"文件包含 {len(sheet_names)} 个工作表，必须指定 sheet_name。\n"
+                        f"可用工作表: {', '.join(repr(n) for n in sheet_names)}"
+                    ),
+                    is_error=True,
+                    metadata={"sheet_names": sheet_names},
+                )
+        else:
+            if sheet_name not in sheet_names:
+                wb.close()
+                return ToolResult(
+                    content=(
+                        f"工作表 \"{sheet_name}\" 不存在。\n"
+                        f"可用工作表: {', '.join(repr(n) for n in sheet_names)}"
+                    ),
+                    is_error=True,
+                    metadata={"sheet_names": sheet_names},
+                )
+            ws = wb[sheet_name]
+    except Exception as e:
+        wb.close()
+        return ToolResult(content=f"获取工作表失败: {e}", is_error=True)
+
+    # ── 收集格式化行 ──
+    max_col = ws.max_column or 0
+    formatted_rows: list[str] = []
+    for row in ws.iter_rows(min_row=1, max_row=ws.max_row, values_only=True):
+        formatted_rows.append(_format_xlsx_row(row))
+
+    total_rows = len(formatted_rows)
+    if total_rows == 0:
+        wb.close()
+        return ToolResult(
+            content="工作表为空，无法执行编辑。",
+            is_error=True,
+        )
+
+    # ── 解析 target_content 为多行 ──
+    target_lines = [_normalize_xlsx_row(line) for line in target_content.split("\n")]
+    is_delete = replacement_content.strip() == "__DELETE__"
+
+    if is_delete:
+        replacement_lines = []
+    else:
+        replacement_lines = replacement_content.split("\n")
+
+    # ── 多行匹配：在格式化行序列中搜索连续 N 行完全匹配的位置 ──
+    normalized_rows = [_normalize_xlsx_row(r) for r in formatted_rows]
+    match_count = len(target_lines)
+    all_matches: list[int] = []  # 起始行号列表（1-based）
+
+    for i in range(len(normalized_rows) - match_count + 1):
+        if all(normalized_rows[i + j] == target_lines[j] for j in range(match_count)):
+            all_matches.append(i + 1)  # 1-based
+
+    # ── 匹配结果判断 ──
+    if len(all_matches) == 0:
+        wb.close()
+        # 模糊搜索提示
+        close = difflib.get_close_matches(
+            _normalize_xlsx_row(target_content.split("\n")[0]),
+            normalized_rows,
+            n=3, cutoff=0.6,
+        )
+        hint = ""
+        if close:
+            hint = "\n最接近的行:\n" + "\n".join(f"  - {r}" for r in close)
+        return ToolResult(
+            content=f"未找到目标内容。请使用 file_read 确认工作表内容后重试。{hint}",
+            is_error=True,
+            metadata={"path": str(target.resolve()), "match_count": 0},
+        )
+
+    # 确定要操作的匹配
+    matches_to_apply: list[int] = []
+
+    if len(all_matches) == 1:
+        matches_to_apply = all_matches
+    else:
+        # 多个匹配
+        if target_rows is not None:
+            # 验证 target_rows 在匹配结果中
+            for row_num in target_rows:
+                if row_num not in all_matches:
+                    wb.close()
+                    return ToolResult(
+                        content=(
+                            f"行 {row_num} 不在匹配结果中。\n"
+                            f"匹配起始行: {all_matches}\n"
+                            f"请检查 target_rows 参数。"
+                        ),
+                        is_error=True,
+                        metadata={"matches": all_matches},
+                    )
+            matches_to_apply = sorted(target_rows)
+        elif allow_multiple:
+            matches_to_apply = all_matches
+        else:
+            wb.close()
+            return ToolResult(
+                content=(
+                    f"找到 {len(all_matches)} 处匹配，请通过以下方式消歧：\n"
+                    f"1. 使用 target_rows 指定行号（匹配起始行: {all_matches}）\n"
+                    f"2. 使用 allow_multiple=True 替换所有匹配\n"
+                    f"3. 提供更精确的 target_content"
+                ),
+                is_error=True,
+                metadata={"matches": all_matches},
+            )
+
+    # ── 合并单元格安全检查 ──
+    all_affected_rows: list[int] = []
+    for match_start in matches_to_apply:
+        all_affected_rows.extend(range(match_start, match_start + match_count))
+
+    operation = "delete" if is_delete else "replace"
+    merge_conflict = _check_merge_conflicts(ws, list(set(all_affected_rows)), operation)
+    if merge_conflict:
+        wb.close()
+        return ToolResult(content=merge_conflict, is_error=True)
+
+    # ── 标色映射 ──
+    from openpyxl.styles import PatternFill
+    _XLSX_FILL_MAP = {
+        "yellow": PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid"),
+        "green":  PatternFill(start_color="92D050", end_color="92D050", fill_type="solid"),
+        "red":    PatternFill(start_color="FF6B6B", end_color="FF6B6B", fill_type="solid"),
+        "pink":   PatternFill(start_color="FFB6C1", end_color="FFB6C1", fill_type="solid"),
+    }
+
+    actual_count = 0
+    warnings: list[str] = []
+
+    # ── 从后往前执行，避免行号偏移 ──
+    for match_start in sorted(matches_to_apply, reverse=True):
+        if is_delete:
+            # ── Case B: 删除行 ──
+            for offset in range(match_count - 1, -1, -1):
+                row_idx = match_start + offset
+                ws.delete_rows(row_idx, 1)
+            actual_count += 1
+
+        elif match_count == 1 and len(replacement_lines) == 1:
+            # ── Case A: 单行替换单行（最常见）──
+            row_idx = match_start
+            new_cells = replacement_lines[0].split(" | ")
+            target_cell_count = formatted_rows[row_idx - 1].count(" | ") + 1 if formatted_rows[row_idx - 1] else 1
+
+            if len(new_cells) != target_cell_count:
+                warnings.append(
+                    f"行 {row_idx}: 替换列数({len(new_cells)})与原列数({target_cell_count})不一致"
+                )
+
+            for col_idx, value in enumerate(new_cells, start=1):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                cell.value = _infer_cell_value(value)
+                if highlight and highlight in _XLSX_FILL_MAP:
+                    cell.fill = _XLSX_FILL_MAP[highlight]
+                if comment:
+                    cell.comment = XlComment(comment, "Agent")
+
+            # 清空多余列
+            for col_idx in range(len(new_cells) + 1, max_col + 1):
+                ws.cell(row=row_idx, column=col_idx).value = None
+            actual_count += 1
+
+        else:
+            # ── Case C: 多行替换多行（N→M）──
+            # 先处理：替换前 min(N,M) 行
+            min_count = min(match_count, len(replacement_lines))
+            for i in range(min_count):
+                row_idx = match_start + i
+                new_cells = replacement_lines[i].split(" | ")
+                for col_idx, value in enumerate(new_cells, start=1):
+                    cell = ws.cell(row=row_idx, column=col_idx)
+                    cell.value = _infer_cell_value(value)
+                    if highlight and highlight in _XLSX_FILL_MAP:
+                        cell.fill = _XLSX_FILL_MAP[highlight]
+                    if comment:
+                        cell.comment = XlComment(comment, "Agent")
+                # 清空多余列
+                for col_idx in range(len(new_cells) + 1, max_col + 1):
+                    ws.cell(row=row_idx, column=col_idx).value = None
+
+            if len(replacement_lines) > match_count:
+                # 插入额外行
+                extra_count = len(replacement_lines) - match_count
+                insert_after = match_start + match_count - 1
+                ws.insert_rows(insert_after + 1, extra_count)
+                # 填入新行数据
+                for i, line in enumerate(replacement_lines[match_count:]):
+                    row_idx = insert_after + 1 + i
+                    cells = line.split(" | ")
+                    for col_idx, value in enumerate(cells, start=1):
+                        cell = ws.cell(row=row_idx, column=col_idx)
+                        cell.value = _infer_cell_value(value)
+                        if highlight and highlight in _XLSX_FILL_MAP:
+                            cell.fill = _XLSX_FILL_MAP[highlight]
+                        if comment:
+                            cell.comment = XlComment(comment, "Agent")
+
+            elif len(replacement_lines) < match_count:
+                # 删除多余行（从后往前）
+                for i in range(match_count - 1, len(replacement_lines) - 1, -1):
+                    ws.delete_rows(match_start + i, 1)
+
+            actual_count += 1
+
+    # ── 原子写入 ──
+    try:
+        buf = io.BytesIO()
+        wb.save(buf)
+        wb.close()
+        _atomic_write_binary(target, buf.getvalue())
+    except Exception as e:
+        return ToolResult(content=f"保存 XLSX 失败: {e}", is_error=True)
+
+    msg = f"XLSX 表格编辑成功: {target.name}，共 {actual_count} 处操作。"
+    if warnings:
+        msg += f" 警告: {'; '.join(warnings[:5])}"
+    if highlight:
+        msg += " 已标色。"
+    if comment:
+        msg += " 已添加批注。"
+
+    logger.info("file_edit_table 成功: path=%s, operations=%d", target, actual_count)
+    return ToolResult(
+        content=msg,
+        metadata={
+            "path": str(target.resolve()),
+            "format": "xlsx",
+            "replacements": actual_count,
+            "highlight": highlight,
+            "comment_added": bool(comment),
+        },
+    )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# file_edit — 纯文本 + DOCX 编辑
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+@tool(name="file_edit",
+      description=(
+          "精确编辑已有文件。支持纯文本文件和 DOCX 两种类型。\n"
+          "通过 target_content 精确匹配原始内容，替换为 replacement_content。\n"
+          "支持对修改位置进行标色（highlight）和添加批注（comment）。\n\n"
+          "使用建议：\n"
+          "- 修改已有文件优先使用 file_edit，而非 file_write\n"
+          "- target_content 必须精确匹配原文（含缩进和空白）\n"
+          "- 匹配失败时先 file_read 确认最新内容再重试\n"
+          "- 不支持 .doc 旧格式\n"
+          "- 编辑 XLSX 请使用 file_edit_table"
+      ))
+async def file_edit(
+    path: str,
+    target_content: str,
+    replacement_content: str,
+    start_line: int | None = None,
+    end_line: int | None = None,
+    allow_multiple: bool = False,
+    highlight: str | None = None,
+    comment: str | None = None,
+) -> ToolResult:
+    """
+    精确编辑已有文件（纯文本 / DOCX）。
+
+    Args:
+        path: 文件路径，支持文本/DOCX
+        target_content: 要被替换的原始文本（精确匹配，必填）
+        replacement_content: 替换后的新文本（必填）
+        start_line: 纯文本文件搜索范围起始行（1-based）
+        end_line: 纯文本文件搜索范围结束行
+        allow_multiple: 是否允许替换多个匹配（默认 False）
+        highlight: 标色颜色: "yellow"/"green"/"red"/"pink"/None
+        comment: 批注内容，None=不添加批注
+    """
+    # ── highlight 值校验 ──
+    if highlight is not None and highlight not in ("yellow", "green", "red", "pink"):
+        return ToolResult(
+            content=f"不支持的 highlight 颜色: {highlight!r}。可选: yellow, green, red, pink",
+            is_error=True,
+        )
+
+    logger.info("file_edit 开始: path=%s", path)
 
     # ── 文件存在性检查 ──
     target = Path(path)
@@ -1826,6 +1983,13 @@ async def file_edit(
             is_error=True,
         )
 
+    # 拦截 XLSX，引导使用 file_edit_table
+    if ext in (".xlsx",):
+        return ToolResult(
+            content="XLSX 文件请使用 file_edit_table 工具编辑。file_edit 仅支持纯文本和 DOCX 格式。",
+            is_error=True,
+        )
+
     # ── 路由到对应编辑器 ──
     file_type = _detect_file_type(target)
 
@@ -1840,18 +2004,9 @@ async def file_edit(
             target, target_content, replacement_content,
             allow_multiple, highlight, comment,
         )
-    elif file_type == "xlsx":
-        if row_mode:
-            return await _edit_xlsx_rows(
-                target, target_rows, replacement_rows,
-                sheet_name, highlight, comment,
-            )
-        return await _edit_xlsx(
-            target, target_content, replacement_content,
-            sheet_name, allow_multiple, highlight, comment,
-        )
     else:
         return ToolResult(
-            content=f"不支持的文件类型: {ext or '(无扩展名)'}。file_edit 支持纯文本、DOCX、XLSX 格式。",
+            content=f"不支持的文件类型: {ext or '(无扩展名)'}。file_edit 支持纯文本、DOCX 格式。编辑 XLSX 请使用 file_edit_table。",
             is_error=True,
         )
+

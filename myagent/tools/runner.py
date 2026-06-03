@@ -44,6 +44,10 @@ logging.basicConfig(
     stream=sys.stderr,
 )
 
+# 屏蔽第三方库的 DEBUG 噪音（PIL、httpx 等）
+for _noisy in ("PIL", "httpx", "httpcore", "urllib3", "matplotlib"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
 
 async def _pipe_main() -> None:
     backend = os.environ.get("MYAGENT_SANDBOX_BACKEND", "subprocess")
