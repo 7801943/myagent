@@ -54,11 +54,15 @@ async def login(req: LoginRequest, request: Request):
     auth_service = get_auth_service()
     client_ip = get_client_ip(request, auth_service.trusted_proxies)
 
+    logger.info(f"Login attempt: username={req.username}, ip={client_ip}")
+
     token_info, error = await auth_service.login(req.username, req.password, client_ip)
 
     if token_info is None:
+        logger.warning(f"Login failed: username={req.username}, ip={client_ip}, error={error}")
         return LoginResponse(ok=False, error=error)
 
+    logger.info(f"Login successful: username={req.username}, ip={client_ip}")
     return LoginResponse(
         ok=True,
         token=token_info.token,
@@ -71,10 +75,15 @@ async def logout(request: Request):
     """用户登出：移除 Token 和 IP 绑定。"""
     token = _extract_token(request)
     if not token:
+        logger.warning("Logout attempt without token")
         return LogoutResponse(ok=False)
 
     auth_service = get_auth_service()
     success = await auth_service.logout(token)
+    if success:
+        logger.info("Logout successful")
+    else:
+        logger.warning("Logout failed: invalid or expired token")
     return LogoutResponse(ok=success)
 
 

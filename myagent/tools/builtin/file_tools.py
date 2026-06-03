@@ -49,16 +49,10 @@ def _check_path_safety(path: str) -> str | None:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 _TEXT_EXTENSIONS = {
-    ".txt", ".md", ".py", ".json", ".yaml", ".yml", ".toml",
-    ".xml", ".html", ".css", ".js", ".ts", ".jsx", ".tsx",
-    ".sh", ".bash", ".zsh", ".fish",
-    ".c", ".cpp", ".h", ".hpp", ".java", ".go", ".rs", ".rb",
-    ".php", ".swift", ".kt", ".scala",
-    ".sql", ".r", ".m",
+    ".txt", ".md", ".json", ".yaml", ".yml", ".toml",
+    ".xml", ".html", ".css",
     ".ini", ".cfg", ".conf", ".env", ".gitignore",
-    ".dockerfile", ".makefile",
     ".log", ".csv", ".tsv",
-    ".lua", ".vim",
 }
 
 _SPREADSHEET_EXTENSIONS = {".xlsx", ".xls"}
@@ -263,6 +257,7 @@ async def _read_text(
     meta["path"] = str(path.resolve())
     meta["encoding"] = enc
 
+    logger.info("file_read 纯文本完成: %s, 返回行数=%d", path, meta["lines_output"])
     return ToolResult(content=content, metadata=meta)
 
 
@@ -315,6 +310,7 @@ async def _read_csv(
     meta["encoding"] = enc
     meta["format"] = "csv"
 
+    logger.info("file_read CSV完成: %s, 返回行数=%d", path, meta["lines_output"])
     return ToolResult(content=content, metadata=meta)
 
 
@@ -440,6 +436,7 @@ async def _format_xlsx_sheet(
     meta["sheet"] = sheet_name
     meta["columns"] = col_count
 
+    logger.info("file_read XLSX完成: %s, sheet=%s, 返回行数=%d", path, sheet_name, meta["lines_output"])
     return ToolResult(content=content, metadata=meta)
 
 
@@ -535,6 +532,7 @@ async def _read_pdf_text(
         meta["page_count"] = page_count
         meta["pages_read"] = f"{start_page}-{end_page}"
 
+        logger.info("file_read PDF文本完成: %s, 读取页数=%d", path, end_page - start_page + 1)
         return ToolResult(content=content, metadata=meta)
 
     except Exception as e:
@@ -606,6 +604,7 @@ async def _read_pdf_base64(
                     f"可调整 start_line/end_line 读取其他页）"
                 )
                 doc.close()
+                logger.info("file_read PDF图片完成(截断): %s, 渲染页数=%d", path, page_num - start_page + 1)
                 return ToolResult(
                     content=desc,
                     content_blocks=content_blocks,
@@ -630,6 +629,7 @@ async def _read_pdf_base64(
             f"PDF 共 {page_count} 页，已渲染第 {start_page}-{end_page} 页为图片"
             f"（共 {end_page - start_page + 1} 张）。{pages_hint}"
         )
+        logger.info("file_read PDF图片完成: %s, 渲染页数=%d", path, end_page - start_page + 1)
         return ToolResult(
             content=desc,
             content_blocks=content_blocks,
@@ -708,6 +708,7 @@ async def _read_docx(
     meta["path"] = str(path.resolve())
     meta["format"] = "docx"
 
+    logger.info("file_read DOCX完成: %s, 返回行数=%d", path, meta["lines_output"])
     return ToolResult(content=content, metadata=meta)
 
 
@@ -811,6 +812,7 @@ async def _read_image_base64(path: Path) -> ToolResult:
         size_info += f"（已自动缩放，缩放后 {len(processed_data)} 字节）"
     dim_info = f"，尺寸 {width}x{height}" if width else ""
 
+    logger.info("file_read 图片完成: %s, 尺寸=%s", path, f"{width}x{height}" if width else "unknown")
     return ToolResult(
         content=f"图片: {path.name} ({final_media_type}, {size_info}{dim_info})",
         content_blocks=[{
@@ -852,6 +854,7 @@ async def _read_binary_base64(path: Path) -> ToolResult:
     mime, _ = mimetypes.guess_type(str(path))
     media_type = mime or "application/octet-stream"
 
+    logger.info("file_read 二进制完成: %s, size=%d", path, file_size)
     return ToolResult(
         content=f"二进制文件: {path.name} ({media_type}, {file_size} 字节)",
         content_blocks=[{
@@ -960,7 +963,7 @@ async def file_read(
 
     # ── 文件类型检测 ──
     file_type = _detect_file_type(target)
-    logger.debug("file_read: path=%s, file_type=%s, output_format=%s", path, file_type, output_format)
+    logger.info("file_read 开始: path=%s, file_type=%s, output_format=%s", path, file_type, output_format)
 
     # ── 路由到对应解析器 ──
     try:
@@ -1018,7 +1021,7 @@ async def file_read(
       description="将内容写入指定路径的文件。不存在则创建，已存在则覆盖。")
 async def file_write(path: str, content: str,
                      append: bool = False) -> ToolResult:
-    logger.debug("file_write: path=%s, content_len=%d, append=%s", path, len(content), append)
+    logger.info("file_write 开始: path=%s, content_len=%d, append=%s", path, len(content), append)
     error = _check_path_safety(path)
     if error:
         return ToolResult(content=error, is_error=True)
@@ -1031,7 +1034,7 @@ async def file_write(path: str, content: str,
             f.write(content)
 
         action = "追加" if append else "写入"
-        logger.debug("file_write 成功: %s %d 字符到 %s", action, len(content), target.resolve())
+        logger.info("file_write 成功: %s %d 字符到 %s", action, len(content), target.resolve())
         return ToolResult(
             content=f"文件{action}成功: {target.resolve()} ({len(content)} 字符)",
             metadata={"path": str(target.resolve()),
@@ -1048,41 +1051,15 @@ async def file_write(path: str, content: str,
 # ── 注释风格映射 ──
 _COMMENT_STYLES: dict[str, tuple[str, str]] = {
     # (prefix, suffix) — 行注释用 (prefix, "")，块注释用 (prefix, suffix)
-    ".py":  ("# ", ""),
-    ".sh":  ("# ", ""),
-    ".bash": ("# ", ""),
-    ".zsh": ("# ", ""),
-    ".fish": ("# ", ""),
-    ".rb":  ("# ", ""),
-    ".rs":  ("// ", ""),
-    ".js":  ("// ", ""),
-    ".ts":  ("// ", ""),
-    ".jsx": ("// ", ""),
-    ".tsx": ("// ", ""),
-    ".java": ("// ", ""),
-    ".go":  ("// ", ""),
-    ".c":   ("// ", ""),
-    ".cpp": ("// ", ""),
-    ".h":   ("// ", ""),
-    ".hpp": ("// ", ""),
-    ".swift": ("// ", ""),
-    ".kt":  ("// ", ""),
-    ".scala": ("// ", ""),
     ".css":  ("/* ", " */"),
     ".html": ("<!-- ", " -->"),
     ".xml":  ("<!-- ", " -->"),
     ".md":   ("<!-- ", " -->"),
-    ".lua":  ("-- ", ""),
-    ".vim":  ("\" ", ""),
-    ".sql":  ("-- ", ""),
-    ".r":    ("# ", ""),
-    ".m":    ("% ", ""),
     ".ini":  ("; ", ""),
     ".toml": ("# ", ""),
     ".yaml": ("# ", ""),
     ".yml":  ("# ", ""),
     ".conf": ("# ", ""),
-    ".dockerfile": ("# ", ""),
 }
 
 # JSON 等不支持注释的格式
@@ -1267,6 +1244,7 @@ async def _edit_text(
     elif comment_applied:
         msg += " 已添加批注注释。"
 
+    logger.info("file_edit 纯文本成功: path=%s, replacements=%d", path, actual_count)
     return ToolResult(
         content=msg + f"\n\n预览:\n{diff_preview}",
         metadata={
@@ -1494,6 +1472,7 @@ async def _edit_docx(
     elif comment:
         comment_status = " 批注添加失败，已完成文本替换。"
 
+    logger.info("file_edit DOCX成功: path=%s, replacements=%d", path, actual_count)
     return ToolResult(
         content=f"DOCX 替换成功: {path.name}，共 {actual_count} 处替换。"
                 + (" 已标色。" if highlight else "")
@@ -1642,6 +1621,7 @@ async def _edit_xlsx(
     if comment:
         msg += " 已添加批注。"
 
+    logger.info("file_edit XLSX成功: path=%s, replacements=%d", path, actual_count)
     return ToolResult(
         content=msg,
         metadata={
@@ -1731,6 +1711,7 @@ async def _edit_xlsx_rows(
     except Exception as e:
         return ToolResult(content=f"保存 XLSX 失败: {e}", is_error=True)
 
+    logger.info("file_edit XLSX行替换成功: path=%s, replaced_rows_count=%d", path, len(replaced_rows))
     return ToolResult(
         content=f"XLSX 行替换成功: {path.name}，已替换行: {replaced_rows}。"
                 + (" 已标色。" if highlight else "")
@@ -1820,6 +1801,8 @@ async def file_edit(
             content=f"不支持的 highlight 颜色: {highlight!r}。可选: yellow, green, red, pink",
             is_error=True,
         )
+
+    logger.info("file_edit 开始: path=%s, text_mode=%s, row_mode=%s", path, text_mode, row_mode)
 
     # ── 文件存在性检查 ──
     target = Path(path)

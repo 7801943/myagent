@@ -134,6 +134,7 @@ class AuthMiddleware:
                 break
 
         if not token:
+            logger.warning(f"HTTP auth failed: missing token for path {path}")
             body = '{"error": "未认证，请先登录"}'.encode("utf-8")
             await send({
                 "type": "http.response.start",
@@ -149,6 +150,7 @@ class AuthMiddleware:
         auth_service = get_auth_service()
         token_info = auth_service.validate_token(token)
         if not token_info:
+            logger.warning(f"HTTP auth failed: invalid token for path {path}")
             body = '{"error": "Token 无效或已过期"}'.encode("utf-8")
             await send({
                 "type": "http.response.start",
@@ -224,15 +226,18 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         token = ws.query_params.get("token", "")
 
         if not token:
+            logger.warning("WebSocket connection rejected: missing token")
             await ws.close(code=4001, reason="未提供认证 Token")
             return
 
         auth_service = get_auth_service()
         token_info = auth_service.validate_ws_token(token)
         if not token_info:
+            logger.warning("WebSocket connection rejected: invalid token")
             await ws.close(code=4001, reason="Token 无效或已过期，请重新登录")
             return
 
+        logger.info(f"WebSocket connection accepted: user={token_info.username}")
         # 将用户信息注入 WebSocket state
         ws.state.user = token_info
 
