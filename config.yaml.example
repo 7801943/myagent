@@ -115,3 +115,14 @@ agent:
   state:
     backend: "jsonl"          # jsonl | sqlite
     path: "./state/sessions.jsonl"
+
+# ── 认证系统 ──
+auth:
+  enabled: true                         # 是否启用认证
+  users_file: "data/users.json"         # 用户数据文件路径
+  token_ttl_seconds: 86400              # Token 有效期（秒），默认 24 小时
+  max_ips_per_user: 2                   # 每用户最大同时连接 IP 数
+  trusted_proxies: []                   # 信任的反向代理地址列表
+  # trusted_proxies:                    # 示例：Nginx 反向代理场景
+  #   - "127.0.0.1"
+  #   - "::1"

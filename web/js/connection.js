@@ -5,6 +5,7 @@
  */
 
 import { state, emit, MAX_RECONNECT, WS_URL } from './state.js';
+import { getToken } from './auth.js';
 
 let reconnectTimer = null;
 let reconnectAttempts = 0;
@@ -34,7 +35,10 @@ export function connect() {
     }
 
     try {
-        state.ws = new WebSocket(WS_URL);
+        // 携带认证 Token
+        const token = getToken();
+        const wsUrl = token ? `${WS_URL}?token=${encodeURIComponent(token)}` : WS_URL;
+        state.ws = new WebSocket(wsUrl);
     } catch (e) {
         console.error("WebSocket creation failed:", e);
         emit('ws:error', { message: "无法创建 WebSocket 连接" });

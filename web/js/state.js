@@ -11,6 +11,10 @@ export const state = {
     currentSessionId: null,
     sessions: [],
     contextWindowSize: 0,
+    // 认证状态
+    isAuthenticated: false,
+    authToken: '',
+    authUsername: '',
 };
 
 // ── 常量 ──

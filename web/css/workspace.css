@@ -13,6 +13,7 @@
     overflow: hidden;
     transition: width var(--transition-slow), opacity var(--transition-normal);
     opacity: 0;
+    padding: 0;
 }
 
 .workspace-panel.open {
@@ -20,6 +21,7 @@
     opacity: 1;
     border: none;
     margin-right: -1px;
+    padding: 12px;
 }
 
 .workspace-content {
@@ -27,7 +29,6 @@
     overflow-y: auto;
     min-height: 0;
     position: relative;
-    background: var(--bg-primary);
 }
 
 .workspace-tab-content {
@@ -40,6 +41,134 @@
     flex-direction: column;
 }
 
+/* ── Floating Canvas Card ── */
+.workspace-canvas {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    background: var(--bg-glass);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid var(--bg-glass-border);
+    border-radius: 16px;
+    overflow: hidden;
+    box-shadow: var(--shadow-lg);
+    transition: box-shadow var(--transition-fast), border-color var(--transition-fast);
+}
+
+.workspace-canvas:hover {
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.22);
+}
+
+/* ── Canvas Tab Bar ── */
+.workspace-canvas-tabs {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 8px 12px;
+    background: var(--bg-glass);
+    border-bottom: 1px solid var(--divider);
+    flex-shrink: 0;
+    min-height: 40px;
+}
+
+.canvas-tab {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 12px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    background: transparent;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    white-space: nowrap;
+    user-select: none;
+    max-width: 180px;
+}
+
+.canvas-tab:hover {
+    background: var(--bg-glass-hover);
+    color: var(--text-primary);
+}
+
+.canvas-tab.active {
+    background: var(--accent-soft);
+    color: var(--accent);
+}
+
+.canvas-tab svg {
+    flex-shrink: 0;
+    opacity: 0.8;
+}
+
+.canvas-tab span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.canvas-tab-close {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    border: none;
+    background: transparent;
+    color: var(--text-tertiary);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    opacity: 0;
+    transition: all var(--transition-fast);
+    flex-shrink: 0;
+    padding: 0;
+}
+
+.canvas-tab:hover .canvas-tab-close {
+    opacity: 0.7;
+}
+
+.canvas-tab-close:hover {
+    opacity: 1 !important;
+    background: var(--danger-soft);
+    color: var(--danger);
+}
+
+.canvas-tab-add {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border: none;
+    background: transparent;
+    color: var(--text-tertiary);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    flex-shrink: 0;
+}
+
+.canvas-tab-add:hover {
+    background: var(--bg-glass-hover);
+    color: var(--text-primary);
+}
+
+/* ── Canvas Body ── */
+.workspace-canvas-body {
+    flex: 1;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border-radius: 0 0 16px 16px;
+}
+
 /* ── Landing Text (replaces Antigravity brand) ── */
 .workspace-landing {
     display: flex;
@@ -48,17 +177,38 @@
     justify-content: center;
     height: 100%;
     padding: 30px;
-    gap: 40px;
+    gap: 16px;
     user-select: none;
+}
+
+.workspace-landing-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 80px;
+    height: 80px;
+    border-radius: 20px;
+    background: var(--bg-glass);
+    border: 1px solid var(--bg-glass-border);
+    color: var(--text-tertiary);
+    opacity: 0.5;
+    margin-bottom: 8px;
 }
 
 .workspace-landing-text {
     font-family: var(--font-sans);
     font-size: 18px;
     font-weight: 500;
-    color: var(--text-tertiary);
-    opacity: 0.6;
+    color: var(--text-secondary);
+    opacity: 0.7;
     letter-spacing: 0.04em;
+}
+
+.workspace-landing-hint {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    opacity: 0.5;
+    letter-spacing: 0.02em;
 }
 
 /* ── Workspace Empty Placeholders ── */

@@ -412,9 +412,14 @@ class WebSocketHandler:
 
     def _authenticate_user(self) -> UserContext:
         """
-        从 WebSocket 连接信息提取用户身份（认证桩）。
-        TODO: 接入真实认证系统后替换（从 cookie / header / token 解析）
+        从 WebSocket 连接信息提取用户身份。
+
+        通过 app.py 注入的 ws.state.user（TokenInfo）获取已认证的用户信息。
         """
+        token_info = getattr(self._ws.state, "user", None)
+        if token_info:
+            return UserContext(user_id=token_info.username, username=token_info.username)
+        # 兜底：不应该走到这里（app.py 已拦截无 token 连接）
         return UserContext(user_id="ws_default", username="WebSocket User")
 
     # ═══════════════════════════════════════════════════════

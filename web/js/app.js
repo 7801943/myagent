@@ -12,7 +12,8 @@ import { initContextBar } from './context-bar.js';
 import { initRouter } from './router.js';
 import { initWorkspace } from './workspace.js';
 import { connect } from './connection.js';
-import { on } from './state.js';
+import { on, state } from './state.js';
+import { initAuth } from './auth.js';
 
 // ── 初始化 ──
 // <script type="module"> 天然 defer，DOM 已就绪，无需 DOMContentLoaded
@@ -32,8 +33,24 @@ initWorkspace();
 // 消息路由
 initRouter();
 
-// WebSocket 连接
-connect();
+// ── 认证初始化 ──
+// initAuth 会检查 localStorage 中的 token，
+// 有效则隐藏登录覆盖层并触发 auth:ready，无效则显示登录页
+initAuth();
+
+// ── 认证就绪后建立 WebSocket 连接 ──
+on('auth:ready', function () {
+    connect();
+});
+
+// ── 登出时断开 WebSocket ──
+on('auth:logout', function () {
+    if (state.ws) {
+        state.ws.close();
+        state.ws = null;
+    }
+    state.isConnected = false;
+});
 
 // ── 全局快捷键注册 ──
 window.addEventListener("keydown", function (e) {
