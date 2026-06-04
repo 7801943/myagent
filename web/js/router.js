@@ -147,6 +147,13 @@ function handleMessage(data) {
 
         case "conversation_state":
             handleConversationState(data);
+            if (data.workspace_state) {
+                emit('workspace:state', data.workspace_state);
+            }
+            break;
+
+        case "workspace_state":
+            emit('workspace:state', data);
             break;
 
         case "pong":

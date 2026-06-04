@@ -74,6 +74,7 @@ class OpenFileTab:
     """前端打开的文件 Tab 状态。"""
     path: str              # 相对于 workspace root 的路径
     is_dirty: bool = False # 前端编辑器是否有未保存修改（预留）
+    revision: int = 0      # 文件被 agent 写入/编辑后递增，用于前端刷新预览
     cursor_line: int = 0   # 光标行号（预留，当前未实现）
     cursor_column: int = 0 # 光标列号（预留，当前未实现）
     scroll_top: int = 0    # 滚动位置（预留，当前未实现）
@@ -81,6 +82,7 @@ class OpenFileTab:
     def to_dict(self) -> dict:
         return {
             "path": self.path, "is_dirty": self.is_dirty,
+            "revision": self.revision,
             "cursor_line": self.cursor_line, "cursor_column": self.cursor_column,
             "scroll_top": self.scroll_top,
         }
@@ -251,6 +253,8 @@ class WorkspaceManager:
         # 检查是否已在 open_files 中
         for i, tab in enumerate(self._state.open_files):
             if tab.path == path:
+                if source == "agent":
+                    tab.revision += 1
                 self._state.active_file_index = i
                 await self._notify(source)
                 return i

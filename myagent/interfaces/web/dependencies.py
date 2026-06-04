@@ -5,13 +5,14 @@ Harness 重构：
   - 移除 AgentFactory 引用
   - SessionManager 直接构建所有组件（ProviderRouter / ToolManager / SafetyGuard）
 """
-import yaml
 from pathlib import Path
 
 from myagent.context.state import SQLiteStateStore
 from myagent.core.session import SessionManager
 from myagent.core.models import UserContext
 from myagent.interfaces.web.auth import AuthService
+from myagent.interfaces.web.services.document_service import DocumentService
+from myagent.utils.config import load_yaml_config
 
 
 # ── 全局单例（由 app.py lifespan 管理生命周期）──
@@ -19,29 +20,23 @@ from myagent.interfaces.web.auth import AuthService
 _state_store: SQLiteStateStore | None = None
 _session_manager: SessionManager | None = None
 _auth_service: AuthService | None = None
+_document_service: DocumentService | None = None
 
 
-def _load_auth_config(config_path: str = "config.yaml") -> dict:
-    """从配置文件加载 auth 配置段。"""
-    config_file = Path(config_path)
-    if not config_file.exists():
-        return {}
-    try:
-        with open(config_file, "r", encoding="utf-8") as f:
-            config = yaml.safe_load(f) or {}
-        return config.get("auth", {})
-    except Exception:
-        return {}
-
+def _load_full_config(config_path: str = "config.yaml") -> dict:
+    """加载完整 YAML 配置，并复用项目既有的环境变量解析规则。"""
+    return load_yaml_config(config_path)
 
 def init_services(config_path: str = "config.yaml") -> None:
     """初始化全局服务实例（在 lifespan startup 时调用）。"""
-    global _state_store, _session_manager, _auth_service
+    global _state_store, _session_manager, _auth_service, _document_service
     _state_store = SQLiteStateStore()
     _session_manager = SessionManager(config_path=config_path, state_store=_state_store)
 
+    full_config = _load_full_config(config_path)
+
     # 初始化 AuthService
-    auth_config = _load_auth_config(config_path)
+    auth_config = full_config.get("auth", {})
     _auth_service = AuthService(
         users_file=auth_config.get("users_file", "data/users.json"),
         token_ttl=auth_config.get("token_ttl_seconds", 86400),
@@ -49,6 +44,14 @@ def init_services(config_path: str = "config.yaml") -> None:
         trusted_proxies=auth_config.get("trusted_proxies"),
     )
     _auth_service.load_users()
+
+    # 初始化 DocumentService。工作区根目录与 SessionManager 默认 root_dir 保持一致。
+    agent_config = full_config.get("agent", {})
+    root_dir = agent_config.get("root_dir") or "."
+    _document_service = DocumentService(
+        root_dir=root_dir,
+        config=full_config.get("documents", {}),
+    )
 
 
 async def startup() -> None:
@@ -89,3 +92,9 @@ def get_auth_service() -> AuthService:
     if _auth_service is None:
         raise RuntimeError("AuthService not initialized. Call init_services() first.")
     return _auth_service
+
+def get_document_service() -> DocumentService:
+    """获取 DocumentService 实例。"""
+    if _document_service is None:
+        raise RuntimeError("DocumentService not initialized. Call init_services() first.")
+    return _document_service

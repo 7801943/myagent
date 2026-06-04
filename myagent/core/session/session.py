@@ -266,10 +266,15 @@ class Session:
             return
         tool_name = event.tool_name
         result = event.result
-        file_tools = {"file_write", "file_read", "cli_execute"}
+        file_tools = {"file_write", "file_read", "file_edit", "file_edit_table", "cli_execute"}
         if tool_name in file_tools:
             await self.workspace.update("agent", "files_changed", {})
-        if tool_name == "file_read" and hasattr(result, 'metadata'):
+
+        # 读/写/编辑工具成功操作文件后，把对应文件设为 active tab。
+        # 这让前端在 agent 操作完成后自动预览或刷新 OnlyOffice 编辑器。
+        if tool_name in {"file_read", "file_write", "file_edit", "file_edit_table"} and hasattr(result, 'metadata'):
+            if getattr(result, "is_error", False):
+                return
             file_path = result.metadata.get("path", "") if isinstance(result.metadata, dict) else ""
             if file_path:
                 import os
@@ -278,7 +283,7 @@ class Session:
                     rel_path = os.path.relpath(file_path, root)
                 else:
                     rel_path = file_path
-                await self.workspace.update("agent", "mark_llm_read", {"path": rel_path})
+                await self.workspace.update("agent", "open_file", {"path": rel_path})
 
     # ── 核心对话 ──
 
@@ -440,8 +445,9 @@ class Session:
         if self.has_user_message() and self._state_store:
             ws_json = json.dumps(state.to_dict(), ensure_ascii=False)
             await self._state_store.save_workspace(self.id, ws_json)
-        if source == "agent":
-            await self._bridge.notify_clients("workspace_state", state.to_dict())
+        # workspace_state 是前端文件树与 OnlyOffice 编辑器的单一同步源。
+        # user/agent 两类更新都广播，便于多客户端和刷新恢复保持一致。
+        await self._bridge.notify_clients("workspace_state", state.to_dict())
 
     # ── 委托 ClientBridge ──
 

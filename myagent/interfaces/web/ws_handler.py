@@ -48,6 +48,7 @@ from myagent.core.session import Session, SessionManager
 from myagent.core.session.client_bridge import ClientHandle
 from myagent.core.models import UserContext
 from myagent.context.state import StateStore
+from myagent.interfaces.web.dependencies import get_auth_service
 from myagent.interfaces.web.ws_models import INCOMING_MESSAGE_TYPES
 from myagent.utils.logging import get_logger
 
@@ -139,8 +140,9 @@ class WebSocketHandler:
             "messages": history,
         })
 
-        # ── 5. 推送初始 conversation_state ──
+        # ── 5. 推送初始状态。workspace_state 单独推送，方便前端恢复编辑器。
         await self._push_conversation_state()
+        await self._push_workspace_state()
 
         # ── 6. 消息循环 ──
         try:
@@ -154,20 +156,30 @@ class WebSocketHandler:
         finally:
             # 停止热加载（仅当不再有其他连接使用同一 Agent 时）
             # TODO: 引用计数后再停止，暂时保留不停止
-            self._cleanup()
+            await self._cleanup()
 
     # ═══════════════════════════════════════════════════════
     #  连接断开清理
     # ═══════════════════════════════════════════════════════
 
-    def _cleanup(self) -> None:
+    async def _cleanup(self) -> None:
         """
-        连接断开时清理资源：detach 客户端句柄。
+        连接断开时清理资源：detach 客户端句柄 + 注销 token 清理 IP 绑定。
         注意：不删除 Session 本身，其他连接可能还在使用。
         """
         if self._client_handle:
             self._client_handle.detach()
             self._client_handle = None
+
+        # 注销该连接的 token，清理 IP 绑定（如果没有其他 token 使用同一 IP）
+        token_info = getattr(self._ws.state, "user", None)
+        if token_info and hasattr(token_info, "token"):
+            try:
+                auth_service = get_auth_service()
+                await auth_service.logout(token_info.token)
+                logger.info(f"WebSocket disconnect: cleaned up token for user '{token_info.username}'")
+            except Exception as e:
+                logger.warning(f"Failed to cleanup token on WebSocket disconnect: {e}")
 
     # ═══════════════════════════════════════════════════════
     #  消息路由
@@ -342,6 +354,7 @@ class WebSocketHandler:
 
         await self._send_json({"type": "session_created", "session_id": new_session_id})
         await self._push_conversation_state()
+        await self._push_workspace_state()
 
     async def _handle_session_switch(self, data: dict) -> None:
         """
@@ -384,6 +397,7 @@ class WebSocketHandler:
             "messages": history,
         })
         await self._push_conversation_state()
+        await self._push_workspace_state()
 
     async def _handle_session_delete(self, data: dict) -> None:
         """处理删除会话请求。"""
@@ -459,6 +473,18 @@ class WebSocketHandler:
             await self._send_json({"type": "conversation_state", **state_dict})
         except Exception as e:
             logger.warning(f"Failed to push conversation_state: {e}")
+
+    async def _push_workspace_state(self) -> None:
+        """推送当前 workspace 快照，供前端恢复文件树和文档编辑器。"""
+        if not self._session or not self._session.workspace:
+            return
+        try:
+            await self._send_json({
+                "type": "workspace_state",
+                **self._session.workspace.snapshot().to_dict(),
+            })
+        except Exception as e:
+            logger.warning(f"Failed to push workspace_state: {e}")
 
     async def _send_json(self, data: dict) -> None:
         """安全发送 JSON 消息到 WebSocket 客户端。"""

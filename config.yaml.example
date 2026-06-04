@@ -121,8 +121,33 @@ auth:
   enabled: true                         # 是否启用认证
   users_file: "data/users.json"         # 用户数据文件路径
   token_ttl_seconds: 86400              # Token 有效期（秒），默认 24 小时
-  max_ips_per_user: 2                   # 每用户最大同时连接 IP 数
+  max_ips_per_user: 4                   # 每用户最大同时连接 IP 数
   trusted_proxies: []                   # 信任的反向代理地址列表
   # trusted_proxies:                    # 示例：Nginx 反向代理场景
   #   - "127.0.0.1"
   #   - "::1"
+
+# ── 文档预览/编辑（OnlyOffice）──
+documents:
+  enabled: false
+  onlyoffice_url: "http://localhost:8081"
+  myagent_public_url: "http://localhost:8001"
+  myagent_internal_url: "http://host.docker.internal:8001"
+  access_token_ttl_seconds: 3600
+  access_token_secret: "${MYAGENT_DOCUMENT_TOKEN_SECRET}"
+  onlyoffice_jwt_secret: "${ONLYOFFICE_JWT_SECRET}"
+  onlyoffice_jwt_header: "AuthorizationJwt"
+  supported_extensions:
+    - ".doc"
+    - ".docx"
+    - ".odt"
+    - ".rtf"
+    - ".txt"
+    - ".xls"
+    - ".xlsx"
+    - ".ods"
+    - ".csv"
+    - ".ppt"
+    - ".pptx"
+    - ".odp"
+    - ".pdf"

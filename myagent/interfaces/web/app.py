@@ -34,7 +34,7 @@ from myagent.interfaces.web.dependencies import (
     get_auth_service,
 )
 from myagent.interfaces.web.ws_handler import WebSocketHandler
-from myagent.interfaces.web.routes import health, sessions, auth
+from myagent.interfaces.web.routes import health, sessions, auth, documents
 from myagent.utils.logging import get_logger, setup_logging
 
 logger = get_logger(__name__)
@@ -79,6 +79,9 @@ PUBLIC_PATHS = {
     "/health",
     "/api/auth/login",
     "/api/config",
+    "/api/documents/download",
+    "/api/documents/callback",
+    "/api/documents/health",
     "/docs",
     "/openapi.json",
 }
@@ -218,6 +221,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
     app.include_router(health.router)
     app.include_router(sessions.router)
     app.include_router(auth.router)
+    app.include_router(documents.router)
 
     # ── WebSocket 端点 ──
     @app.websocket("/ws")

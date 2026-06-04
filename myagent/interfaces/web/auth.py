@@ -29,7 +29,7 @@ logger = get_logger(__name__)
 # ── 默认配置 ──
 
 DEFAULT_TOKEN_TTL = 86400       # 24 小时
-DEFAULT_MAX_IPS = 2
+DEFAULT_MAX_IPS = 4
 DEFAULT_ITERATIONS = 100000
 DEFAULT_USERS_FILE = "data/users.json"
 DEFAULT_USERNAME = "admin"
@@ -266,7 +266,19 @@ class AuthService:
                 active_ips=user_data.get("active_ips", []),
             )
 
-        # 从 active_ips 恢复 token 映射（启动时不恢复，需要重新登录）
+        # 启动时清空 active_ips：token 不会跨重启恢复，旧的 IP 绑定是无效的
+        # 用户需要重新登录，登录时会自动重新绑定 IP
+        needs_save = False
+        for user in self._users.values():
+            if user.active_ips:
+                logger.info(f"Clearing stale active_ips for user '{user.username}': {user.active_ips}")
+                user.active_ips = []
+                needs_save = True
+
+        if needs_save:
+            # 启动阶段为同步调用，直接同步写入文件
+            self._save_users_sync()
+
         logger.info(f"Loaded {len(self._users)} users from {self._users_file}")
 
     async def _save_users(self) -> None:
@@ -297,6 +309,29 @@ class AuthService:
                 logger.error(f"Failed to save users file: {e}")
                 if tmp_file.exists():
                     tmp_file.unlink()
+
+    def _save_users_sync(self) -> None:
+        """同步版本的用户数据持久化（用于启动阶段）。"""
+        data = {
+            "users": [
+                {
+                    "username": u.username,
+                    "password_hash": u.password_hash,
+                    "active_ips": list(u.active_ips),
+                }
+                for u in self._users.values()
+            ]
+        }
+        self._users_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp_file = self._users_file.with_suffix(".tmp")
+        try:
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            os.replace(tmp_file, self._users_file)
+        except OSError as e:
+            logger.error(f"Failed to save users file (sync): {e}")
+            if tmp_file.exists():
+                tmp_file.unlink()
 
     def _create_default_users_file(self) -> None:
         """创建默认用户数据文件。"""
@@ -442,8 +477,9 @@ class AuthService:
 
         # 检查过期
         if time.time() - info.created_at > self._token_ttl:
-            # 清理过期 token
+            # 清理过期 token + 对应的 IP 绑定
             self._tokens.pop(token_str, None)
+            self._remove_ip_if_unused(info.username, info.ip)
             return None
 
         return info
