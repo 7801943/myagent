@@ -15,7 +15,9 @@ let sessionListEl;
 let headerConnDot;
 let headerConnText;
 let headerModelName;
+let modelSelect;
 let statusIndicator;
+let fullscreenToggle;
 
 export function initHeader() {
     sidebar = document.querySelector(".sidebar");
@@ -25,10 +27,13 @@ export function initHeader() {
     headerConnDot = document.getElementById("headerConnDot");
     headerConnText = document.getElementById("headerConnText");
     headerModelName = document.getElementById("headerModelName");
+    modelSelect = document.getElementById("modelSelect");
     statusIndicator = document.getElementById("statusIndicator");
+    fullscreenToggle = document.getElementById("fullscreenToggle");
 
     // Sidebar 初始化
     initSidebar();
+    initFullscreenToggle();
 
     // 新建会话按钮
     const newChatHeaderBtn = document.getElementById("newChatHeaderBtn");
@@ -106,6 +111,65 @@ export function toggleSidebar() {
     }
 }
 
+
+function collapseSidebar() {
+    if (!sidebar || sidebar.classList.contains("collapsed")) return;
+    sidebar.classList.add("collapsed");
+    localStorage.setItem("myagent-sidebar", "collapsed");
+    if (sidebarToggle) sidebarToggle.classList.remove("active");
+}
+
+function initFullscreenToggle() {
+    if (!fullscreenToggle) return;
+
+    fullscreenToggle.addEventListener("click", function () {
+        if (document.fullscreenElement) {
+            document.exitFullscreen().catch(function (err) {
+                console.error("Exit fullscreen failed:", err);
+            });
+            return;
+        }
+
+        document.documentElement.requestFullscreen().catch(function (err) {
+            console.error("Enter fullscreen failed:", err);
+        });
+    });
+
+    document.addEventListener("fullscreenchange", updateFullscreenButton);
+    updateFullscreenButton();
+}
+
+function updateFullscreenButton() {
+    if (!fullscreenToggle) return;
+    const isFullscreen = !!document.fullscreenElement;
+    fullscreenToggle.classList.toggle("is-fullscreen", isFullscreen);
+    fullscreenToggle.title = isFullscreen ? "恢复窗口" : "全屏";
+    fullscreenToggle.setAttribute("aria-label", isFullscreen ? "恢复窗口" : "全屏");
+}
+
+function updateModelDisplays(active) {
+    const modelId = active.model_id || "";
+    const providerType = active.provider_type || "";
+    const label = modelId || "等待模型状态";
+    const title = providerType && modelId ? (providerType + " / " + modelId) : label;
+
+    if (headerModelName) {
+        headerModelName.textContent = modelId;
+        headerModelName.title = title;
+        headerModelName.classList.toggle("visible", !!modelId);
+    }
+
+    if (modelSelect) {
+        modelSelect.innerHTML = "";
+        const option = document.createElement("option");
+        option.value = modelId;
+        option.textContent = label;
+        option.selected = true;
+        modelSelect.appendChild(option);
+        modelSelect.title = title;
+    }
+}
+
 function initSidebar() {
     if (!sidebar) return;
     const saved = localStorage.getItem("myagent-sidebar");
@@ -144,13 +208,17 @@ export function updateSessionList() {
             if (e.target.classList.contains("session-item-delete")) return;
             if (s.session_id !== state.currentSessionId && !state.isProcessing) {
                 switchSession(s.session_id);
+                collapseSidebar();
             }
         });
         // 删除按钮
         const delBtn = item.querySelector(".session-item-delete");
         delBtn.addEventListener("click", function (e) {
             e.stopPropagation();
-            deleteSession(s.session_id);
+            const title = s.title || "新对话";
+            if (window.confirm(`确定要删除会话「${title}」吗？此操作不可撤销。`)) {
+                deleteSession(s.session_id);
+            }
         });
         sessionListEl.appendChild(item);
     });
@@ -174,20 +242,7 @@ export function handleStateChange(agentState) {
 // ── 会话状态 ──
 
 export function handleConversationState(data) {
-    // 更新 header 中的模型名称
-    if (headerModelName) {
-        const active = (data.model && data.model.active) || {};
-        const modelId = active.model_id || "";
-        const providerType = active.provider_type || "";
-        if (modelId) {
-            headerModelName.textContent = modelId;
-            headerModelName.title = providerType ? (providerType + " / " + modelId) : modelId;
-            headerModelName.classList.add("visible");
-        } else {
-            headerModelName.textContent = "";
-            headerModelName.classList.remove("visible");
-        }
-    }
+    updateModelDisplays((data.model && data.model.active) || {});
 
     // 更新上下文进度条（通过 context-bar.js）
     if (data.context && data.context.token_usage) {

@@ -234,3 +234,13 @@
     margin-top: 2px;
     letter-spacing: -0.01em;
 }
+
+.model-display select:disabled {
+    cursor: default;
+    opacity: 1;
+    color: var(--text-secondary);
+}
+
+.model-display .dropdown-chevron {
+    display: none;
+}

@@ -4,7 +4,7 @@
  */
 
 import { on } from './state.js';
-import { closeDocument, openDocument } from './onlyoffice-editor.js';
+import { closeAllDocuments, closeDocument, openDocument } from './onlyoffice-editor.js';
 import { send } from './connection.js';
 
 let panel;
@@ -45,11 +45,16 @@ export function initWorkspace() {
 
     // workspace_state 可能来自独立推送，也可能来自 conversation_state。
     on('workspace:state', handleWorkspaceState);
-    on('auth:logout', function () {
-        closeDocument();
-        setDocumentTitle('文档预览');
-        showOnlyOfficeHint('');
-    });
+    on('auth:logout', resetWorkspacePreview);
+    on('session:changed', resetWorkspacePreview);
+}
+
+function resetWorkspacePreview() {
+    activeDocumentSignature = '';
+    latestWorkspaceState = null;
+    closeAllDocuments();
+    setDocumentTitle('文档预览');
+    showOnlyOfficeHint('');
 }
 
 // ── Workspace State ──
@@ -75,9 +80,8 @@ function handleWorkspaceState(workspaceState) {
 
     const mode = activeFile.path.toLowerCase().endsWith('.pdf') ? 'view' : 'edit';
     const signature = getDocumentSignature(latestWorkspaceState, activeFile.path);
-    const force = signature !== activeDocumentSignature;
     activeDocumentSignature = signature;
-    openDocument(activeFile.path, mode, { force: force });
+    openDocument(activeFile.path, mode, { signature: signature });
 }
 
 function getActiveFile(workspaceState) {
@@ -225,10 +229,12 @@ function closeFileTab(index) {
     const files = latestWorkspaceState.open_files || [];
     if (index < 0 || index >= files.length) return;
 
+    const closedPath = files[index].path;
     console.info('[Workspace] closing file tab', {
         index: index,
-        path: files[index].path,
+        path: closedPath,
     });
+    closeDocument(closedPath);
 
     const nextFiles = files.slice();
     nextFiles.splice(index, 1);

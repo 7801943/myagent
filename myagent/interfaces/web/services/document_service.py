@@ -125,6 +125,9 @@ class DocumentService:
                 "callbackUrl": callback_url,
                 "lang": "zh-CN",
                 "mode": mode,
+                "customization": {
+                    "forcesave": mode == "edit",
+                },
                 "user": {
                     "id": username or "myagent-user",
                     "name": username or "MyAgent User",

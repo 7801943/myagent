@@ -256,13 +256,25 @@
     background: var(--bg-primary);
 }
 
-.onlyoffice-editor,
-.onlyoffice-editor-instance {
+.onlyoffice-editor {
     flex: 1;
     min-width: 0;
     min-height: 0;
     height: 100%;
     width: 100%;
+    position: relative;
+}
+
+.onlyoffice-editor-instance {
+    position: absolute;
+    inset: 0;
+    display: none;
+    height: 100%;
+    width: 100%;
+}
+
+.onlyoffice-editor-instance.active {
+    display: block;
 }
 
 .onlyoffice-editor iframe,

@@ -63,17 +63,6 @@ export function initChat() {
         });
     }
 
-    // Model Select listener (placeholder interface)
-    const modelSelect = document.getElementById("modelSelect");
-    if (modelSelect) {
-        modelSelect.addEventListener("change", function () {
-            console.log("Model changed to:", this.value);
-            // Future extension: send switch model event to backend when supported
-            // send({ type: "model_switch", model: this.value });
-        });
-    }
-
-
 
     // 快捷提示
     document.querySelectorAll(".quick-prompt").forEach(function (btn) {

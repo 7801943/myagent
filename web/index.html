@@ -63,21 +63,21 @@
            Unified Top Global Header (Spans full screen width!)
            ============================================================ -->
         <header class="global-header">
-            <!-- Left: Brand + Connection Status + Model Name -->
+            <!-- Left: Brand + Model Name -->
             <div class="header-left">
                 <div class="header-brand">
                     <h1 class="header-title">myagent</h1>
-                    <div class="header-conn-status" id="headerConnStatus">
-                        <span class="header-conn-dot" id="headerConnDot"></span>
-                        <span class="header-conn-text" id="headerConnText">未连接</span>
-                    </div>
                     <span class="header-model-name" id="headerModelName"></span>
                 </div>
             </div>
             <!-- Right: Action Buttons -->
             <div class="header-right">
-                <!-- User Info Badge (登录后显示) -->
-                <div id="userInfoBadge" class="user-info-badge" style="display: none;" title="点击登出">
+                <!-- User Info + Connection Badge (登录后显示) -->
+                <div id="userInfoBadge" class="user-info-badge" style="display: none;" title="当前用户与连接状态">
+                    <div class="header-conn-status" id="headerConnStatus" title="连接状态">
+                        <span class="header-conn-dot" id="headerConnDot"></span>
+                        <span class="header-conn-text" id="headerConnText">未连接</span>
+                    </div>
                     <div class="user-avatar"><span id="userInfoAvatar">A</span></div>
                     <span id="userInfoName">admin</span>
                     <button id="logoutBtn"
@@ -113,6 +113,22 @@
                     <svg class="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                         stroke-width="2">
                         <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+                    </svg>
+                </button>
+                <button id="fullscreenToggle" class="fullscreen-btn" title="全屏">
+                    <svg class="icon-fullscreen-enter" width="18" height="18" viewBox="0 0 24 24" fill="none"
+                        stroke="currentColor" stroke-width="2">
+                        <path d="M8 3H5a2 2 0 0 0-2 2v3" />
+                        <path d="M16 3h3a2 2 0 0 1 2 2v3" />
+                        <path d="M8 21H5a2 2 0 0 1-2-2v-3" />
+                        <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+                    </svg>
+                    <svg class="icon-fullscreen-exit" width="18" height="18" viewBox="0 0 24 24" fill="none"
+                        stroke="currentColor" stroke-width="2">
+                        <path d="M8 3v3a2 2 0 0 1-2 2H3" />
+                        <path d="M16 3v3a2 2 0 0 0 2 2h3" />
+                        <path d="M8 21v-3a2 2 0 0 0-2-2H3" />
+                        <path d="M16 21v-3a2 2 0 0 1 2-2h3" />
                     </svg>
                 </button>
                 <!-- Layout Mode Toggle -->
@@ -346,11 +362,9 @@
                                         <line x1="5" y1="12" x2="19" y2="12" />
                                     </svg>
                                 </button>
-                                <div class="input-dropdown">
-                                    <select id="modelSelect">
-                                        <option value="glm-5.1" selected>GLM 5.1</option>
-                                        <option value="glm-4-plus">GLM 4 Plus</option>
-                                        <option value="glm-4-flash">GLM 4 Flash</option>
+                                <div class="input-dropdown model-display" title="当前后端模型">
+                                    <select id="modelSelect" disabled>
+                                        <option value="">等待模型状态</option>
                                     </select>
                                     <svg class="dropdown-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none"
                                         stroke="currentColor" stroke-width="2.5">

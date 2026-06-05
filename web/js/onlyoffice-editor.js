@@ -1,15 +1,16 @@
 /**
  * onlyoffice-editor.js — OnlyOffice DocsAPI 封装
- * 职责：加载 DocumentServer api.js、拉取 editor config、创建/销毁编辑器。
+ * 职责：加载 DocumentServer api.js、拉取 editor config、创建/缓存/销毁编辑器。
  */
 
 import { getToken } from './auth.js';
 
 let apiPromise = null;
-let editor = null;
 let currentPath = '';
 let openSequence = 0;
 let containerCounter = 0;
+const MAX_EDITOR_CACHE = 5;
+const editorCache = new Map();
 
 function showStatus(message) {
     const statusEl = document.getElementById('onlyofficeStatus');
@@ -108,19 +109,31 @@ export async function openDocument(relativePath, mode, options) {
     const host = getContainer();
     if (!host || !relativePath) return;
 
-    const force = Boolean(options && options.force);
-    console.info('[OnlyOffice] open requested', { path: relativePath, mode: mode || 'edit', force: force });
-    if (!force && currentPath === relativePath && editor) {
-        console.info('[OnlyOffice] open skipped; document already active', { path: relativePath });
+    const sequence = ++openSequence;
+    const signature = options && options.signature ? String(options.signature) : '';
+    const normalizedMode = mode || 'edit';
+    console.info('[OnlyOffice] open requested', {
+        path: relativePath,
+        mode: normalizedMode,
+        signature: signature,
+    });
+
+    const cached = editorCache.get(relativePath);
+    if (cached && cached.signature === signature && cached.mode === normalizedMode) {
+        activateCachedEditor(relativePath);
+        console.info('[OnlyOffice] editor cache hit', { path: relativePath, containerId: cached.containerId });
+        showStatus('');
         return;
     }
+    if (cached) {
+        destroyCachedEditor(relativePath, 'stale-cache');
+    }
 
-    const sequence = ++openSequence;
     showStatus('正在打开文档...');
-    closeDocument();
+    deactivateEditors();
 
     try {
-        const data = await fetchEditorConfig(relativePath, mode || 'edit');
+        const data = await fetchEditorConfig(relativePath, normalizedMode);
         if (sequence !== openSequence) {
             console.info('[OnlyOffice] stale editor config ignored', { path: relativePath });
             return;
@@ -133,7 +146,14 @@ export async function openDocument(relativePath, mode, options) {
         }
 
         const containerId = `onlyofficeEditorInstance${++containerCounter}`;
-        host.innerHTML = `<div id="${containerId}" class="onlyoffice-editor-instance"></div>`;
+        const instanceEl = document.createElement('div');
+        instanceEl.id = containerId;
+        instanceEl.className = 'onlyoffice-editor-instance';
+        instanceEl.style.display = 'none';
+        instanceEl.style.visibility = 'hidden';
+        instanceEl.style.pointerEvents = 'none';
+        instanceEl.setAttribute('aria-hidden', 'true');
+        host.appendChild(instanceEl);
         data.config.events = Object.assign({}, data.config.events || {}, {
             onAppReady: function () {
                 console.info('[OnlyOffice] app ready', { path: relativePath });
@@ -152,26 +172,93 @@ export async function openDocument(relativePath, mode, options) {
             },
         });
         console.info('[OnlyOffice] creating editor', { path: relativePath, containerId: containerId });
-        editor = new window.DocsAPI.DocEditor(containerId, data.config);
-        currentPath = relativePath;
+        const editor = new window.DocsAPI.DocEditor(containerId, data.config);
+        editorCache.set(relativePath, {
+            path: relativePath,
+            mode: normalizedMode,
+            signature: signature,
+            editor: editor,
+            containerId: containerId,
+            element: instanceEl,
+            lastUsed: Date.now(),
+        });
+        activateCachedEditor(relativePath);
+        evictOldEditors();
         showStatus('');
     } catch (err) {
         currentPath = '';
-        host.innerHTML = '';
+        destroyCachedEditor(relativePath, 'open-failed');
         console.error('[OnlyOffice] open document failed', { path: relativePath, error: err });
         showStatus(err.message || '文档打开失败');
     }
 }
 
-export function closeDocument() {
-    if (editor && typeof editor.destroyEditor === 'function') {
+export function closeDocument(relativePath) {
+    if (relativePath) {
+        destroyCachedEditor(relativePath, 'document-closed');
+        return;
+    }
+    currentPath = '';
+    deactivateEditors();
+}
+
+export function closeAllDocuments() {
+    Array.from(editorCache.keys()).forEach(function (path) {
+        destroyCachedEditor(path, 'close-all');
+    });
+    currentPath = '';
+    showStatus('');
+}
+
+function activateCachedEditor(relativePath) {
+    const cached = editorCache.get(relativePath);
+    if (!cached) return;
+    deactivateEditors();
+    setEditorVisibility(cached, true);
+    cached.lastUsed = Date.now();
+    currentPath = relativePath;
+}
+
+function deactivateEditors() {
+    editorCache.forEach(function (cached) {
+        setEditorVisibility(cached, false);
+    });
+}
+
+function setEditorVisibility(cached, isActive) {
+    if (!cached || !cached.element) return;
+    cached.element.classList.toggle('active', isActive);
+    cached.element.style.display = isActive ? 'block' : 'none';
+    cached.element.style.visibility = isActive ? 'visible' : 'hidden';
+    cached.element.style.pointerEvents = isActive ? 'auto' : 'none';
+    cached.element.setAttribute('aria-hidden', isActive ? 'false' : 'true');
+}
+
+function evictOldEditors() {
+    while (editorCache.size > MAX_EDITOR_CACHE) {
+        const oldest = Array.from(editorCache.values())
+            .filter(function (cached) { return cached.path !== currentPath; })
+            .sort(function (a, b) { return a.lastUsed - b.lastUsed; })[0];
+        if (!oldest) return;
+        destroyCachedEditor(oldest.path, 'cache-limit');
+    }
+}
+
+function destroyCachedEditor(relativePath, reason) {
+    const cached = editorCache.get(relativePath);
+    if (!cached) return;
+
+    if (cached.editor && typeof cached.editor.destroyEditor === 'function') {
         try {
-            console.info('[OnlyOffice] destroying editor', { path: currentPath });
-            editor.destroyEditor();
+            console.info('[OnlyOffice] destroying editor', { path: relativePath, reason: reason });
+            cached.editor.destroyEditor();
         } catch (e) {
-            // 销毁失败不影响下一次重新创建编辑器。
+            console.warn('[OnlyOffice] destroy editor failed', { path: relativePath, reason: reason, error: e });
         }
     }
-    editor = null;
-    currentPath = '';
+    if (cached.element && cached.element.parentNode) {
+        cached.element.parentNode.removeChild(cached.element);
+    }
+    editorCache.delete(relativePath);
+    if (currentPath === relativePath) currentPath = '';
 }

@@ -50,6 +50,7 @@ function handleMessage(data) {
             break;
 
         case "session_created":
+            emit('session:changed', { session_id: data.session_id });
             state.currentSessionId = data.session_id;
             {
                 const messageList = document.getElementById("messageList");
@@ -63,6 +64,7 @@ function handleMessage(data) {
             break;
 
         case "session_switched":
+            emit('session:changed', { session_id: data.session_id });
             state.currentSessionId = data.session_id;
             resetProcessingState();
             {

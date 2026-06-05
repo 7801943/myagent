@@ -42,7 +42,7 @@
 .header-title {
     font-size: 16px;
     font-weight: 700;
-    letter-spacing: -0.02em;
+    letter-spacing: 0;
     background: linear-gradient(135deg, var(--accent), hsl(260, 80%, 65%));
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
@@ -60,7 +60,17 @@
     border-radius: 20px;
     background: var(--bg-glass);
     border: 1px solid var(--bg-glass-border);
-    margin-left: 4px;
+}
+
+.user-info-badge .header-conn-status {
+    margin-left: 0;
+    padding: 2px 8px;
+    background: var(--bg-primary);
+    border-color: var(--bg-glass-border);
+}
+
+.user-info-badge .header-conn-text {
+    color: var(--text-secondary);
 }
 
 .header-conn-dot {
@@ -239,5 +249,52 @@
 }
 
 [data-theme="light"] .icon-moon {
+    display: block;
+}
+
+/* ── Fullscreen Toggle ── */
+.fullscreen-btn {
+    width: 34px;
+    height: 34px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid color-mix(in srgb, var(--warning) 62%, transparent);
+    background: color-mix(in srgb, var(--warning) 18%, var(--bg-secondary));
+    color: var(--warning);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), transform var(--transition-fast);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--warning) 12%, transparent), 0 6px 16px rgba(0, 0, 0, 0.18);
+}
+
+.fullscreen-btn:hover {
+    background: var(--warning);
+    border-color: var(--warning);
+    color: #111318;
+    transform: translateY(-1px);
+}
+
+.fullscreen-btn .icon-fullscreen-exit {
+    display: none;
+}
+
+.fullscreen-btn.is-fullscreen {
+    border-color: color-mix(in srgb, var(--success) 70%, transparent);
+    background: color-mix(in srgb, var(--success) 20%, var(--bg-secondary));
+    color: var(--success);
+}
+
+.fullscreen-btn.is-fullscreen:hover {
+    background: var(--success);
+    border-color: var(--success);
+    color: #ffffff;
+}
+
+.fullscreen-btn.is-fullscreen .icon-fullscreen-enter {
+    display: none;
+}
+
+.fullscreen-btn.is-fullscreen .icon-fullscreen-exit {
     display: block;
 }
