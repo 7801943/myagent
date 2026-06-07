@@ -116,6 +116,18 @@ class WorkspaceInfo(BaseModel):
     state: dict[str, Any] | None = None
 
 
+class ClientStateInfo(BaseModel):
+    """前端运行态快照。
+
+    workspace 保存打开文件、活跃 tab 等 UI 状态；model/tools 预留给
+    前端模型选择和工具开关，后续可在动态提示词中统一注入。
+    """
+    workspace: dict[str, Any] | None = None
+    model: dict[str, Any] | None = None
+    tools: dict[str, Any] | None = None
+    extra: dict[str, Any] = {}
+
+
 # ─── SessionData（Pydantic BaseModel）──────────────────────────
 
 class SessionData(BaseModel):
@@ -138,6 +150,7 @@ class SessionData(BaseModel):
     context: SessionContext = SessionContext()
     agent: AgentInfo = AgentInfo()
     workspace: WorkspaceInfo = WorkspaceInfo()
+    client_state: ClientStateInfo = ClientStateInfo()
     extra: dict[str, Any] = {}
 
     model_config = {"arbitrary_types_allowed": True}

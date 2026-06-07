@@ -162,50 +162,34 @@ def _format_lines(
     lines: list[str],
     start_line: int,
     end_line: int | None,
-    show_line_numbers: bool,
-    max_lines: int,
     total_lines: int | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """
-    格式化行列表，添加行号，截断处理。
+    格式化行列表，始终添加行号。
     返回 (格式化后的文本, 元数据)。
     """
-    # 确定行号宽度
     display_total = total_lines or len(lines)
-    width = len(str(min(display_total, start_line + max_lines - 1)))
+    width = len(str(display_total))
 
     output_parts: list[str] = []
-    truncated = False
     actual_count = 0
 
     for i, line in enumerate(lines):
         line_num = start_line + i
         if end_line is not None and line_num > end_line:
             break
-        if actual_count >= max_lines:
-            truncated = True
-            break
 
         # 确保行以换行结尾
         if not line.endswith("\n"):
             line += "\n"
 
-        if show_line_numbers:
-            output_parts.append(f"{line_num:>{width}} | {line}")
-        else:
-            output_parts.append(line)
+        output_parts.append(f"{line_num:>{width}} | {line}")
         actual_count += 1
 
     content = "".join(output_parts)
 
-    # 截断提示
-    if truncated:
-        remaining = (total_lines or len(lines)) - (start_line + actual_count - 1)
-        content += f"\n...[截断：还有 {remaining} 行未显示，使用 start_line/end_line 翻页]\n"
-
     meta = {
         "lines_output": actual_count,
-        "truncated": truncated,
         "start_line": start_line,
         "total_lines": total_lines,
     }
@@ -221,8 +205,6 @@ async def _read_text(
     path: Path,
     start_line: int | None,
     end_line: int | None,
-    show_line_numbers: bool,
-    max_lines: int,
     encoding: str | None,
 ) -> ToolResult:
     """读取纯文本文件。"""
@@ -253,7 +235,7 @@ async def _read_text(
         )
 
     sliced = all_lines[s - 1:e]
-    content, meta = _format_lines(sliced, s, e, show_line_numbers, max_lines, total)
+    content, meta = _format_lines(sliced, s, e, total)
     meta["path"] = str(path.resolve())
     meta["encoding"] = enc
 
@@ -265,8 +247,6 @@ async def _read_csv(
     path: Path,
     start_line: int | None,
     end_line: int | None,
-    show_line_numbers: bool,
-    max_lines: int,
     encoding: str | None,
 ) -> ToolResult:
     """读取 CSV/TSV 文件。使用 csv 模块解析，按行输出。"""
@@ -305,7 +285,7 @@ async def _read_csv(
     for row in rows[s - 1:e]:
         formatted_lines.append(" | ".join(str(cell) for cell in row) + "\n")
 
-    content, meta = _format_lines(formatted_lines, s, e, show_line_numbers, max_lines, total)
+    content, meta = _format_lines(formatted_lines, s, e, total)
     meta["path"] = str(path.resolve())
     meta["encoding"] = enc
     meta["format"] = "csv"
@@ -319,8 +299,6 @@ async def _read_xlsx(
     sheet_name: str | None,
     start_line: int | None,
     end_line: int | None,
-    show_line_numbers: bool,
-    max_lines: int,
 ) -> ToolResult:
     """读取 XLSX/XLS 文件。多 Sheet 时先列出 Sheet 列表。"""
     try:
@@ -346,7 +324,6 @@ async def _read_xlsx(
                 ws = wb[sheet_names[0]]
                 return await _format_xlsx_sheet(
                     ws, sheet_names[0], wb, path, start_line, end_line,
-                    show_line_numbers, max_lines,
                 )
 
             # 多个 Sheet：列出信息
@@ -388,7 +365,6 @@ async def _read_xlsx(
         ws = wb[sheet_name]
         return await _format_xlsx_sheet(
             ws, sheet_name, wb, path, start_line, end_line,
-            show_line_numbers, max_lines,
         )
     except Exception as e:
         wb.close()
@@ -398,7 +374,6 @@ async def _read_xlsx(
 async def _format_xlsx_sheet(
     ws, sheet_name: str, wb, path: Path,
     start_line: int | None, end_line: int | None,
-    show_line_numbers: bool, max_lines: int,
 ) -> ToolResult:
     """格式化一个 XLSX 工作表的内容。"""
     total = ws.max_row or 0
@@ -430,7 +405,7 @@ async def _format_xlsx_sheet(
 
     wb.close()
 
-    content, meta = _format_lines(formatted_lines, s, e, show_line_numbers, max_lines, total)
+    content, meta = _format_lines(formatted_lines, s, e, total)
     meta["path"] = str(path.resolve())
     meta["format"] = "xlsx"
     meta["sheet"] = sheet_name
@@ -444,8 +419,6 @@ async def _read_pdf_text(
     path: Path,
     start_line: int | None,
     end_line: int | None,
-    show_line_numbers: bool,
-    max_lines: int,
 ) -> ToolResult:
     """使用 pdfplumber 提取 PDF 文本内容。"""
     # 抑制 pdfminer 的 DEBUG 日志洪水。
@@ -526,7 +499,7 @@ async def _read_pdf_text(
         total = len(all_lines)
         s = 1  # 已经只取了目标页的内容
 
-        content, meta = _format_lines(all_lines, s, None, show_line_numbers, max_lines, total)
+        content, meta = _format_lines(all_lines, s, None, total)
         meta["path"] = str(path.resolve())
         meta["format"] = "pdf"
         meta["page_count"] = page_count
@@ -649,8 +622,6 @@ async def _read_docx(
     path: Path,
     start_line: int | None,
     end_line: int | None,
-    show_line_numbers: bool,
-    max_lines: int,
 ) -> ToolResult:
     """读取 DOCX 文件。"""
     ext = path.suffix.lower()
@@ -704,7 +675,7 @@ async def _read_docx(
         )
 
     sliced = lines[s - 1:e]
-    content, meta = _format_lines(sliced, s, e, show_line_numbers, max_lines, total)
+    content, meta = _format_lines(sliced, s, e, total)
     meta["path"] = str(path.resolve())
     meta["format"] = "docx"
 
@@ -878,56 +849,45 @@ async def _read_binary_base64(path: Path) -> ToolResult:
 @tool(name="file_read",
       description=(
           "读取指定路径的文件内容。支持多种格式：\n"
-          "- 文本文件(txt/md/py/json/yaml/log等): 按行输出，支持行号\n"
+          "- 文本文件(txt/md/py/json/yaml/log等): 按行输出，带行号\n"
           "- CSV/TSV: 解析后按行输出，列用 | 分隔\n"
           "- XLSX/XLS: 多 Sheet 时先列出 Sheet 信息，需指定 sheet_name 读取\n"
           "- PDF: 提取文本(默认) 或渲染为图片(base64模式)\n"
           "- DOCX: 提取段落文本，按行输出\n"
           "- 图片(png/jpg/gif等): 以 base64 编码返回\n"
-          "参数 start_line/end_line 对文本/CSV/DOCX 表示行号，对 PDF/XLSX 表示行号/页码"
+          "参数 start_line_or_page / end_line_or_page 对文本/CSV/DOCX/XLSX 表示行号，对 PDF 表示页码"
       ))
 async def file_read(
     path: str,
     sheet_name: str | None = None,
-    start_line: int | None = None,
-    end_line: int | None = None,
-    show_line_numbers: bool = True,
+    start_line_or_page: int | None = None,
+    end_line_or_page: int | None = None,
     output_format: str = "auto",
-    max_lines: int = 2000,
     encoding: str | None = None,
 ) -> ToolResult:
     """
-    读取文件内容，支持多种格式。
+    读取文件内容，支持多种格式。始终显示行号。
 
     Args:
-        path: 文件路径
-        sheet_name: XLSX 工作表名（多 Sheet 时必填）
-        start_line: 起始行号/页码（1-based，含）
-        end_line: 结束行号/页码（含）
-        show_line_numbers: 是否在每行前显示行号（默认 True）
-        output_format: 输出格式 "auto"|"text"|"base64"
-        max_lines: 最大返回行数（防溢出，默认 2000）
-        encoding: 强制指定编码（默认自动检测）
+        path: 文件路径（支持绝对路径和相对路径）
+        sheet_name: XLSX 工作表名称。仅当读取 XLSX 文件且有多个工作表时需要指定，未指定默认先返回所有表名
+        start_line_or_page: 起始位置（从1开始，包含该行/页）。对文本/CSV/DOCX/XLSX 表示起始行号，对 PDF 表示起始页码。未指定则从第1行/页开始
+        end_line_or_page: 结束位置（包含该行/页）。对文本/CSV/DOCX/XLSX 表示结束行号，对 PDF 表示结束页码。未指定则返回到文件末尾
+        output_format: 输出格式，可选 "auto"（自动判断）、"text"（强制文本）、"base64"（强制二进制编码）。默认 "auto"
+        encoding: 强制指定文件编码（如 "utf-8"、"gbk"）。默认自动检测
     """
     # ── 参数校验 ──
     # 类型强制转换：LLM 可能传字符串形式的数字/布尔值
-    if isinstance(start_line, str):
+    if isinstance(start_line_or_page, str):
         try:
-            start_line = int(start_line)
+            start_line_or_page = int(start_line_or_page)
         except (ValueError, TypeError):
-            return ToolResult(content=f"start_line 必须是整数，收到: {start_line!r}", is_error=True)
-    if isinstance(end_line, str):
+            return ToolResult(content=f"start_line_or_page 必须是整数，收到: {start_line_or_page!r}", is_error=True)
+    if isinstance(end_line_or_page, str):
         try:
-            end_line = int(end_line)
+            end_line_or_page = int(end_line_or_page)
         except (ValueError, TypeError):
-            return ToolResult(content=f"end_line 必须是整数，收到: {end_line!r}", is_error=True)
-    if isinstance(show_line_numbers, str):
-        show_line_numbers = show_line_numbers.lower() in ("true", "1", "yes")
-    if isinstance(max_lines, str):
-        try:
-            max_lines = int(max_lines)
-        except (ValueError, TypeError):
-            max_lines = 2000
+            return ToolResult(content=f"end_line_or_page 必须是整数，收到: {end_line_or_page!r}", is_error=True)
     if isinstance(output_format, str):
         output_format = output_format.lower()
 
@@ -941,18 +901,14 @@ async def file_read(
     if not target.is_file():
         return ToolResult(content=f"不是文件: {path}", is_error=True)
 
-    # start_line / end_line 校验
-    if start_line is not None and start_line < 1:
-        start_line = 1
-    if end_line is not None and start_line is not None and end_line < start_line:
+    # start_line_or_page / end_line_or_page 校验
+    if start_line_or_page is not None and start_line_or_page < 1:
+        start_line_or_page = 1
+    if end_line_or_page is not None and start_line_or_page is not None and end_line_or_page < start_line_or_page:
         return ToolResult(
-            content=f"end_line ({end_line}) 不能小于 start_line ({start_line})。",
+            content=f"end_line_or_page ({end_line_or_page}) 不能小于 start_line_or_page ({start_line_or_page})。",
             is_error=True,
         )
-
-    # max_lines 校验
-    if max_lines < 1:
-        max_lines = 2000
 
     # output_format 校验
     if output_format not in ("auto", "text", "base64"):
@@ -975,32 +931,27 @@ async def file_read(
         if file_type == "text":
             if use_base64:
                 return await _read_binary_base64(target)
-            return await _read_text(target, start_line, end_line,
-                                    show_line_numbers, max_lines, encoding)
+            return await _read_text(target, start_line_or_page, end_line_or_page, encoding)
 
         elif file_type == "csv":
             if use_base64:
                 return await _read_binary_base64(target)
-            return await _read_csv(target, start_line, end_line,
-                                   show_line_numbers, max_lines, encoding)
+            return await _read_csv(target, start_line_or_page, end_line_or_page, encoding)
 
         elif file_type == "xlsx":
             if use_base64:
                 return await _read_binary_base64(target)
-            return await _read_xlsx(target, sheet_name, start_line, end_line,
-                                    show_line_numbers, max_lines)
+            return await _read_xlsx(target, sheet_name, start_line_or_page, end_line_or_page)
 
         elif file_type == "docx":
             if use_base64:
                 return await _read_binary_base64(target)
-            return await _read_docx(target, start_line, end_line,
-                                    show_line_numbers, max_lines)
+            return await _read_docx(target, start_line_or_page, end_line_or_page)
 
         elif file_type == "pdf":
             if use_base64:
-                return await _read_pdf_base64(target, start_line, end_line)
-            return await _read_pdf_text(target, start_line, end_line,
-                                        show_line_numbers, max_lines)
+                return await _read_pdf_base64(target, start_line_or_page, end_line_or_page)
+            return await _read_pdf_text(target, start_line_or_page, end_line_or_page)
 
         elif file_type == "image":
             return await _read_image_base64(target)
@@ -1021,6 +972,14 @@ async def file_read(
       description="将内容写入指定路径的文件。不存在则创建，已存在则覆盖。")
 async def file_write(path: str, content: str,
                      append: bool = False) -> ToolResult:
+    """
+    将内容写入指定路径的文件。
+
+    Args:
+        path: 文件路径（支持绝对路径和相对路径）。不存在则创建，已存在则覆盖
+        content: 要写入的文本内容
+        append: 是否追加到文件末尾。默认为 False（覆盖写入）
+    """
     logger.info("file_write 开始: path=%s, content_len=%d, append=%s", path, len(content), append)
     error = _check_path_safety(path)
     if error:

@@ -63,6 +63,9 @@ class PromptVariables:
     open_files: list[dict] = field(default_factory=list)
     active_file: str = ""
 
+    # ── 前端运行态 ──
+    client_state: dict = field(default_factory=dict)
+
     # ── 工具 ──
     available_tools: list[dict] = field(default_factory=list)
 
@@ -174,6 +177,9 @@ class VariableCollector:
             ]
             active_file = session.workspace.get_active_file_path() or ""
 
+        # ── 前端运行态 ──
+        client_state = session.data.client_state.model_dump()
+
         # ── 模型 ──
         active_model = dict(session.data.model.active)
         if not active_model.get("model_id"):
@@ -196,6 +202,7 @@ class VariableCollector:
             workspace_files=workspace_files,
             open_files=open_files,
             active_file=active_file,
+            client_state=client_state,
             available_tools=available_tools,
             active_model=active_model,
             token_usage=token_usage,

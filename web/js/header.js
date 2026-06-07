@@ -104,6 +104,13 @@ export function toggleSidebar() {
         sidebar.classList.remove("collapsed");
         localStorage.setItem("myagent-sidebar", "expanded");
         if (sidebarToggle) sidebarToggle.classList.add("active");
+        // Mutual exclusion: collapse workspace sidebar when session sidebar opens
+        var wsSidebar = document.getElementById("workspaceSidebar");
+        if (wsSidebar && !wsSidebar.classList.contains("collapsed")) {
+            wsSidebar.classList.add("collapsed");
+            var wsToggle = document.getElementById("workspaceExplorerToggle");
+            if (wsToggle) wsToggle.classList.remove("active");
+        }
     } else {
         sidebar.classList.add("collapsed");
         localStorage.setItem("myagent-sidebar", "collapsed");

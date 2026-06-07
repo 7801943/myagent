@@ -237,6 +237,8 @@ class WebSocketHandler:
             await self._handle_workspace_action("files_changed", data)
         elif msg_type == "workspace_scan_dir":
             await self._handle_workspace_action("scan_dir", data)
+        elif msg_type == "workspace_collapse_dir":
+            await self._handle_workspace_action("collapse_dir", data)
 
     # ═══════════════════════════════════════════════════════
     #  消息处理器
@@ -259,7 +261,10 @@ class WebSocketHandler:
             return
 
         try:
-            response = await session.chat(user_text)
+            response = await session.chat(
+                user_text,
+                client_state=data.get("client_state"),
+            )
         except RuntimeError as e:
             # Session busy（_chat_lock 被占用）
             await self._send_json({"type": "error", "message": str(e)})

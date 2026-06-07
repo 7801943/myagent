@@ -115,6 +115,7 @@ class AgentHarness:
         session_data: "SessionData",
         command_handler: Callable | None = None,
         approval_handler: Callable[[list], Awaitable[list[bool]]] | None = None,
+        dynamic_context_handler: Callable[[], Awaitable[None]] | None = None,
     ) -> StreamResult:
         """
         驱动 ReAct 循环：系统指令检查 → LLM 推理 → 工具执行 → 循环。
@@ -122,7 +123,8 @@ class AgentHarness:
         Harness 内部组装 ExecutionContext，Session 不需要感知 ExecutionContext 的存在。
 
         注意：
-          - Prompt 渲染 + 用户消息写入已在 Session.chat() 中完成并写入 context
+          - 用户消息写入已在 Session.chat() 中完成
+          - dynamic_context_handler 可在每次 LLM 调用前刷新动态 system prompt
           - StreamResult.text 返回的是已 finalized 的文本，Session 无需二次处理
           - run() 内不做 SessionData 状态持久化（由 Session 在 run() 返回后 / 异常时触发）
           - 除 CancelledError 外的 Exception 将被直接透传抛出，由上层 Session catch
@@ -147,6 +149,9 @@ class AgentHarness:
 
                 # 步骤 A：系统指令检查（/model, /new, /clear 等）
                 await check_system_commands(context, ctx, self._events)
+
+                if dynamic_context_handler:
+                    await dynamic_context_handler()
 
                 # 步骤 B：LLM 推理（LLMClient 内部完成流式聚合 + EventBus 转发）
                 # 注意：直接从 ToolInterface 获取实时工具 schema 列表（含热加载发现的新工具）

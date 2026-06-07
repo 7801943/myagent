@@ -187,6 +187,9 @@ def generate_schema(func: Callable) -> dict:
     通过自省 (introspect) 传入函数的参数列表、类型注解和默认值，
     自动构建出大模型 API（或 MCP 协议等）所需的参数描述字典。
     
+    同时解析 docstring 中 Google-style 的 Args: 段落，将参数描述
+    注入到每个 property 的 "description" 字段，帮助 LLM 正确理解参数含义。
+    
     Args:
         func (Callable): 需要提取 Schema 的目标函数。
         
@@ -195,6 +198,9 @@ def generate_schema(func: Callable) -> dict:
     """
     sig = inspect.signature(func)
     hints = _safe_get_type_hints(func) or {}
+
+    # 从 docstring 提取参数描述
+    arg_descriptions = _parse_args_from_docstring(func)
 
     properties: dict[str, Any] = {}
     required: list[str] = []
@@ -213,12 +219,127 @@ def generate_schema(func: Callable) -> dict:
         else:
             prop["default"] = param.default
 
+        # 注入 docstring 中的参数描述
+        if pname in arg_descriptions:
+            prop["description"] = arg_descriptions[pname]
+
         properties[pname] = prop
 
     schema: dict[str, Any] = {"type": "object", "properties": properties}
     if required:
         schema["required"] = required
     return schema
+
+
+def _parse_args_from_docstring(func: Callable) -> dict[str, str]:
+    """
+    从函数 docstring 中解析 Google-style Args: 段落，提取参数描述。
+    
+    支持的格式:
+        Args:
+            param_name: 描述文本
+            param_name (type): 描述文本
+            param_name: 多行描述文本
+                续行缩进
+    
+    Returns:
+        dict[str, str]: 参数名 → 描述文本 的映射
+    """
+    doc = func.__doc__
+    if not doc:
+        return {}
+
+    # 使用 inspect.cleandoc 统一缩进
+    cleaned = inspect.cleandoc(doc)
+    lines = cleaned.split("\n")
+
+    # 找到 Args: 段落的起始位置
+    args_start = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == "Args:" or stripped == "Arguments:":
+            args_start = i + 1
+            break
+
+    if args_start is None:
+        return {}
+
+    # 找到 Args: 段落的结束位置（遇到下一个顶级段落关键字）
+    section_keywords = {
+        "Returns:", "Return:", "Raises:", "Raise:", "Yields:", "Yield:",
+        "Examples:", "Example:", "Note:", "Notes:", "Warning:", "Warnings:",
+        "See Also:", "References:", "Todo:", "Attributes:", "用法:", "返回:",
+        "示例:", "注意:", "警告:",
+    }
+    args_end = len(lines)
+    for i in range(args_start, len(lines)):
+        stripped = lines[i].strip()
+        # 检查是否是新段落的开始（非空行、不缩进、以冒号结尾或匹配关键字）
+        if stripped and not lines[i].startswith(" ") and (
+            stripped in section_keywords or (stripped.endswith(":") and not stripped.startswith("-"))
+        ):
+            args_end = i
+            break
+
+    # 解析每个参数
+    result: dict[str, str] = {}
+    current_param: str | None = None
+    current_desc: list[str] = []
+
+    for i in range(args_start, args_end):
+        line = lines[i]
+        stripped = line.strip()
+
+        # 空行可能是参数之间的分隔
+        if not stripped:
+            if current_param:
+                current_desc.append("")
+            continue
+
+        # 检查是否是新参数行（顶格或缩进较少，且以 "name:" 或 "name (type):" 开头）
+        # Google-style: 参数行通常为 "    param_name: description" 或 "    param_name (type): description"
+        is_new_param = False
+        if line and not line[0].isspace():
+            # 顶格的行，可能是新参数（在 cleandoc 之后缩进被保留）
+            is_new_param = True
+        elif stripped and ":" in stripped:
+            # 检查是否匹配 "param_name:" 或 "param_name (type):" 的模式
+            import re
+            if re.match(r'^(\w+)\s*(\([^)]*\))?\s*:', stripped):
+                is_new_param = True
+
+        if is_new_param:
+            # 保存上一个参数
+            if current_param:
+                desc_text = " ".join(current_desc).strip()
+                # 清理多余空白
+                desc_text = " ".join(desc_text.split())
+                if desc_text:
+                    result[current_param] = desc_text
+
+            # 解析新参数名和描述
+            import re
+            match = re.match(r'^(\w+)\s*(?:\([^)]*\))?\s*:\s*(.*)', stripped)
+            if match:
+                current_param = match.group(1)
+                desc_part = match.group(2).strip()
+                current_desc = [desc_part] if desc_part else []
+            else:
+                current_param = None
+                current_desc = []
+        else:
+            # 续行，追加到当前参数描述
+            if current_param:
+                current_desc.append(stripped)
+
+    # 保存最后一个参数
+    if current_param:
+        desc_text = " ".join(current_desc).strip()
+        desc_text = " ".join(desc_text.split())
+        if desc_text:
+            result[current_param] = desc_text
+
+    return result
 
 
 def extract_description(func: Callable) -> str:

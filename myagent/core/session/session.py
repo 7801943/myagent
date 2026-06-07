@@ -143,6 +143,26 @@ class Session:
         """判断会话中是否存在用户消息（用于空会话过滤）。"""
         return any(m.role == "user" for m in self._context.messages)
 
+    def _should_persist_session_state(self) -> bool:
+        """只有真实用户输入后的会话才落库。
+
+        登录后自动创建的空会话会产生 workspace/client_state 变化，但这些
+        前端查看、编辑状态只应保留在内存中，避免空对话出现在会话列表。
+        """
+        return self.has_user_message()
+
+    async def _persist_workspace_if_allowed(self) -> None:
+        if not self.workspace or not self._state_store:
+            return
+        if not self._should_persist_session_state():
+            logger.debug(
+                "Workspace state kept in memory for empty session: %s",
+                self.id,
+            )
+            return
+        ws_json = json.dumps(self.workspace.snapshot().to_dict(), ensure_ascii=False)
+        await self._state_store.save_workspace(self.id, ws_json)
+
     # ── 兼容属性 ──
 
     @property
@@ -285,17 +305,62 @@ class Session:
                     rel_path = file_path
                 await self.workspace.update("agent", "open_file", {"path": rel_path})
 
+    # ── 客户端状态同步 / 动态上下文 ──
+
+    async def apply_client_state(self, client_state: dict | None) -> None:
+        """合并前端运行态，供本轮和后续动态 prompt 使用。"""
+        if not isinstance(client_state, dict):
+            return
+
+        workspace_state = client_state.get("workspace")
+        model_state = client_state.get("model")
+        tools_state = client_state.get("tools")
+
+        if isinstance(workspace_state, dict):
+            self.data.client_state.workspace = workspace_state
+            if self.workspace:
+                await self.workspace.update("user", "sync_client_state", workspace_state)
+        if isinstance(model_state, dict):
+            self.data.client_state.model = model_state
+        if isinstance(tools_state, dict):
+            self.data.client_state.tools = tools_state
+
+        extra_state = {
+            k: v
+            for k, v in client_state.items()
+            if k not in {"workspace", "model", "tools"}
+        }
+        if extra_state:
+            self.data.client_state.extra.update(extra_state)
+
+        logger.debug(
+            "Client state applied: session=%s workspace=%s model=%s tools=%s",
+            self.id,
+            isinstance(workspace_state, dict),
+            isinstance(model_state, dict),
+            isinstance(tools_state, dict),
+        )
+
+    async def refresh_dynamic_context(self) -> None:
+        """重新渲染动态 system prompt，让 LLM 调用前看到最新会话状态。"""
+        if not self._prompt_renderer:
+            return
+        from myagent.prompt.variables import VariableCollector
+        variables = await VariableCollector.collect(self)
+        rendered_prompt = self._prompt_renderer.render(variables)
+        self._context.set_system(rendered_prompt)
+
     # ── 核心对话 ──
 
-    async def chat(self, user_input: str | list) -> str:
+    async def chat(self, user_input: str | list, client_state: dict | None = None) -> str:
         """发起一轮对话。内置并发锁。"""
         if not self._chat_lock.locked():
             async with self._chat_lock:
-                return await self._chat_inner(user_input)
+                return await self._chat_inner(user_input, client_state=client_state)
         else:
             raise RuntimeError("Session is busy, please wait")
 
-    async def _chat_inner(self, user_input: str | list) -> str:
+    async def _chat_inner(self, user_input: str | list, client_state: dict | None = None) -> str:
         """
         chat 的实际实现（在锁内执行）。
 
@@ -315,12 +380,10 @@ class Session:
         logger.info(f"Session chat start: {self.id}")
 
         try:
+            await self.apply_client_state(client_state)
+
             # 1. 渲染动态 system prompt（SSPT）
-            if self._prompt_renderer:
-                from myagent.prompt.variables import VariableCollector
-                variables = await VariableCollector.collect(self)
-                rendered_prompt = self._prompt_renderer.render(variables)
-                self._context.set_system(rendered_prompt)
+            await self.refresh_dynamic_context()
 
             # 2. 写入用户消息
             if isinstance(user_input, list):
@@ -335,6 +398,7 @@ class Session:
                 session_data=self.data,
                 command_handler=self._system_command_handler,
                 approval_handler=self._approval_handler,
+                dynamic_context_handler=self.refresh_dynamic_context,
             )
 
             logger.info(f"Session chat end: {self.id}, reason={result.stop_reason}")
@@ -385,12 +449,19 @@ class Session:
     # ── 持久化 ──
 
     async def _persist_state(self, state: AgentRunState | None = None):
-        """Session 负责的 SessionData 状态持久化（消息由 ContextManager 自动持久化）。"""
+        """Session 负责的 SessionData 状态持久化（消息由 ContextManager 自动持久化）。
+
+        空会话允许在内存中维护 workspace/client_state，但不能创建数据库行。
+        """
         if state is not None:
             self.data.context.agent_run_state = state.value
         self.data.context.token_usage.used = self._context.last_usage_input_tokens
         if self.workspace:
             self.data.workspace.state = self.workspace.snapshot().to_dict()
+        if not self._should_persist_session_state():
+            logger.debug("Session state kept in memory for empty session: %s", self.id)
+            return
+        await self._persist_workspace_if_allowed()
         if self._state_store:
             await self._state_store.save_state(
                 self.id,
@@ -403,9 +474,6 @@ class Session:
         """TTL 驱逐 / WS 断开时调用：状态持久化 + 强制刷消息。"""
         await self._persist_state(self.agent_run_state)
         if self._state_store:
-            if self.workspace:
-                ws_json = json.dumps(self.workspace.snapshot().to_dict(), ensure_ascii=False)
-                await self._state_store.save_workspace(self.id, ws_json)
             await self._context.flush()
 
     async def load_messages(self) -> list:
@@ -442,9 +510,15 @@ class Session:
     # ── Workspace 回调 ──
 
     async def _on_workspace_change(self, state: "WorkspaceState", source: str) -> None:
-        if self.has_user_message() and self._state_store:
+        if self._state_store and self._should_persist_session_state():
             ws_json = json.dumps(state.to_dict(), ensure_ascii=False)
             await self._state_store.save_workspace(self.id, ws_json)
+        elif self._state_store:
+            logger.debug(
+                "Workspace change from %s kept in memory for empty session: %s",
+                source,
+                self.id,
+            )
         # workspace_state 是前端文件树与 OnlyOffice 编辑器的单一同步源。
         # user/agent 两类更新都广播，便于多客户端和刷新恢复保持一致。
         await self._bridge.notify_clients("workspace_state", state.to_dict())

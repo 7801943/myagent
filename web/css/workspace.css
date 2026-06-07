@@ -26,7 +26,7 @@
 
 .workspace-content {
     flex: 1;
-    overflow-y: auto;
+    overflow: hidden;
     min-height: 0;
     position: relative;
 }
@@ -43,6 +43,7 @@
 
 /* ── Floating Canvas Card ── */
 .workspace-canvas {
+    isolation: isolate;
     display: flex;
     flex-direction: column;
     height: 100%;
@@ -62,6 +63,8 @@
 
 /* ── Canvas Tab Bar ── */
 .workspace-canvas-tabs {
+    position: relative;
+    z-index: 2;
     display: flex;
     align-items: center;
     gap: 2px;
@@ -169,6 +172,8 @@
 
 /* ── Canvas Body ── */
 .workspace-canvas-body {
+    position: relative;
+    z-index: 1;
     flex: 1;
     overflow: hidden;
     display: flex;
@@ -245,6 +250,219 @@
     line-height: 1.5;
 }
 
+
+/* -- Workspace Explorer -- */
+.workspace-sidebar {
+    width: 360px;
+    max-width: 42vw;
+    flex-shrink: 0;
+    background: var(--bg-sidebar);
+    border-right: 1px solid var(--divider);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    transition: width var(--transition-slow), opacity var(--transition-normal);
+    opacity: 1;
+    z-index: 85;
+}
+
+.workspace-sidebar.collapsed {
+    width: 0;
+    border-right: none;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.workspace-explorer {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    height: 100%;
+    background: var(--bg-sidebar);
+    color: var(--text-secondary);
+    overflow: hidden;
+}
+
+.workspace-explorer-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    height: 38px;
+    padding: 0 10px 0 12px;
+    border-bottom: 1px solid var(--divider);
+    flex-shrink: 0;
+}
+
+.workspace-explorer-title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+    font-weight: 650;
+    color: var(--text-primary);
+}
+
+.workspace-explorer-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+.workspace-explorer-action {
+    width: 24px;
+    height: 24px;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--text-tertiary);
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+}
+
+.workspace-explorer-action:hover {
+    background: var(--bg-glass-hover);
+    color: var(--text-primary);
+    border-color: var(--bg-glass-border);
+}
+
+.workspace-explorer-empty {
+    padding: 24px 16px;
+    color: var(--text-tertiary);
+    font-size: 12px;
+    text-align: center;
+}
+
+.workspace-tree {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding: 6px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+.workspace-tree-row {
+    width: 100%;
+    height: 28px;
+    display: grid;
+    grid-template-columns: 14px 20px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 4px;
+    padding: 0 8px 0 calc(8px + var(--tree-depth, 0) * 16px);
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: default;
+    text-align: left;
+    font-size: 12px;
+    line-height: 1;
+    user-select: none;
+    white-space: nowrap;
+}
+
+.workspace-tree-row:hover {
+    background: var(--bg-glass-hover);
+    color: var(--text-primary);
+}
+
+.workspace-tree-row.selected {
+    background: var(--accent-soft);
+    border-color: color-mix(in srgb, var(--accent) 28%, transparent);
+    color: var(--text-primary);
+}
+
+.workspace-tree-row.opened .workspace-tree-name {
+    color: var(--accent);
+}
+
+.workspace-tree-row.llm-read:not(.opened) .workspace-tree-name {
+    color: var(--text-primary);
+}
+
+.workspace-tree-caret,
+.workspace-tree-icon,
+.workspace-tree-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    color: var(--text-tertiary);
+}
+
+.workspace-tree-icon {
+    font-size: 14px;
+    font-weight: normal;
+    line-height: 1;
+    width: 20px;
+    text-align: center;
+}
+
+.workspace-tree-icon i {
+    font-size: 14px;
+    line-height: 1;
+}
+
+.workspace-tree-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.workspace-tree-badge {
+    max-width: 48px;
+    font-size: 10px;
+    color: var(--text-tertiary);
+}
+
+.workspace-context-menu {
+    position: fixed;
+    z-index: 1000;
+    min-width: 168px;
+    padding: 5px;
+    border: 1px solid var(--bg-glass-border);
+    border-radius: 8px;
+    background: var(--bg-primary);
+    box-shadow: var(--shadow-lg);
+}
+
+.workspace-context-menu-item {
+    width: 100%;
+    height: 30px;
+    display: flex;
+    align-items: center;
+    padding: 0 10px;
+    border: none;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 12px;
+    text-align: left;
+    cursor: pointer;
+}
+
+.workspace-context-menu-item:hover:not(:disabled) {
+    background: var(--bg-glass-hover);
+    color: var(--text-primary);
+}
+
+.workspace-context-menu-item:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
 /* ── OnlyOffice Editor ── */
 .onlyoffice-shell {
     position: relative;
@@ -263,6 +481,7 @@
     height: 100%;
     width: 100%;
     position: relative;
+    overflow: hidden;
 }
 
 .onlyoffice-editor-instance {
@@ -271,10 +490,19 @@
     display: none;
     height: 100%;
     width: 100%;
+    min-height: 0;
+    overflow: hidden;
 }
 
 .onlyoffice-editor-instance.active {
     display: block;
+}
+
+.onlyoffice-editor-host {
+    height: 100%;
+    width: 100%;
+    min-height: 0;
+    overflow: hidden;
 }
 
 .onlyoffice-editor iframe,

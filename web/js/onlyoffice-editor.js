@@ -4,12 +4,14 @@
  */
 
 import { getToken } from './auth.js';
+import { state } from './state.js';
 
 let apiPromise = null;
 let currentPath = '';
 let openSequence = 0;
+let pendingPath = '';
 let containerCounter = 0;
-const MAX_EDITOR_CACHE = 5;
+const MAX_EDITOR_CACHE = 3;
 const editorCache = new Map();
 
 function showStatus(message) {
@@ -87,6 +89,7 @@ function loadOnlyOfficeApi(onlyofficeUrl) {
 async function fetchEditorConfig(relativePath, mode) {
     const token = getToken();
     const params = new URLSearchParams({ path: relativePath, mode: mode || 'edit' });
+    if (state.currentSessionId) params.set('session_id', state.currentSessionId);
     const response = await fetch(`/api/documents/editor-config?${params.toString()}`, {
         headers: { Authorization: 'Bearer ' + token },
     });
@@ -110,6 +113,7 @@ export async function openDocument(relativePath, mode, options) {
     if (!host || !relativePath) return;
 
     const sequence = ++openSequence;
+    pendingPath = relativePath;
     const signature = options && options.signature ? String(options.signature) : '';
     const normalizedMode = mode || 'edit';
     console.info('[OnlyOffice] open requested', {
@@ -119,14 +123,17 @@ export async function openDocument(relativePath, mode, options) {
     });
 
     const cached = editorCache.get(relativePath);
-    if (cached && cached.signature === signature && cached.mode === normalizedMode) {
+    if (cached) {
+        pendingPath = '';
         activateCachedEditor(relativePath);
-        console.info('[OnlyOffice] editor cache hit', { path: relativePath, containerId: cached.containerId });
+        console.info('[OnlyOffice] editor cache activated', {
+            path: relativePath,
+            containerId: cached.containerId,
+            cachedSignature: cached.signature,
+            requestedSignature: signature,
+        });
         showStatus('');
         return;
-    }
-    if (cached) {
-        destroyCachedEditor(relativePath, 'stale-cache');
     }
 
     showStatus('正在打开文档...');
@@ -135,25 +142,31 @@ export async function openDocument(relativePath, mode, options) {
     try {
         const data = await fetchEditorConfig(relativePath, normalizedMode);
         if (sequence !== openSequence) {
+            if (pendingPath === relativePath) pendingPath = '';
             console.info('[OnlyOffice] stale editor config ignored', { path: relativePath });
             return;
         }
         logEditorConfig(relativePath, data);
         await loadOnlyOfficeApi(data.onlyoffice_url);
         if (sequence !== openSequence) {
+            if (pendingPath === relativePath) pendingPath = '';
             console.info('[OnlyOffice] stale api load ignored', { path: relativePath });
             return;
         }
 
         const containerId = `onlyofficeEditorInstance${++containerCounter}`;
+        const slotEl = document.createElement('div');
+        slotEl.className = 'onlyoffice-editor-instance';
+        slotEl.style.display = 'none';
+        slotEl.style.visibility = 'hidden';
+        slotEl.style.pointerEvents = 'none';
+        slotEl.setAttribute('aria-hidden', 'true');
+
         const instanceEl = document.createElement('div');
         instanceEl.id = containerId;
-        instanceEl.className = 'onlyoffice-editor-instance';
-        instanceEl.style.display = 'none';
-        instanceEl.style.visibility = 'hidden';
-        instanceEl.style.pointerEvents = 'none';
-        instanceEl.setAttribute('aria-hidden', 'true');
-        host.appendChild(instanceEl);
+        instanceEl.className = 'onlyoffice-editor-host';
+        slotEl.appendChild(instanceEl);
+        host.appendChild(slotEl);
         data.config.events = Object.assign({}, data.config.events || {}, {
             onAppReady: function () {
                 console.info('[OnlyOffice] app ready', { path: relativePath });
@@ -179,13 +192,15 @@ export async function openDocument(relativePath, mode, options) {
             signature: signature,
             editor: editor,
             containerId: containerId,
-            element: instanceEl,
+            element: slotEl,
             lastUsed: Date.now(),
         });
+        pendingPath = '';
         activateCachedEditor(relativePath);
         evictOldEditors();
         showStatus('');
     } catch (err) {
+        if (pendingPath === relativePath) pendingPath = '';
         currentPath = '';
         destroyCachedEditor(relativePath, 'open-failed');
         console.error('[OnlyOffice] open document failed', { path: relativePath, error: err });
@@ -193,16 +208,33 @@ export async function openDocument(relativePath, mode, options) {
     }
 }
 
+export function activateDocument(relativePath) {
+    if (!relativePath || !editorCache.has(relativePath)) return false;
+    openSequence += 1;
+    pendingPath = '';
+    activateCachedEditor(relativePath);
+    showStatus('');
+    return true;
+}
+
 export function closeDocument(relativePath) {
     if (relativePath) {
+        if (relativePath === currentPath || relativePath === pendingPath) {
+            openSequence += 1;
+            if (relativePath === pendingPath) pendingPath = '';
+        }
         destroyCachedEditor(relativePath, 'document-closed');
         return;
     }
+    openSequence += 1;
+    pendingPath = '';
     currentPath = '';
     deactivateEditors();
 }
 
 export function closeAllDocuments() {
+    openSequence += 1;
+    pendingPath = '';
     Array.from(editorCache.keys()).forEach(function (path) {
         destroyCachedEditor(path, 'close-all');
     });
@@ -217,6 +249,16 @@ function activateCachedEditor(relativePath) {
     setEditorVisibility(cached, true);
     cached.lastUsed = Date.now();
     currentPath = relativePath;
+    requestAnimationFrame(function () {
+        window.dispatchEvent(new Event('resize'));
+        if (cached.editor && typeof cached.editor.resize === 'function') {
+            try {
+                cached.editor.resize();
+            } catch (e) {
+                console.warn('[OnlyOffice] resize editor failed', { path: relativePath, error: e });
+            }
+        }
+    });
 }
 
 function deactivateEditors() {

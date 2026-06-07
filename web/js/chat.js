@@ -9,6 +9,7 @@ import { send } from './connection.js';
 import { renderMarkdown, renderMarkdownStream } from './markdown.js';
 import { resetToolState, appendToolStart, appendToolEnd } from './tool-chip.js';
 import { escapeHtml, scrollToEnd } from './utils.js';
+import { getWorkspaceClientState } from './workspace.js';
 
 // ── DOM 渲染状态（内聚在 chat.js 内部） ──
 let currentAssistantEl = null;
@@ -103,9 +104,16 @@ export function sendMessage(text) {
     thinkingCount = 0;
     currentThinkingItem = null;
 
-    send({ type: "chat", text: text });
+    send({ type: "chat", text: text, client_state: buildClientStateSnapshot() });
     userInput.value = "";
     autoResizeInput();
+}
+
+function buildClientStateSnapshot() {
+    const workspace = getWorkspaceClientState();
+    return {
+        workspace: workspace || null,
+    };
 }
 
 // ── 停止/恢复按钮 ──

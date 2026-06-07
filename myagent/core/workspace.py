@@ -36,6 +36,7 @@
 
 import asyncio
 import copy
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -214,7 +215,9 @@ class WorkspaceManager:
             "close_file": self._handle_close_file,
             "set_active_file": self._handle_set_active_file,
             "scan_dir": self._handle_scan_dir,
+            "collapse_dir": self._handle_collapse_dir,
             "files_changed": self._handle_files_changed,
+            "sync_client_state": self._handle_sync_client_state,
             "mark_dirty": self._handle_mark_dirty,
             "mark_llm_read": self._handle_mark_llm_read,
         }.get(action)
@@ -229,7 +232,9 @@ class WorkspaceManager:
 
     async def _handle_set_root(self, source: str, data: dict) -> None:
         """设置工作空间根目录（清空所有状态，扫描根目录一层）。"""
-        root_path = data.get("root_path", "")
+        root_path = data.get("root_path", "") or data.get("path", "")
+        if root_path:
+            root_path = str(Path(root_path).expanduser().resolve())
         self._state = WorkspaceState(root_path=root_path)
         if root_path:
             files = await scan_dir_files(root_path)
@@ -242,6 +247,9 @@ class WorkspaceManager:
         line = data.get("line", 0)
         column = data.get("column", 0)
         if not path:
+            return
+        path = self._normalize_relative_path(path)
+        if not path or self._is_known_dir(path):
             return
 
         # 标记 FileInfo flag
@@ -302,6 +310,9 @@ class WorkspaceManager:
         sub_path = data.get("path", "")
         if not self._state.root_path:
             return
+        sub_path = self._normalize_relative_path(sub_path)
+        if sub_path and not self._is_known_dir(sub_path):
+            return
 
         # 扫描子目录
         new_entries = await scan_dir_files(self._state.root_path, sub_path=sub_path or None)
@@ -315,6 +326,16 @@ class WorkspaceManager:
             self._state.expanded_dirs.append(sub_path)
 
         await self._notify(source)
+
+    async def _handle_collapse_dir(self, source: str, data: dict) -> None:
+        """折叠目录：从 expanded_dirs 中移除，保持前后端同步。"""
+        path = data.get("path", "")
+        if not path:
+            return
+        path = self._normalize_relative_path(path)
+        if path and path in self._state.expanded_dirs:
+            self._state.expanded_dirs.remove(path)
+            await self._notify(source)
 
     async def _handle_files_changed(self, source: str, data: dict) -> None:
         """文件变更后刷新：重新扫描所有已展开的目录。"""
@@ -340,6 +361,69 @@ class WorkspaceManager:
         self._state.files = all_files
         await self._notify(source)
 
+    async def _handle_sync_client_state(self, source: str, data: dict) -> None:
+        """同步前端 workspace UI 状态，不接受客户端覆盖文件树/root。"""
+        if not isinstance(data, dict):
+            return
+
+        existing_by_path = {tab.path: tab for tab in self._state.open_files}
+
+        if "open_files" in data:
+            next_tabs: list[OpenFileTab] = []
+            seen: set[str] = set()
+            raw_open_files = data.get("open_files") or []
+            if not isinstance(raw_open_files, list):
+                raw_open_files = []
+
+            for item in raw_open_files[:50]:
+                if isinstance(item, dict):
+                    raw_path = item.get("path", "")
+                else:
+                    raw_path = str(item or "")
+                path = self._normalize_relative_path(raw_path)
+                if not path or path in seen or self._is_known_dir(path):
+                    continue
+
+                existing = existing_by_path.get(path)
+                tab = copy.deepcopy(existing) if existing else OpenFileTab(path=path)
+                if isinstance(item, dict):
+                    tab.is_dirty = bool(item.get("is_dirty", tab.is_dirty))
+                    tab.cursor_line = self._coerce_non_negative_int(
+                        item.get("cursor_line", tab.cursor_line)
+                    )
+                    tab.cursor_column = self._coerce_non_negative_int(
+                        item.get("cursor_column", tab.cursor_column)
+                    )
+                    tab.scroll_top = self._coerce_non_negative_int(
+                        item.get("scroll_top", tab.scroll_top)
+                    )
+                next_tabs.append(tab)
+                seen.add(path)
+
+            self._state.open_files = next_tabs
+            opened_paths = {tab.path for tab in next_tabs}
+            for f in self._state.files:
+                f.is_user_opened = f.path in opened_paths
+
+        if "active_file_index" in data:
+            index = data.get("active_file_index")
+            if isinstance(index, int) and 0 <= index < len(self._state.open_files):
+                self._state.active_file_index = index
+            else:
+                self._state.active_file_index = None
+
+        if "expanded_dirs" in data:
+            expanded_dirs: list[str] = []
+            raw_dirs = data.get("expanded_dirs") or []
+            if isinstance(raw_dirs, list):
+                for raw_dir in raw_dirs[:200]:
+                    path = self._normalize_relative_path(str(raw_dir or ""))
+                    if path and path not in expanded_dirs and self._is_known_dir(path):
+                        expanded_dirs.append(path)
+            self._state.expanded_dirs = expanded_dirs
+
+        await self._notify(source)
+
     async def _handle_mark_dirty(self, source: str, data: dict) -> None:
         """标记文件脏状态（前端编辑器用，预留）。"""
         index = data.get("index", -1)
@@ -362,6 +446,31 @@ class WorkspaceManager:
             if f.path == path:
                 setattr(f, flag, value)
                 return
+
+    def _is_known_dir(self, path: str) -> bool:
+        """判断路径是否是当前文件列表中的目录。"""
+        return any(f.path == path and f.is_dir for f in self._state.files)
+
+    @staticmethod
+    def _coerce_non_negative_int(value: Any) -> int:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return 0
+        return number if number >= 0 else 0
+
+    @staticmethod
+    def _normalize_relative_path(path: str) -> str:
+        """规范化前端传入的工作区相对路径，拒绝绝对路径和越界路径。"""
+        raw = str(path or "").replace("\\", "/").strip("/")
+        if not raw:
+            return ""
+        if Path(raw).is_absolute():
+            return ""
+        normalized = os.path.normpath(raw).replace("\\", "/")
+        if normalized == "." or normalized.startswith("../") or normalized == "..":
+            return ""
+        return normalized
 
     def _remove_direct_children(self, parent: str) -> None:
         """移除指定目录的直接子条目（用于重新扫描时替换）。"""
@@ -391,9 +500,34 @@ class WorkspaceManager:
 #  文件扫描工具函数（外部调用，非 WorkspaceManager 方法）
 # ══════════════════════════════════════
 
+IGNORED_DIR_NAMES = {
+    ".git",
+    ".hg",
+    ".svn",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "node_modules",
+    ".venv",
+    "venv",
+}
+
+
 def _scan_level_sync(root: Path, sub_path: str | None = None) -> list[FileInfo]:
     """同步扫描目录（一层，非递归），返回直接子条目列表。"""
-    target = (root / sub_path) if sub_path else root
+    root = root.expanduser().resolve()
+    if sub_path:
+        normalized = WorkspaceManager._normalize_relative_path(sub_path)
+        if not normalized:
+            return []
+        target = (root / normalized).resolve()
+    else:
+        target = root
+    if target != root and root not in target.parents:
+        return []
+    if not target.exists() or not target.is_dir():
+        return []
     result: list[FileInfo] = []
     try:
         entries = sorted(target.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower()))
@@ -402,6 +536,8 @@ def _scan_level_sync(root: Path, sub_path: str | None = None) -> list[FileInfo]:
     for entry in entries:
         # 跳过隐藏文件（保留常见配置文件）
         if entry.name.startswith('.') and entry.name not in ('.gitignore', '.env.example'):
+            continue
+        if entry.is_dir() and entry.name in IGNORED_DIR_NAMES:
             continue
 
         rel = str(entry.relative_to(root))

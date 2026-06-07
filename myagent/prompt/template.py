@@ -71,5 +71,14 @@ class PromptTemplate(BaseModel):
                         "{{ workspace_files }}"
                     ),
                 ),
+                Section(
+                    name="client_state",
+                    priority=SectionPriority.MEDIUM,
+                    enabled_when="{{ client_state.model or client_state.tools }}",
+                    template=(
+                        "{% if client_state.model %}前端模型选择状态: {{ client_state.model }}{% endif %}\n"
+                        "{% if client_state.tools %}前端工具选择状态: {{ client_state.tools }}{% endif %}"
+                    ),
+                ),
             ],
         )

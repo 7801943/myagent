@@ -16,6 +16,10 @@ class ChatMessage(BaseModel):
     """聊天消息。"""
     type: Literal["chat"] = "chat"
     text: str = Field(..., min_length=1, description="用户输入文本")
+    client_state: dict[str, Any] | None = Field(
+        None,
+        description="前端运行态快照，如 workspace/model/tools。",
+    )
 
 
 class CancelMessage(BaseModel):
@@ -236,6 +240,12 @@ class WorkspaceScanDirMessage(BaseModel):
     path: str = Field(..., description="要扫描的子目录相对路径")
 
 
+class WorkspaceCollapseDirMessage(BaseModel):
+    """前端折叠目录（从 expanded_dirs 移除）。"""
+    type: Literal["workspace_collapse_dir"] = "workspace_collapse_dir"
+    path: str = Field(..., description="要折叠的子目录相对路径")
+
+
 # ── 消息类型映射（用于解析）──
 
 INCOMING_MESSAGE_TYPES: dict[str, type[BaseModel]] = {
@@ -254,4 +264,5 @@ INCOMING_MESSAGE_TYPES: dict[str, type[BaseModel]] = {
     "workspace_set_root": WorkspaceSetRootMessage,
     "workspace_refresh": WorkspaceRefreshMessage,
     "workspace_scan_dir": WorkspaceScanDirMessage,
+    "workspace_collapse_dir": WorkspaceCollapseDirMessage,
 }

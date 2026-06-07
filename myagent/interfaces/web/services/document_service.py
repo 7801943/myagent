@@ -89,12 +89,19 @@ class DocumentService:
     def enabled(self) -> bool:
         return self.config.enabled
 
-    def build_editor_config(self, relative_path: str, username: str, mode: str = "edit") -> dict[str, Any]:
+    def build_editor_config(
+        self,
+        relative_path: str,
+        username: str,
+        mode: str = "edit",
+        workspace_root: str | None = None,
+        session_id: str = "",
+    ) -> dict[str, Any]:
         """构造前端 `new DocsAPI.DocEditor(...)` 所需配置。"""
         if not self.enabled:
             raise HTTPException(status_code=404, detail="文档预览/编辑未启用")
 
-        path = self.resolve_workspace_path(relative_path)
+        path = self.resolve_workspace_path(relative_path, workspace_root)
         ext = path.suffix.lower()
         doc_type = self._document_type(ext)
         if doc_type == "pdf":
@@ -102,7 +109,7 @@ class DocumentService:
         elif mode not in {"edit", "view"}:
             mode = "edit"
 
-        token = self._create_access_token(relative_path, username, mode)
+        token = self._create_access_token(relative_path, username, mode, session_id=session_id)
         file_url = self._internal_api_url("/api/documents/download", relative_path, token)
         callback_url = self._internal_api_url("/api/documents/callback", relative_path, token)
         document_key = self._document_key(path, relative_path)
@@ -159,10 +166,15 @@ class DocumentService:
             "onlyoffice_jwt_header": self.config.onlyoffice_jwt_header,
         }
 
-    def download_file(self, relative_path: str, token: str) -> FileResponse:
+    def download_file(
+        self,
+        relative_path: str,
+        token: str,
+        workspace_root: str | None = None,
+    ) -> FileResponse:
         """供 OnlyOffice DocumentServer 通过 document.url 下载原文件。"""
-        token_payload = self._verify_access_token(token, relative_path)
-        path = self.resolve_workspace_path(relative_path)
+        token_payload = self.verify_access_token(token, relative_path)
+        path = self.resolve_workspace_path(relative_path, workspace_root)
         logger.info(
             "OnlyOffice download accepted: path=%s user=%s size=%s token_exp=%s",
             relative_path,
@@ -172,9 +184,15 @@ class DocumentService:
         )
         return FileResponse(path=str(path), filename=path.name)
 
-    async def handle_callback(self, relative_path: str, token: str, payload: dict[str, Any]) -> dict[str, int]:
+    async def handle_callback(
+        self,
+        relative_path: str,
+        token: str,
+        payload: dict[str, Any],
+        workspace_root: str | None = None,
+    ) -> dict[str, int]:
         """处理 OnlyOffice 保存回调。status=2/6 时下载新文件并原子覆盖。"""
-        token_payload = self._verify_access_token(token, relative_path)
+        token_payload = self.verify_access_token(token, relative_path)
         status = int(payload.get("status") or 0)
         logger.info(
             "OnlyOffice callback received: path=%s status=%s user=%s has_url=%s payload_keys=%s",
@@ -193,7 +211,7 @@ class DocumentService:
             logger.warning("OnlyOffice callback missing download url: path=%s status=%s", relative_path, status)
             return {"error": 1}
 
-        path = self.resolve_workspace_path(relative_path)
+        path = self.resolve_workspace_path(relative_path, workspace_root)
         tmp_path = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
 
         # OnlyOffice 回调里的 url 是一次性下载地址，需要服务端立即拉取。
@@ -230,14 +248,15 @@ class DocumentService:
 
         return {"error": 0}
 
-    def resolve_workspace_path(self, relative_path: str) -> Path:
+    def resolve_workspace_path(self, relative_path: str, workspace_root: str | None = None) -> Path:
         """解析并校验 workspace 相对路径，禁止越界和目录访问。"""
         if not relative_path or Path(relative_path).is_absolute():
             raise HTTPException(status_code=400, detail="文件路径必须是工作区相对路径")
 
         normalized = relative_path.replace("\\", "/").strip("/")
-        path = (self.root_dir / normalized).resolve()
-        if path != self.root_dir and self.root_dir not in path.parents:
+        root_dir = Path(workspace_root).expanduser().resolve() if workspace_root else self.root_dir
+        path = (root_dir / normalized).resolve()
+        if path != root_dir and root_dir not in path.parents:
             raise HTTPException(status_code=403, detail="文件不在工作区内")
         if not path.exists() or path.is_dir():
             raise HTTPException(status_code=404, detail="文件不存在")
@@ -253,19 +272,26 @@ class DocumentService:
             f"?path={quote(relative_path, safe='')}&token={quote(token, safe='')}"
         )
 
-    def _create_access_token(self, relative_path: str, username: str, mode: str) -> str:
+    def _create_access_token(
+        self,
+        relative_path: str,
+        username: str,
+        mode: str,
+        session_id: str = "",
+    ) -> str:
         now = int(time.time())
         payload = {
             "path": relative_path,
             "username": username,
             "mode": mode,
+            "session_id": session_id,
             "iat": now,
             "exp": now + self.config.access_token_ttl_seconds,
             "nonce": secrets.token_urlsafe(12),
         }
         return self._sign_payload(payload, self._access_secret)
 
-    def _verify_access_token(self, token: str, relative_path: str) -> dict[str, Any]:
+    def verify_access_token(self, token: str, relative_path: str) -> dict[str, Any]:
         payload = self._verify_signed_payload(token, self._access_secret)
         if payload.get("path") != relative_path:
             raise HTTPException(status_code=403, detail="文档 token 与路径不匹配")
