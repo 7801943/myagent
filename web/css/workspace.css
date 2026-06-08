@@ -68,11 +68,66 @@
     display: flex;
     align-items: center;
     gap: 2px;
-    padding: 8px 12px;
+    padding: 8px 4px;
     background: var(--bg-glass);
     border-bottom: 1px solid var(--divider);
     flex-shrink: 0;
     min-height: 40px;
+}
+
+/* ── Tab Scroll Container ── */
+.canvas-tab-scroll-wrapper {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    position: relative;
+    overflow: hidden;
+}
+
+.canvas-tab-scroll-area {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scroll-behavior: smooth;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    padding: 0 2px;
+}
+
+.canvas-tab-scroll-area::-webkit-scrollbar {
+    display: none;
+}
+
+/* ── Tab Scroll Buttons ── */
+.canvas-tab-scroll-btn {
+    width: 24px;
+    height: 24px;
+    flex-shrink: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    border-radius: 6px;
+    background: var(--bg-glass-hover);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    z-index: 3;
+    padding: 0;
+}
+
+.canvas-tab-scroll-btn:hover {
+    background: var(--accent-soft);
+    color: var(--accent);
+}
+
+.canvas-tab-scroll-btn.visible {
+    display: flex;
 }
 
 .canvas-tab {
@@ -256,7 +311,7 @@
     width: 360px;
     max-width: 42vw;
     flex-shrink: 0;
-    background: var(--bg-sidebar);
+    background: var(--bg-panel);
     border-right: 1px solid var(--divider);
     display: flex;
     flex-direction: column;
@@ -279,7 +334,7 @@
     flex: 1;
     min-height: 0;
     height: 100%;
-    background: var(--bg-sidebar);
+    background: var(--bg-panel);
     color: var(--text-secondary);
     overflow: hidden;
 }

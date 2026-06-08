@@ -25,6 +25,7 @@
     --bg-secondary: hsl(220, 15%, 16%);
     --bg-tertiary: hsl(220, 12%, 20%);
     --bg-sidebar: hsl(220, 22%, 7%);
+    --bg-panel: hsl(220, 16%, 12%);
     --bg-glass: rgba(255, 255, 255, 0.04);
     --bg-glass-hover: rgba(255, 255, 255, 0.08);
     --bg-glass-border: rgba(255, 255, 255, 0.08);
@@ -66,6 +67,7 @@
     --bg-secondary: hsl(220, 20%, 96%);
     --bg-tertiary: hsl(220, 15%, 90%);
     --bg-sidebar: hsl(220, 18%, 86%);
+    --bg-panel: hsl(220, 20%, 96%);
     --bg-glass: rgba(255, 255, 255, 0.7);
     --bg-glass-hover: rgba(255, 255, 255, 0.85);
     --bg-glass-border: rgba(0, 0, 0, 0.06);

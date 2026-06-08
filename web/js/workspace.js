@@ -198,17 +198,84 @@ function renderFileTabs(workspaceState) {
 
     canvasTabsContainer.innerHTML = '';
 
+    // Left scroll button
+    const scrollLeftBtn = createScrollButton('left');
+    canvasTabsContainer.appendChild(scrollLeftBtn);
+
+    // Scroll wrapper + scroll area
+    const scrollWrapper = document.createElement('div');
+    scrollWrapper.className = 'canvas-tab-scroll-wrapper';
+    const scrollArea = document.createElement('div');
+    scrollArea.className = 'canvas-tab-scroll-area';
+
     if (!files.length) {
-        canvasTabsContainer.appendChild(createPlaceholderTab());
-        canvasTabsContainer.appendChild(createAddButton());
-        return;
+        scrollArea.appendChild(createPlaceholderTab());
+    } else {
+        files.forEach(function (file, index) {
+            const tab = createFileTab(file, index, index === activeIndex);
+            scrollArea.appendChild(tab);
+        });
     }
 
-    files.forEach(function (file, index) {
-        const tab = createFileTab(file, index, index === activeIndex);
-        canvasTabsContainer.appendChild(tab);
-    });
+    scrollWrapper.appendChild(scrollArea);
+    canvasTabsContainer.appendChild(scrollWrapper);
+
+    // Right scroll button
+    const scrollRightBtn = createScrollButton('right');
+    canvasTabsContainer.appendChild(scrollRightBtn);
+
+    // Add button (outside scroll area)
     canvasTabsContainer.appendChild(createAddButton());
+
+    // Setup scroll detection
+    setupTabScroll(scrollArea, scrollLeftBtn, scrollRightBtn);
+
+    // Auto-scroll to active tab
+    if (files.length) {
+        requestAnimationFrame(function () {
+            var activeTab = scrollArea.querySelector('.canvas-tab.active');
+            if (activeTab) {
+                activeTab.scrollIntoView({ inline: 'nearest', behavior: 'smooth' });
+            }
+        });
+    }
+}
+
+function createScrollButton(direction) {
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'canvas-tab-scroll-btn';
+    btn.title = direction === 'left' ? '向左滚动' : '向右滚动';
+    var arrow = direction === 'left'
+        ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>'
+        : '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 6 15 12 9 18"/></svg>';
+    btn.innerHTML = arrow;
+    btn.dataset.direction = direction;
+    return btn;
+}
+
+function setupTabScroll(scrollArea, leftBtn, rightBtn) {
+    function updateButtons() {
+        var sl = scrollArea.scrollLeft;
+        var maxScroll = scrollArea.scrollWidth - scrollArea.clientWidth;
+        leftBtn.classList.toggle('visible', sl > 4);
+        rightBtn.classList.toggle('visible', sl < maxScroll - 4);
+    }
+
+    scrollArea.addEventListener('scroll', updateButtons);
+
+    leftBtn.addEventListener('click', function () {
+        scrollArea.scrollBy({ left: -160, behavior: 'smooth' });
+    });
+
+    rightBtn.addEventListener('click', function () {
+        scrollArea.scrollBy({ left: 160, behavior: 'smooth' });
+    });
+
+    // Initial check + deferred check (after layout settles)
+    updateButtons();
+    requestAnimationFrame(updateButtons);
+    setTimeout(updateButtons, 200);
 }
 
 function createFileTab(file, index, isActive) {

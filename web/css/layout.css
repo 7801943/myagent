@@ -103,7 +103,7 @@
 .sidebar {
     width: 240px;
     flex-shrink: 0;
-    background: var(--bg-sidebar);
+    background: var(--bg-panel);
     border-right: none;
     display: flex;
     flex-direction: column;
@@ -330,7 +330,7 @@
     min-width: 0;
     height: 100%;
     position: relative;
-    background: var(--bg-primary);
+    background: var(--bg-panel);
     border: none;
     outline: none;
 }
