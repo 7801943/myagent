@@ -753,13 +753,7 @@ async def _read_docx(
     except Exception as e:
         return ToolResult(content=f"打开 DOCX 失败: {e}", is_error=True)
 
-    lines: list[str] = []
-    for para in doc.paragraphs:
-        text = para.text
-        if text.strip():
-            lines.append(text + "\n")
-        else:
-            lines.append("\n")  # 保留空行
+    lines = _extract_docx_lines(doc)
 
     total = len(lines)
     if total == 0:
@@ -785,6 +779,52 @@ async def _read_docx(
 
     logger.info("file_read DOCX完成: %s, 返回行数=%d", path, meta["lines_output"])
     return ToolResult(content=content, metadata=meta)
+
+
+def _iter_docx_body_blocks(doc: Any):
+    """按 DOCX body XML 顺序产出段落和表格。"""
+    from docx.oxml.table import CT_Tbl
+    from docx.oxml.text.paragraph import CT_P
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    for child in doc.element.body.iterchildren():
+        if isinstance(child, CT_P):
+            yield Paragraph(child, doc)
+        elif isinstance(child, CT_Tbl):
+            yield Table(child, doc)
+
+
+def _format_docx_table_cell(text: str) -> str:
+    """把单元格内多段文本压成 Markdown 表格单元格。"""
+    compact = " / ".join(part.strip() for part in text.splitlines() if part.strip())
+    return compact.replace("|", r"\|")
+
+
+def _extract_docx_lines(doc: Any) -> list[str]:
+    """按文档内容流提取 DOCX 段落和表格文本。"""
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    lines: list[str] = []
+    table_index = 0
+
+    for block in _iter_docx_body_blocks(doc):
+        if isinstance(block, Paragraph):
+            text = block.text
+            lines.append(text + "\n" if text.strip() else "\n")
+            continue
+
+        if isinstance(block, Table):
+            table_index += 1
+            lines.append(f"[表格 {table_index}]\n")
+            for row in block.rows:
+                cells = [_format_docx_table_cell(cell.text) for cell in row.cells]
+                row_text = " | ".join(cells)
+                lines.append(f"| {row_text} |\n")
+            lines.append(f"[/表格 {table_index}]\n")
+
+    return lines
 
 
 # 大图片自动缩放阈值（超过此尺寸则按比例缩小）
@@ -957,9 +997,9 @@ async def _read_binary_base64(path: Path) -> ToolResult:
           "- CSV/TSV: 解析后按行输出，列用 | 分隔\n"
           "- XLSX/XLS: 多 Sheet 时先列出 Sheet 信息，需指定 sheet_name 读取\n"
           "- PDF: 提取文本(默认) 或渲染为图片(base64模式)\n"
-          "- DOCX: 提取段落文本，按行输出\n"
+          "- DOCX: 按文档内容顺序提取段落和表格，按行输出（不支持按真实 Word 页码定位）\n"
           "- 图片(png/jpg/gif等): 以 base64 编码返回\n"
-          "参数 start_line_or_page / end_line_or_page 对文本/CSV/DOCX/XLSX 表示行号，对 PDF 表示页码"
+          "参数 start_line_or_page / end_line_or_page 对文本/CSV/DOCX/XLSX 表示输出行号，对 PDF 表示页码；DOCX 不支持真实 Word 页码定位"
       ))
 async def file_read(
     path: str,
@@ -978,7 +1018,7 @@ async def file_read(
     读取文件内容，支持多种格式。始终显示行号。
 
     Args:
-        path: 文件路径（支持绝对路径和相对路径）
+        path: 文件路径。推荐传入绝对路径；如果用户给的是相对路径，调用前请先用当前 workspace root 拼接成绝对路径。本工具不会按 workspace root 自动解析相对路径
         sheet_name: XLSX 工作表名称。仅当读取 XLSX 文件且有多个工作表时需要指定，未指定默认先返回所有表名
         start_line_or_page: 起始位置（从1开始，包含该行/页）。对文本/CSV/DOCX/XLSX 表示起始行号，对 PDF 表示起始页码。未指定则从第1行/页开始
         end_line_or_page: 结束位置（包含该行/页）。对文本/CSV/DOCX/XLSX 表示结束行号，对 PDF 表示结束页码。未指定则返回到文件末尾
@@ -1094,7 +1134,7 @@ async def file_write(path: str, content: str,
     将内容写入指定路径的文件。
 
     Args:
-        path: 文件路径（支持绝对路径和相对路径）。不存在则创建，已存在则覆盖
+        path: 文件路径。推荐传入绝对路径；如果用户给的是相对路径，调用前请先用当前 workspace root 拼接成绝对路径。本工具不会按 workspace root 自动解析相对路径。不存在则创建，已存在则覆盖
         content: 要写入的文本内容
         append: 是否追加到文件末尾。默认为 False（覆盖写入）
     """
@@ -2820,7 +2860,7 @@ async def file_edit_table(
     结构化编辑 XLSX 表格文件。
 
     Args:
-        path: 文件路径，仅支持 .xlsx
+        path: 文件路径，仅支持 .xlsx。推荐传入绝对路径；如果用户给的是相对路径，调用前请先用当前 workspace root 拼接成绝对路径。本工具不会按 workspace root 自动解析相对路径
         operation: 编辑动作。可选 set_range/update_cells/clear_range/format_range/append_rows/update_rows_by_key/upsert_rows/delete_rows/insert_rows
         sheet_name: 工作表名。单 Sheet 自动选择；table_name 可唯一定位时也可省略
         payload: operation 对应的结构化参数
@@ -3101,7 +3141,7 @@ async def file_edit(
     精确编辑已有文件（纯文本 / DOCX）。
 
     Args:
-        path: 文件路径，支持文本/DOCX
+        path: 文件路径，支持文本/DOCX。推荐传入绝对路径；如果用户给的是相对路径，调用前请先用当前 workspace root 拼接成绝对路径。本工具不会按 workspace root 自动解析相对路径
         target_content: 要被替换的原始文本（精确匹配，必填）
         replacement_content: 替换后的新文本（必填）
         start_line: 纯文本文件搜索范围起始行（1-based）
