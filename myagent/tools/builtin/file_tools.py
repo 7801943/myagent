@@ -6,11 +6,15 @@ FileRead / FileWrite 工具函数。
 """
 import base64
 import csv
+import hashlib
 import io
+import json
 import logging
 import mimetypes
 import os
-from copy import deepcopy
+import re
+from copy import copy, deepcopy
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -299,6 +303,11 @@ async def _read_xlsx(
     sheet_name: str | None,
     start_line: int | None,
     end_line: int | None,
+    xlsx_range: str | None = None,
+    render_mode: str = "values",
+    row_mode: str = "text",
+    include_tables: bool = True,
+    include_merges: bool = True,
 ) -> ToolResult:
     """读取 XLSX/XLS 文件。多 Sheet 时先列出 Sheet 列表。"""
     try:
@@ -309,8 +318,28 @@ async def _read_xlsx(
             is_error=True,
         )
 
+    render_mode = (render_mode or "values").lower()
+    row_mode = (row_mode or "text").lower()
+    if render_mode not in ("values", "formulas", "both"):
+        return ToolResult(
+            content=f"不支持的 render_mode: {render_mode}。可选: values, formulas, both",
+            is_error=True,
+        )
+    if row_mode not in ("text", "arrays", "objects"):
+        return ToolResult(
+            content=f"不支持的 row_mode: {row_mode}。可选: text, arrays, objects",
+            is_error=True,
+        )
+
     try:
-        wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+        if render_mode == "both":
+            wb = openpyxl.load_workbook(str(path), read_only=False, data_only=False)
+            value_wb = openpyxl.load_workbook(str(path), read_only=False, data_only=True)
+        else:
+            wb = openpyxl.load_workbook(
+                str(path), read_only=False, data_only=(render_mode == "values")
+            )
+            value_wb = None
     except Exception as e:
         return ToolResult(content=f"打开 XLSX 失败: {e}", is_error=True)
 
@@ -320,10 +349,13 @@ async def _read_xlsx(
         # ── 未指定 sheet_name：列出所有工作表 ──
         if sheet_name is None:
             if len(sheet_names) == 1:
-                # 只有一个 Sheet，直接读取
                 ws = wb[sheet_names[0]]
+                value_ws = value_wb[sheet_names[0]] if value_wb else None
                 return await _format_xlsx_sheet(
                     ws, sheet_names[0], wb, path, start_line, end_line,
+                    xlsx_range=xlsx_range, render_mode=render_mode,
+                    row_mode=row_mode, value_ws=value_ws,
+                    include_tables=include_tables, include_merges=include_merges,
                 )
 
             # 多个 Sheet：列出信息
@@ -333,13 +365,18 @@ async def _read_xlsx(
                 ws = wb[name]
                 row_count = ws.max_row or 0
                 col_count = ws.max_column or 0
-                lines.append(f"  [{i}] \"{name}\" ({row_count} 行 × {col_count} 列)\n")
+                table_count = len(_worksheet_tables(ws))
+                table_hint = f", {table_count} 个表格" if table_count else ""
+                lines.append(f"  [{i}] \"{name}\" ({row_count} 行 × {col_count} 列{table_hint})\n")
             lines.append(
                 "\n请指定 sheet_name 参数选择要读取的工作表。\n"
                 f"示例: file_read(path=\"{path}\", sheet_name=\"{sheet_names[0]}\")\n"
             )
 
+            profile = _profile_workbook(wb)
             wb.close()
+            if value_wb:
+                value_wb.close()
             return ToolResult(
                 content="".join(lines),
                 metadata={
@@ -347,12 +384,16 @@ async def _read_xlsx(
                     "format": "xlsx",
                     "sheet_count": len(sheet_names),
                     "sheet_names": sheet_names,
+                    "workbook": profile,
+                    "structure_token": _hash_json(profile),
                 },
             )
 
         # ── 指定了 sheet_name ──
         if sheet_name not in sheet_names:
             wb.close()
+            if value_wb:
+                value_wb.close()
             return ToolResult(
                 content=(
                     f"工作表 \"{sheet_name}\" 不存在。\n"
@@ -363,53 +404,116 @@ async def _read_xlsx(
             )
 
         ws = wb[sheet_name]
+        value_ws = value_wb[sheet_name] if value_wb else None
         return await _format_xlsx_sheet(
             ws, sheet_name, wb, path, start_line, end_line,
+            xlsx_range=xlsx_range, render_mode=render_mode,
+            row_mode=row_mode, value_ws=value_ws,
+            include_tables=include_tables, include_merges=include_merges,
         )
     except Exception as e:
         wb.close()
+        if 'value_wb' in locals() and value_wb:
+            value_wb.close()
         return ToolResult(content=f"读取 XLSX 失败: {e}", is_error=True)
 
 
 async def _format_xlsx_sheet(
     ws, sheet_name: str, wb, path: Path,
     start_line: int | None, end_line: int | None,
+    xlsx_range: str | None = None,
+    render_mode: str = "values",
+    row_mode: str = "text",
+    value_ws=None,
+    include_tables: bool = True,
+    include_merges: bool = True,
 ) -> ToolResult:
     """格式化一个 XLSX 工作表的内容。"""
     total = ws.max_row or 0
     col_count = ws.max_column or 0
 
     if total == 0:
+        metadata = {"path": str(path.resolve()), "format": "xlsx", "sheet": sheet_name}
+        metadata["workbook"] = _profile_workbook(wb)
+        metadata["structure_token"] = _hash_json(metadata["workbook"])
         wb.close()
-        return ToolResult(
-            content=f"工作表 \"{sheet_name}\" 为空。",
-            metadata={"path": str(path.resolve()), "sheet": sheet_name},
-        )
+        if value_ws is not None:
+            value_ws.parent.close()
+        return ToolResult(content=f"工作表 \"{sheet_name}\" 为空。", metadata=metadata)
 
-    s = max(1, start_line or 1)
-    e = min(end_line or total, total) if end_line else total
+    if xlsx_range:
+        min_col, min_row, max_col, max_row = _parse_a1_range(xlsx_range)
+        s, e = min_row, max_row
+    else:
+        s = max(1, start_line or 1)
+        e = min(end_line or total, total) if end_line else total
+        min_col, min_row, max_col, max_row = 1, s, col_count, e
 
     if s > total:
         wb.close()
+        if value_ws is not None:
+            value_ws.parent.close()
         return ToolResult(
             content=f"工作表共 {total} 行，start_line={s} 超出范围。",
             is_error=True,
             metadata={"total_lines": total, "sheet": sheet_name},
         )
 
-    # 读取行数据
-    formatted_lines: list[str] = []
-    for row_idx, row in enumerate(ws.iter_rows(min_row=s, max_row=e, values_only=True), start=s):
-        cells = [str(cell) if cell is not None else "" for cell in row]
-        formatted_lines.append(" | ".join(cells) + "\n")
+    display_lines: list[str] = []
+    rows: list[list[Any]] = []
+    for row_idx in range(min_row, max_row + 1):
+        display_cells: list[str] = []
+        row_values: list[Any] = []
+        for col_idx in range(min_col, max_col + 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            value_cell = value_ws.cell(row=row_idx, column=col_idx) if value_ws else None
+            payload = _xlsx_cell_payload(cell, value_cell, render_mode)
+            row_values.append(payload)
+            display_cells.append(_xlsx_cell_display(payload))
+        rows.append(row_values)
+        display_lines.append(" | ".join(display_cells) + "\n")
+
+    content, meta = _format_lines(display_lines, min_row, max_row, total)
+    selected_range = _range_from_bounds(min_col, min_row, max_col, max_row)
+    profile = _profile_workbook(wb)
+    sheet_profile = next(
+        (sheet for sheet in profile.get("sheets", []) if sheet.get("name") == sheet_name),
+        {},
+    )
+
+    metadata_rows: Any = rows
+    headers: list[str] | None = None
+    if row_mode == "objects" and rows:
+        headers = [str(_metadata_scalar(v) or "") for v in rows[0]]
+        metadata_rows = []
+        for row in rows[1:]:
+            metadata_rows.append({headers[i]: _metadata_scalar(row[i]) for i in range(len(headers)) if headers[i]})
+    elif row_mode == "arrays":
+        metadata_rows = [[_metadata_scalar(v) for v in row] for row in rows]
+
+    meta.update({
+        "path": str(path.resolve()),
+        "format": "xlsx",
+        "sheet": sheet_name,
+        "columns": col_count,
+        "range": selected_range,
+        "render_mode": render_mode,
+        "row_mode": row_mode,
+        "rows": metadata_rows,
+        "workbook": profile,
+        "structure_token": _hash_json(profile),
+        "content_token": _content_token(ws, (min_col, min_row, max_col, max_row)),
+    })
+    if headers is not None:
+        meta["headers"] = headers
+    if include_tables:
+        meta["tables"] = sheet_profile.get("tables", [])
+    if include_merges:
+        meta["merged_ranges"] = sheet_profile.get("merged_ranges", [])
 
     wb.close()
-
-    content, meta = _format_lines(formatted_lines, s, e, total)
-    meta["path"] = str(path.resolve())
-    meta["format"] = "xlsx"
-    meta["sheet"] = sheet_name
-    meta["columns"] = col_count
+    if value_ws is not None:
+        value_ws.parent.close()
 
     logger.info("file_read XLSX完成: %s, sheet=%s, 返回行数=%d", path, sheet_name, meta["lines_output"])
     return ToolResult(content=content, metadata=meta)
@@ -864,6 +968,11 @@ async def file_read(
     end_line_or_page: int | None = None,
     output_format: str = "auto",
     encoding: str | None = None,
+    xlsx_range: str | None = None,
+    render_mode: str = "values",
+    row_mode: str = "text",
+    include_tables: bool = True,
+    include_merges: bool = True,
 ) -> ToolResult:
     """
     读取文件内容，支持多种格式。始终显示行号。
@@ -875,6 +984,11 @@ async def file_read(
         end_line_or_page: 结束位置（包含该行/页）。对文本/CSV/DOCX/XLSX 表示结束行号，对 PDF 表示结束页码。未指定则返回到文件末尾
         output_format: 输出格式，可选 "auto"（自动判断）、"text"（强制文本）、"base64"（强制二进制编码）。默认 "auto"
         encoding: 强制指定文件编码（如 "utf-8"、"gbk"）。默认自动检测
+        xlsx_range: XLSX 专用 A1 区域（如 "A1:D20"）。指定后优先于 start_line_or_page/end_line_or_page
+        render_mode: XLSX 专用读取模式，可选 "values"、"formulas"、"both"
+        row_mode: XLSX 专用 metadata 行模式，可选 "text"、"arrays"、"objects"
+        include_tables: XLSX metadata 是否包含 Excel tables 摘要
+        include_merges: XLSX metadata 是否包含合并单元格摘要
     """
     # ── 参数校验 ──
     # 类型强制转换：LLM 可能传字符串形式的数字/布尔值
@@ -941,7 +1055,11 @@ async def file_read(
         elif file_type == "xlsx":
             if use_base64:
                 return await _read_binary_base64(target)
-            return await _read_xlsx(target, sheet_name, start_line_or_page, end_line_or_page)
+            return await _read_xlsx(
+                target, sheet_name, start_line_or_page, end_line_or_page,
+                xlsx_range=xlsx_range, render_mode=render_mode, row_mode=row_mode,
+                include_tables=include_tables, include_merges=include_merges,
+            )
 
         elif file_type == "docx":
             if use_base64:
@@ -1450,144 +1568,1285 @@ async def _edit_docx(
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# XLSX 编辑辅助函数
+# XLSX 结构化读写辅助函数
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def _normalize_xlsx_row(formatted: str) -> str:
-    """归一化行文本，用于匹配比较。去除首尾空白，压缩 pipe 周围多余空格。"""
-    return " | ".join(c.strip() for c in formatted.split(" | "))
+_XLSX_STRUCTURAL_OPS = {"append_rows", "upsert_rows", "delete_rows", "insert_rows"}
+_XLSX_ROW_STRUCTURE_OPS = {"delete_rows", "insert_rows"}
+_XLSX_VALUE_INPUTS = {"auto", "raw", "formula"}
+_XLSX_CELL_KINDS = {"text", "number", "bool", "date", "formula", "blank"}
 
 
-def _format_xlsx_row(row) -> str:
-    """将 openpyxl 行数据格式化为 pipe 分隔文本（与 file_read 一致）。"""
-    cells = [str(cell) if cell is not None else "" for cell in row]
-    return " | ".join(cells)
+def _hash_json(data: Any) -> str:
+    """生成短 hash，用于 workbook structure/content token。"""
+    raw = json.dumps(data, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
-def _infer_cell_value(s: str):
-    """尝试将字符串转为合适的 Python 类型。"""
-    s = s.strip()
-    if s == "":
-        return None
-    # 整数
-    try:
-        return int(s)
-    except ValueError:
-        pass
-    # 浮点
-    try:
-        return float(s)
-    except ValueError:
-        pass
-    # 布尔
-    if s.lower() in ("true", "false"):
-        return s.lower() == "true"
-    return s
+def _json_value(value: Any) -> Any:
+    """把 openpyxl 值转换成 JSON metadata 友好的值。"""
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
 
 
-def _check_merge_conflicts(ws, affected_rows: list[int], operation: str) -> str | None:
-    """
-    检查操作是否会影响合并单元格区域。
+def _metadata_scalar(value: Any) -> Any:
+    if isinstance(value, dict):
+        if "formula" in value:
+            return value
+        return value.get("value")
+    return _json_value(value)
 
-    Args:
-        ws: 工作表
-        affected_rows: 受影响的行号列表
-        operation: "replace" | "delete" | "insert"
 
-    Returns:
-        冲突描述字符串，无冲突返回 None
-    """
-    conflicts = []
-    for mr in ws.merged_cells.ranges:
-        merge_rows = set(range(mr.min_row, mr.max_row + 1))
-        affected_set = set(affected_rows)
+def _xlsx_cell_payload(cell, value_cell=None, render_mode: str = "values") -> Any:
+    """返回单元格的结构化读取值。"""
+    if render_mode == "both":
+        formula_value = cell.value
+        calculated = value_cell.value if value_cell is not None else None
+        if isinstance(formula_value, str) and formula_value.startswith("="):
+            return {"formula": formula_value, "value": _json_value(calculated)}
+        return _json_value(calculated if value_cell is not None else formula_value)
+    return _json_value(cell.value)
 
-        if operation == "replace":
-            overlap = merge_rows & affected_set
-            if overlap and overlap != merge_rows:
-                conflicts.append(
-                    f"合并区域 {mr} 与替换行 {sorted(overlap)} 部分重叠"
-                )
 
-        elif operation == "delete":
-            overlap = merge_rows & affected_set
-            if overlap and overlap != merge_rows:
-                conflicts.append(
-                    f"删除行 {sorted(overlap)} 会破坏合并区域 {mr}"
-                )
+def _xlsx_cell_display(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        formula = value.get("formula")
+        calculated = value.get("value")
+        if formula and calculated not in (None, ""):
+            return f"{formula} => {calculated}"
+        if formula:
+            return str(formula)
+        return str(value.get("value") or "")
+    return str(value)
 
-        elif operation == "insert":
-            insert_row = min(affected_rows)
-            if mr.min_row < insert_row <= mr.max_row:
-                conflicts.append(
-                    f"在行 {insert_row} 插入会破坏合并区域 {mr}"
-                )
 
-    if conflicts:
-        return "操作被阻止——涉及合并单元格冲突：\n" + "\n".join(f"  - {c}" for c in conflicts)
+def _parse_a1_range(cell_range: str) -> tuple[int, int, int, int]:
+    """解析 A1 range，返回 min_col, min_row, max_col, max_row。"""
+    from openpyxl.utils.cell import range_boundaries
+
+    if not isinstance(cell_range, str) or not cell_range.strip():
+        raise ValueError("range 必须是非空 A1 字符串")
+    text = cell_range.strip().replace("$", "")
+    if "!" in text:
+        text = text.split("!", 1)[1]
+    if not re.match(r"^[A-Za-z]+[1-9][0-9]*(?::[A-Za-z]+[1-9][0-9]*)?$", text):
+        raise ValueError(f"不合法的 A1 range: {cell_range!r}")
+    min_col, min_row, max_col, max_row = range_boundaries(text)
+    if min_col > max_col or min_row > max_row:
+        raise ValueError(f"不合法的 A1 range: {cell_range!r}")
+    return min_col, min_row, max_col, max_row
+
+
+def _parse_cell_address(address: str) -> tuple[int, int]:
+    """解析单元格地址，返回 row, col。"""
+    from openpyxl.utils.cell import coordinate_to_tuple
+
+    if not isinstance(address, str) or not address.strip():
+        raise ValueError("cell 必须是非空 A1 单元格地址")
+    text = address.strip().replace("$", "")
+    if "!" in text:
+        text = text.split("!", 1)[1]
+    if not re.match(r"^[A-Za-z]+[1-9][0-9]*$", text):
+        raise ValueError(f"不合法的单元格地址: {address!r}")
+    return coordinate_to_tuple(text)
+
+
+def _column_index(value: str | int) -> int:
+    from openpyxl.utils.cell import column_index_from_string
+
+    if isinstance(value, int):
+        if value < 1:
+            raise ValueError("列索引必须从 1 开始")
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        num = int(value.strip())
+        if num < 1:
+            raise ValueError("列索引必须从 1 开始")
+        return num
+    if isinstance(value, str):
+        return column_index_from_string(value.strip())
+    raise ValueError(f"不合法的列标识: {value!r}")
+
+
+def _range_from_bounds(min_col: int, min_row: int, max_col: int, max_row: int) -> str:
+    from openpyxl.utils.cell import get_column_letter
+
+    start = f"{get_column_letter(min_col)}{min_row}"
+    end = f"{get_column_letter(max_col)}{max_row}"
+    return start if start == end else f"{start}:{end}"
+
+
+def _bounds_overlap(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> bool:
+    amin_col, amin_row, amax_col, amax_row = a
+    bmin_col, bmin_row, bmax_col, bmax_row = b
+    return not (amax_col < bmin_col or bmax_col < amin_col or amax_row < bmin_row or bmax_row < amin_row)
+
+
+def _bounds_contains(outer: tuple[int, int, int, int], inner: tuple[int, int, int, int]) -> bool:
+    omin_col, omin_row, omax_col, omax_row = outer
+    imin_col, imin_row, imax_col, imax_row = inner
+    return omin_col <= imin_col and omin_row <= imin_row and omax_col >= imax_col and omax_row >= imax_row
+
+
+def _merged_range_bounds(merged_range) -> tuple[int, int, int, int]:
+    return merged_range.min_col, merged_range.min_row, merged_range.max_col, merged_range.max_row
+
+
+def _is_merged_non_anchor(ws, row: int, col: int) -> str | None:
+    for merged in ws.merged_cells.ranges:
+        bounds = _merged_range_bounds(merged)
+        if bounds[0] <= col <= bounds[2] and bounds[1] <= row <= bounds[3]:
+            if row != merged.min_row or col != merged.min_col:
+                return str(merged)
     return None
 
+
+def _worksheet_tables(ws) -> list[dict[str, Any]]:
+    tables: list[dict[str, Any]] = []
+    try:
+        names = list(ws.tables)
+    except Exception:
+        names = []
+    for name in names:
+        try:
+            table = ws.tables[name]
+            ref = getattr(table, "ref", table if isinstance(table, str) else None)
+            if not ref:
+                continue
+            tables.append({
+                "name": getattr(table, "name", name),
+                "display_name": getattr(table, "displayName", name),
+                "ref": ref,
+                "totals_row_count": int(getattr(table, "totalsRowCount", 0) or 0),
+            })
+        except Exception:
+            continue
+    return tables
+
+
+def _table_by_name(ws, table_name: str):
+    if not table_name:
+        return None
+    try:
+        if table_name in ws.tables:
+            return ws.tables[table_name]
+    except Exception:
+        pass
+    for table in _worksheet_tables(ws):
+        if table.get("name") == table_name or table.get("display_name") == table_name:
+            try:
+                return ws.tables[table.get("name")]
+            except Exception:
+                return None
+    return None
+
+
+def _profile_workbook(wb) -> dict[str, Any]:
+    sheets: list[dict[str, Any]] = []
+    for ws in wb.worksheets:
+        sheet_info: dict[str, Any] = {
+            "name": ws.title,
+            "max_row": ws.max_row or 0,
+            "max_column": ws.max_column or 0,
+            "dimension": ws.calculate_dimension(),
+            "tables": _worksheet_tables(ws),
+            "merged_ranges": [str(rng) for rng in ws.merged_cells.ranges],
+            "charts": len(getattr(ws, "_charts", []) or []),
+        }
+        try:
+            sheet_info["data_validations"] = len(ws.data_validations.dataValidation)
+        except Exception:
+            sheet_info["data_validations"] = 0
+        try:
+            sheet_info["conditional_formatting"] = len(ws.conditional_formatting)
+        except Exception:
+            sheet_info["conditional_formatting"] = 0
+        sheets.append(sheet_info)
+
+    defined_names: list[str] = []
+    try:
+        for defined_name in wb.defined_names:
+            name = getattr(defined_name, "name", str(defined_name))
+            defined_names.append(name)
+    except Exception:
+        pass
+
+    return {
+        "sheet_names": list(wb.sheetnames),
+        "sheets": sheets,
+        "defined_names": sorted(defined_names),
+    }
+
+
+def _content_token(ws, bounds: tuple[int, int, int, int] | None = None) -> str:
+    if bounds is None:
+        bounds = (1, 1, ws.max_column or 1, ws.max_row or 1)
+    min_col, min_row, max_col, max_row = bounds
+    rows: list[list[Any]] = []
+    for row_idx in range(min_row, max_row + 1):
+        row_values: list[Any] = []
+        for col_idx in range(min_col, max_col + 1):
+            row_values.append(_json_value(ws.cell(row=row_idx, column=col_idx).value))
+        rows.append(row_values)
+    return _hash_json({"sheet": ws.title, "range": _range_from_bounds(*bounds), "rows": rows})
+
+
+def _resolve_worksheet_for_table_edit(wb, sheet_name: str | None, payload: dict[str, Any]) -> tuple[Any | None, str | None]:
+    table_name = payload.get("table_name") if isinstance(payload, dict) else None
+
+    if sheet_name is not None:
+        if sheet_name not in wb.sheetnames:
+            return None, (
+                f"工作表 \"{sheet_name}\" 不存在。可用工作表: "
+                f"{', '.join(repr(n) for n in wb.sheetnames)}"
+            )
+        ws = wb[sheet_name]
+        if table_name and _table_by_name(ws, table_name) is None:
+            return None, f"工作表 \"{sheet_name}\" 中不存在表格 {table_name!r}。"
+        return ws, None
+
+    if table_name:
+        matches = [ws for ws in wb.worksheets if _table_by_name(ws, table_name) is not None]
+        if len(matches) == 1:
+            return matches[0], None
+        if not matches:
+            return None, f"工作簿中不存在表格 {table_name!r}。"
+        return None, f"表格 {table_name!r} 在多个工作表中存在，请指定 sheet_name。"
+
+    if len(wb.sheetnames) == 1:
+        return wb[wb.sheetnames[0]], None
+    return None, (
+        f"文件包含 {len(wb.sheetnames)} 个工作表，必须指定 sheet_name。"
+        f"可用工作表: {', '.join(repr(n) for n in wb.sheetnames)}"
+    )
+
+
+def _coerce_cell_value(value: Any, kind: str | None = None, value_input: str = "auto") -> tuple[Any, str | None]:
+    """将 payload 值转换为 openpyxl 可写值，返回 (value, number_format)。"""
+    value_input = (value_input or "auto").lower()
+    if value_input not in _XLSX_VALUE_INPUTS:
+        raise ValueError(f"不支持的 value_input: {value_input!r}。可选: auto, raw, formula")
+    if kind is not None:
+        kind = str(kind).lower()
+        if kind not in _XLSX_CELL_KINDS:
+            raise ValueError(f"不支持的 kind: {kind!r}。可选: {', '.join(sorted(_XLSX_CELL_KINDS))}")
+
+    if kind == "blank":
+        return None, None
+    if value is None:
+        return None, None
+
+    if kind == "text":
+        return str(value), None
+    if kind == "formula" or value_input == "formula":
+        if not isinstance(value, str) or not value.startswith("="):
+            raise ValueError("formula 值必须是以 '=' 开头的字符串")
+        return value, None
+    if kind == "bool":
+        if isinstance(value, bool):
+            return value, None
+        if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+            return value.strip().lower() == "true", None
+        raise ValueError(f"无法将 {value!r} 转为 bool")
+    if kind == "number":
+        if isinstance(value, bool):
+            raise ValueError("bool 不能作为 number 写入")
+        if isinstance(value, (int, float)):
+            return value, None
+        if isinstance(value, str) and re.match(r"^[+-]?\d+(?:\.\d+)?$", value.strip()):
+            text = value.strip()
+            return (float(text), None) if "." in text else (int(text), None)
+        raise ValueError(f"无法将 {value!r} 转为 number")
+    if kind == "date":
+        if isinstance(value, datetime):
+            return value, "yyyy-mm-dd h:mm:ss"
+        if isinstance(value, date):
+            return value, "yyyy-mm-dd"
+        if isinstance(value, str):
+            text = value.strip()
+            try:
+                if "T" in text or " " in text:
+                    return datetime.fromisoformat(text), "yyyy-mm-dd h:mm:ss"
+                return date.fromisoformat(text), "yyyy-mm-dd"
+            except ValueError as exc:
+                raise ValueError(f"无法将 {value!r} 转为 date") from exc
+        raise ValueError(f"无法将 {value!r} 转为 date")
+
+    if value_input == "raw":
+        if isinstance(value, (str, int, float, bool, datetime, date)):
+            return value, None
+        raise ValueError(f"raw 模式不支持写入 {type(value).__name__}")
+
+    if isinstance(value, (int, float, bool, datetime, date)):
+        return value, "yyyy-mm-dd" if isinstance(value, date) and not isinstance(value, datetime) else None
+    if not isinstance(value, str):
+        raise ValueError(f"不支持写入 {type(value).__name__} 类型")
+
+    text = value.strip()
+    if text == "":
+        return None, None
+    if text.startswith("="):
+        return text, None
+    lowered = text.lower()
+    if lowered in ("true", "false"):
+        return lowered == "true", None
+
+    # 保守推断：前导零数字串、长数字串和混合字符串保持文本。
+    if re.match(r"^[+-]?(?:0|[1-9]\d{0,14})$", text):
+        signless = text[1:] if text[0] in "+-" else text
+        if len(signless) > 1 and signless.startswith("0"):
+            return value, None
+        return int(text), None
+    if re.match(r"^[+-]?(?:0|[1-9]\d*)\.\d+$", text):
+        signless = text[1:] if text[0] in "+-" else text
+        if len(signless.split(".", 1)[0]) > 1 and signless.startswith("0"):
+            return value, None
+        return float(text), None
+    return value, None
+
+
+def _cell_change(cell, new_value: Any) -> dict[str, Any]:
+    return {
+        "cell": cell.coordinate,
+        "old_value": _json_value(cell.value),
+        "new_value": _json_value(new_value),
+    }
+
+
+
+def _format_diff_value(value: Any) -> str:
+    if value is None:
+        return "<blank>"
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return repr(value)
+
+
+def _compact_changes(changes: list[dict[str, Any]], limit: int = 50) -> list[dict[str, Any]]:
+    """返回较小的 changes 列表，避免 metadata 过大。"""
+    return changes[:limit]
+
+
+def _build_xlsx_diff_preview(result: dict[str, Any], limit: int = 20) -> str:
+    """构建可读 diff，用于判断改动位置和值是否符合预期。"""
+    lines: list[str] = []
+    changes = result.get("changes", []) or []
+    value_changes = [
+        change for change in changes
+        if change.get("old_value") != change.get("new_value")
+    ]
+
+    if value_changes:
+        lines.append("值变更 diff:")
+        for change in value_changes[:limit]:
+            old_text = _format_diff_value(change.get("old_value"))
+            new_text = _format_diff_value(change.get("new_value"))
+            lines.append(f"  - {change.get('cell')}: {old_text} -> {new_text}")
+        if len(value_changes) > limit:
+            lines.append(f"  ... 还有 {len(value_changes) - limit} 个单元格变更未展示")
+    else:
+        lines.append("值变更 diff: 无单元格值变化")
+
+    row_actions = result.get("row_actions", []) or []
+    if row_actions:
+        lines.append("结构变更:")
+        for action in row_actions[:limit]:
+            details = [f"type={action.get('type')}", f"range={action.get('range')}"]
+            for key in ("rows_appended", "rows_inserted", "rows_deleted"):
+                if action.get(key) is not None:
+                    details.append(f"{key}={action[key]}")
+            if action.get("table_ref_after"):
+                details.append(f"table_ref_after={action['table_ref_after']}")
+            lines.append("  - " + ", ".join(details))
+
+    format_actions = result.get("format_actions", []) or []
+    if format_actions:
+        lines.append("格式/批注结果:")
+        for action in format_actions[:limit]:
+            details = [f"range={action.get('range')}", f"cells={action.get('cells_formatted')}"]
+            if action.get("fill"):
+                details.append(f"fill=#{action['fill']}")
+            if action.get("font"):
+                details.append(f"font={action['font']}")
+            if action.get("comment"):
+                details.append(f"comment={_format_diff_value(action['comment'])}")
+            lines.append("  - " + ", ".join(details))
+
+    return "\n".join(lines)
+
+
+def _cell_value_matches(actual: Any, expected: Any) -> bool:
+    return _json_value(actual) == expected
+
+
+def _color_matches(color_obj: Any, expected_rgb: str) -> bool:
+    actual = getattr(color_obj, "rgb", None)
+    if not actual:
+        return False
+    return str(actual).upper().endswith(expected_rgb.upper())
+
+
+def _verify_xlsx_persisted(path: Path, sheet_name: str, result: dict[str, Any]) -> dict[str, Any]:
+    """保存后重新打开工作簿，核对值、标色和批注是否实际落盘。"""
+    try:
+        import openpyxl
+
+        wb = openpyxl.load_workbook(str(path), read_only=False, data_only=False)
+        ws = wb[sheet_name]
+        checked = 0
+        mismatches: list[str] = []
+
+        for change in result.get("changes", []) or []:
+            cell_ref = change.get("cell")
+            if not cell_ref:
+                continue
+            checked += 1
+            actual = ws[cell_ref].value
+            expected = change.get("new_value")
+            if not _cell_value_matches(actual, expected):
+                mismatches.append(
+                    f"{cell_ref}: expected {_format_diff_value(expected)}, got {_format_diff_value(_json_value(actual))}"
+                )
+
+        format_checked = 0
+        for action in result.get("format_actions", []) or []:
+            bounds = _parse_a1_range(action["range"])
+            min_col, min_row, max_col, max_row = bounds
+            for row_idx in range(min_row, max_row + 1):
+                for col_idx in range(min_col, max_col + 1):
+                    cell = ws.cell(row=row_idx, column=col_idx)
+                    if _is_merged_non_anchor(ws, row_idx, col_idx):
+                        continue
+                    format_checked += 1
+                    if action.get("fill") and not _color_matches(cell.fill.fgColor, action["fill"]):
+                        mismatches.append(f"{cell.coordinate}: fill 未落盘为 #{action['fill']}")
+                    if action.get("comment"):
+                        if cell.comment is None or cell.comment.text != str(action["comment"]):
+                            mismatches.append(f"{cell.coordinate}: 批注未落盘或内容不一致")
+                    font_payload = action.get("font") or {}
+                    if "bold" in font_payload and bool(cell.font.bold) != bool(font_payload["bold"]):
+                        mismatches.append(f"{cell.coordinate}: bold 字体状态不一致")
+                    if "italic" in font_payload and bool(cell.font.italic) != bool(font_payload["italic"]):
+                        mismatches.append(f"{cell.coordinate}: italic 字体状态不一致")
+                    if "color" in font_payload and not _color_matches(cell.font.color, _normalize_color(font_payload["color"])):
+                        mismatches.append(f"{cell.coordinate}: font color 未落盘为 #{_normalize_color(font_payload['color'])}")
+
+        wb.close()
+        return {
+            "persisted": not mismatches,
+            "cells_checked": checked,
+            "format_cells_checked": format_checked,
+            "mismatches": mismatches[:20],
+            "mismatch_count": len(mismatches),
+        }
+    except Exception as exc:
+        return {
+            "persisted": False,
+            "cells_checked": 0,
+            "format_cells_checked": 0,
+            "mismatches": [f"落盘校验失败: {type(exc).__name__}: {exc}"],
+            "mismatch_count": 1,
+        }
+
+
+def _write_cell(cell, value: Any, kind: str | None = None, value_input: str = "auto") -> dict[str, Any]:
+    new_value, number_format = _coerce_cell_value(value, kind=kind, value_input=value_input)
+    change = _cell_change(cell, new_value)
+    cell.value = new_value
+    if number_format:
+        cell.number_format = number_format
+    return change
+
+
+def _normalize_color(value: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError("颜色必须是字符串")
+    text = value.strip().lstrip("#").upper()
+    if not re.match(r"^[0-9A-F]{6}$", text):
+        raise ValueError(f"不合法的颜色: {value!r}，需要 RRGGBB 或 #RRGGBB")
+    return text
+
+
+def _find_merged_conflicts(ws, bounds: tuple[int, int, int, int]) -> list[str]:
+    conflicts: list[str] = []
+    for merged in ws.merged_cells.ranges:
+        merged_bounds = _merged_range_bounds(merged)
+        if _bounds_overlap(bounds, merged_bounds) and not _bounds_contains(bounds, merged_bounds):
+            conflicts.append(f"目标区域 {_range_from_bounds(*bounds)} 与合并区域 {merged} 部分重叠")
+    return conflicts
+
+
+def _formula_cells(ws) -> list[str]:
+    cells: list[str] = []
+    for row in ws.iter_rows(min_row=1, max_row=ws.max_row or 1, min_col=1, max_col=ws.max_column or 1):
+        for cell in row:
+            if isinstance(cell.value, str) and cell.value.startswith("="):
+                cells.append(f"{ws.title}!{cell.coordinate}")
+    return cells
+
+
+def _analyze_range_impact(wb, ws, bounds_list: list[tuple[int, int, int, int]], operation: str) -> dict[str, Any]:
+    """对目标区域做保守影响分析。"""
+    warnings: list[str] = []
+    errors: list[str] = []
+    impacted_tables: list[str] = []
+    affected_ranges = [_range_from_bounds(*bounds) for bounds in bounds_list]
+
+    table_infos = _worksheet_tables(ws)
+    for bounds in bounds_list:
+        errors.extend(_find_merged_conflicts(ws, bounds))
+        for table_info in table_infos:
+            table_bounds = _parse_a1_range(table_info["ref"])
+            if _bounds_overlap(bounds, table_bounds):
+                impacted_tables.append(table_info["name"])
+                if operation in _XLSX_ROW_STRUCTURE_OPS:
+                    errors.append(
+                        f"{operation} 会影响 native Excel table {table_info['name']} ({table_info['ref']})"
+                    )
+                elif operation not in {"append_rows", "update_rows_by_key", "upsert_rows"}:
+                    warnings.append(
+                        f"目标区域与 native Excel table {table_info['name']} ({table_info['ref']}) 重叠"
+                    )
+
+    if operation in _XLSX_ROW_STRUCTURE_OPS:
+        formulas = _formula_cells(ws)
+        if formulas:
+            preview = ", ".join(formulas[:5])
+            more = "..." if len(formulas) > 5 else ""
+            errors.append(f"结构性行操作所在工作表包含公式单元格: {preview}{more}")
+        if getattr(ws, "_charts", None):
+            errors.append("结构性行操作所在工作表包含图表，当前编辑器不会自动修复图表数据源")
+        try:
+            if ws.data_validations and ws.data_validations.dataValidation:
+                warnings.append("工作表包含数据验证，结构性行操作可能影响验证区域")
+        except Exception:
+            pass
+        try:
+            if len(ws.conditional_formatting):
+                warnings.append("工作表包含条件格式，结构性行操作可能影响条件格式区域")
+        except Exception:
+            pass
+
+    return {
+        "affected_ranges": affected_ranges,
+        "warnings": sorted(set(warnings)),
+        "errors": sorted(set(errors)),
+        "impacted_tables": sorted(set(impacted_tables)),
+    }
+
+
+def _table_headers(ws, table) -> list[str]:
+    min_col, min_row, max_col, _ = _parse_a1_range(table.ref)
+    headers: list[str] = []
+    for col_idx in range(min_col, max_col + 1):
+        value = ws.cell(row=min_row, column=col_idx).value
+        headers.append(str(value).strip() if value is not None else "")
+    return headers
+
+
+def _validate_headers(headers: list[str]) -> str | None:
+    seen: set[str] = set()
+    for header in headers:
+        if not header:
+            return "表头包含空列名，无法按字段名定位。"
+        if header in seen:
+            return f"表头 {header!r} 重复，无法按字段名定位。"
+        seen.add(header)
+    return None
+
+
+def _lookup_header(headers: list[str], key: str) -> int:
+    if key in headers:
+        return headers.index(key)
+    lowered = {header.lower(): idx for idx, header in enumerate(headers)}
+    idx = lowered.get(str(key).lower())
+    if idx is not None:
+        return idx
+    raise ValueError(f"列 {key!r} 不存在。可用列: {headers}")
+
+
+def _resolve_dataset(ws, payload: dict[str, Any]) -> dict[str, Any]:
+    table_name = payload.get("table_name")
+    if table_name:
+        table = _table_by_name(ws, table_name)
+        if table is None:
+            raise ValueError(f"工作表 {ws.title!r} 中不存在表格 {table_name!r}")
+        min_col, min_row, max_col, max_row = _parse_a1_range(table.ref)
+        totals = int(getattr(table, "totalsRowCount", 0) or 0)
+        headers = _table_headers(ws, table)
+        header_error = _validate_headers(headers)
+        if header_error:
+            raise ValueError(header_error)
+        return {
+            "kind": "table",
+            "table": table,
+            "table_name": table_name,
+            "headers": headers,
+            "min_col": min_col,
+            "max_col": max_col,
+            "header_row": min_row,
+            "data_min_row": min_row + 1,
+            "data_max_row": max_row - totals,
+            "append_row": max_row + 1,
+            "totals_row_count": totals,
+            "ref_bounds": (min_col, min_row, max_col, max_row),
+        }
+
+    header_row = int(payload.get("header_row", 1))
+    start_col = _column_index(payload.get("start_col", "A"))
+    end_col = _column_index(payload["end_col"]) if payload.get("end_col") else (ws.max_column or start_col)
+    headers = []
+    for col_idx in range(start_col, end_col + 1):
+        value = ws.cell(row=header_row, column=col_idx).value
+        headers.append(str(value).strip() if value is not None else "")
+    header_error = _validate_headers(headers)
+    if header_error:
+        raise ValueError(header_error)
+
+    data_min_row = header_row + 1
+    data_max_row = max(ws.max_row or header_row, data_min_row - 1)
+    append_row = data_max_row + 1
+    return {
+        "kind": "worksheet",
+        "table": None,
+        "table_name": None,
+        "headers": headers,
+        "min_col": start_col,
+        "max_col": end_col,
+        "header_row": header_row,
+        "data_min_row": data_min_row,
+        "data_max_row": data_max_row,
+        "append_row": append_row,
+        "totals_row_count": 0,
+        "ref_bounds": (start_col, header_row, end_col, data_max_row),
+    }
+
+
+def _records_to_matrix(rows: list[Any], headers: list[str]) -> list[list[Any]]:
+    matrix: list[list[Any]] = []
+    for row in rows:
+        if isinstance(row, dict):
+            matrix.append([row.get(header) for header in headers])
+        elif isinstance(row, list):
+            if len(row) > len(headers):
+                raise ValueError(f"行列数({len(row)})超过表头列数({len(headers)})")
+            matrix.append(row + [None] * (len(headers) - len(row)))
+        else:
+            raise ValueError("rows 中的每一行必须是 object 或 array")
+    return matrix
+
+
+def _cell_bounds(row: int, col: int) -> tuple[int, int, int, int]:
+    return col, row, col, row
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # file_edit_table — XLSX 专用编辑工具
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+def _copy_row_style(ws, source_row: int, target_row: int, max_col: int) -> None:
+    if source_row < 1:
+        return
+    for col_idx in range(1, max_col + 1):
+        source = ws.cell(row=source_row, column=col_idx)
+        target = ws.cell(row=target_row, column=col_idx)
+        if source.has_style:
+            target._style = copy(source._style)
+        if source.number_format:
+            target.number_format = source.number_format
+        if source.protection:
+            target.protection = copy(source.protection)
+        if source.alignment:
+            target.alignment = copy(source.alignment)
+
+
+def _plan_set_range(ws, payload: dict[str, Any], apply: bool, include_changes: bool) -> dict[str, Any]:
+    cell_range = payload.get("range")
+    values = payload.get("values")
+    if not cell_range:
+        raise ValueError("set_range payload 必须包含 range")
+    if not isinstance(values, list) or not values or not all(isinstance(row, list) for row in values):
+        raise ValueError("set_range payload.values 必须是非空二维数组")
+
+    row_lengths = {len(row) for row in values}
+    if len(row_lengths) != 1:
+        raise ValueError("set_range payload.values 必须是矩形二维数组")
+    value_rows = len(values)
+    value_cols = next(iter(row_lengths)) if row_lengths else 0
+    if value_cols == 0:
+        raise ValueError("set_range payload.values 至少需要一列")
+
+    min_col, min_row, max_col, max_row = _parse_a1_range(cell_range)
+    resize_range = bool(payload.get("resize_range", False))
+    if resize_range:
+        max_row = min_row + value_rows - 1
+        max_col = min_col + value_cols - 1
+    else:
+        range_rows = max_row - min_row + 1
+        range_cols = max_col - min_col + 1
+        if range_rows != value_rows or range_cols != value_cols:
+            raise ValueError(
+                f"range 大小({range_rows}x{range_cols})与 values 大小({value_rows}x{value_cols})不一致"
+            )
+
+    value_input = payload.get("value_input", "auto")
+    kind = payload.get("kind")
+    changes: list[dict[str, Any]] = []
+    for r_offset, row_values in enumerate(values):
+        row_idx = min_row + r_offset
+        for c_offset, raw_value in enumerate(row_values):
+            col_idx = min_col + c_offset
+            merged = _is_merged_non_anchor(ws, row_idx, col_idx)
+            if merged:
+                raise ValueError(f"不能写入合并区域 {merged} 的非左上角单元格")
+            cell = ws.cell(row=row_idx, column=col_idx)
+            new_value, _ = _coerce_cell_value(raw_value, kind=kind, value_input=value_input)
+            changes.append(_cell_change(cell, new_value))
+            if apply:
+                _write_cell(cell, raw_value, kind=kind, value_input=value_input)
+
+    bounds = (min_col, min_row, max_col, max_row)
+    return {
+        "bounds": [bounds],
+        "affected_ranges": [_range_from_bounds(*bounds)],
+        "changes": changes,
+        "counts": {"cells_updated": value_rows * value_cols},
+        "structural": False,
+    }
+
+
+def _plan_update_cells(ws, payload: dict[str, Any], apply: bool, include_changes: bool) -> dict[str, Any]:
+    cells = payload.get("cells")
+    if not isinstance(cells, list) or not cells:
+        raise ValueError("update_cells payload.cells 必须是非空数组")
+
+    seen: set[str] = set()
+    bounds: list[tuple[int, int, int, int]] = []
+    changes: list[dict[str, Any]] = []
+    value_input = payload.get("value_input", "auto")
+
+    for item in cells:
+        if not isinstance(item, dict):
+            raise ValueError("update_cells 的每个 cell 项必须是 object")
+        address = item.get("cell")
+        if not address:
+            raise ValueError("update_cells 的每个 cell 项必须包含 cell")
+        row_idx, col_idx = _parse_cell_address(address)
+        normalized = ws.cell(row=row_idx, column=col_idx).coordinate
+        if normalized in seen:
+            raise ValueError(f"重复更新单元格 {normalized}")
+        seen.add(normalized)
+        kind = item.get("kind")
+        if "value" not in item and kind != "blank":
+            raise ValueError(f"单元格 {normalized} 缺少 value")
+        merged = _is_merged_non_anchor(ws, row_idx, col_idx)
+        if merged:
+            raise ValueError(f"不能写入合并区域 {merged} 的非左上角单元格")
+        raw_value = item.get("value")
+        cell = ws.cell(row=row_idx, column=col_idx)
+        new_value, _ = _coerce_cell_value(raw_value, kind=kind, value_input=value_input)
+        changes.append(_cell_change(cell, new_value))
+        if apply:
+            _write_cell(cell, raw_value, kind=kind, value_input=value_input)
+        bounds.append(_cell_bounds(row_idx, col_idx))
+
+    return {
+        "bounds": bounds,
+        "affected_ranges": [_range_from_bounds(*b) for b in bounds],
+        "changes": changes,
+        "counts": {"cells_updated": len(cells)},
+        "structural": False,
+    }
+
+
+def _plan_clear_range(ws, payload: dict[str, Any], apply: bool, include_changes: bool) -> dict[str, Any]:
+    cell_range = payload.get("range")
+    if not cell_range:
+        raise ValueError("clear_range payload 必须包含 range")
+    clear = payload.get("clear", "values")
+    if clear != "values":
+        raise ValueError("当前仅支持 clear='values'")
+
+    bounds = _parse_a1_range(cell_range)
+    min_col, min_row, max_col, max_row = bounds
+    changes: list[dict[str, Any]] = []
+    for row_idx in range(min_row, max_row + 1):
+        for col_idx in range(min_col, max_col + 1):
+            merged = _is_merged_non_anchor(ws, row_idx, col_idx)
+            if merged:
+                raise ValueError(f"不能清空合并区域 {merged} 的非左上角单元格")
+            cell = ws.cell(row=row_idx, column=col_idx)
+            changes.append(_cell_change(cell, None))
+            if apply:
+                cell.value = None
+
+    return {
+        "bounds": [bounds],
+        "affected_ranges": [_range_from_bounds(*bounds)],
+        "changes": changes,
+        "counts": {"cells_cleared": (max_row - min_row + 1) * (max_col - min_col + 1)},
+        "structural": False,
+    }
+
+
+def _plan_format_range(ws, payload: dict[str, Any], apply: bool, include_changes: bool) -> dict[str, Any]:
+    from openpyxl.comments import Comment as XlComment
+    from openpyxl.styles import PatternFill
+
+    cell_range = payload.get("range")
+    if not cell_range:
+        raise ValueError("format_range payload 必须包含 range")
+    bounds = _parse_a1_range(cell_range)
+    min_col, min_row, max_col, max_row = bounds
+
+    fill = payload.get("fill")
+    font_payload = payload.get("font") or {}
+    comment = payload.get("comment")
+    fill_style = None
+    if fill:
+        color = _normalize_color(fill)
+        fill_style = PatternFill(start_color=color, end_color=color, fill_type="solid")
+    if font_payload and not isinstance(font_payload, dict):
+        raise ValueError("format_range font 必须是 object")
+
+    formatted = 0
+    for row_idx in range(min_row, max_row + 1):
+        for col_idx in range(min_col, max_col + 1):
+            if _is_merged_non_anchor(ws, row_idx, col_idx):
+                continue
+            cell = ws.cell(row=row_idx, column=col_idx)
+            if apply:
+                if fill_style:
+                    cell.fill = fill_style
+                if font_payload:
+                    new_font = copy(cell.font)
+                    if "bold" in font_payload:
+                        new_font.bold = bool(font_payload["bold"])
+                    if "italic" in font_payload:
+                        new_font.italic = bool(font_payload["italic"])
+                    if "color" in font_payload:
+                        new_font.color = _normalize_color(font_payload["color"])
+                    cell.font = new_font
+                if comment:
+                    cell.comment = XlComment(str(comment), "Agent")
+            formatted += 1
+
+    format_action = {
+        "range": _range_from_bounds(*bounds),
+        "cells_formatted": formatted,
+    }
+    if fill:
+        format_action["fill"] = _normalize_color(fill)
+    if font_payload:
+        format_action["font"] = dict(font_payload)
+    if comment:
+        format_action["comment"] = str(comment)
+
+    return {
+        "bounds": [bounds],
+        "affected_ranges": [_range_from_bounds(*bounds)],
+        "changes": [],
+        "format_actions": [format_action],
+        "counts": {"cells_formatted": formatted},
+        "structural": False,
+    }
+
+
+def _plan_append_rows(ws, payload: dict[str, Any], apply: bool, include_changes: bool) -> dict[str, Any]:
+    rows = payload.get("rows")
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("append_rows payload.rows 必须是非空数组")
+    dataset = _resolve_dataset(ws, payload)
+    if dataset["totals_row_count"]:
+        raise ValueError("目标 Excel table 包含 totals row，当前不支持 append_rows")
+
+    matrix = _records_to_matrix(rows, dataset["headers"])
+    append_row = dataset["append_row"]
+    min_col = dataset["min_col"]
+    max_col = dataset["max_col"]
+    max_row = append_row + len(matrix) - 1
+    bounds = (min_col, append_row, max_col, max_row)
+
+    for row_idx in range(append_row, max_row + 1):
+        for col_idx in range(min_col, max_col + 1):
+            if ws.cell(row=row_idx, column=col_idx).value not in (None, ""):
+                raise ValueError(f"追加区域 {_range_from_bounds(*bounds)} 覆盖了非空单元格")
+
+    changes: list[dict[str, Any]] = []
+    value_input = payload.get("value_input", "auto")
+    for r_offset, row_values in enumerate(matrix):
+        row_idx = append_row + r_offset
+        for c_offset, raw_value in enumerate(row_values):
+            col_idx = min_col + c_offset
+            cell = ws.cell(row=row_idx, column=col_idx)
+            new_value, _ = _coerce_cell_value(raw_value, value_input=value_input)
+            changes.append(_cell_change(cell, new_value))
+            if apply:
+                _write_cell(cell, raw_value, value_input=value_input)
+
+    new_table_ref = None
+    if dataset["table"] is not None:
+        new_table_ref = _range_from_bounds(min_col, dataset["header_row"], max_col, max_row)
+    if apply and dataset["table"] is not None:
+        dataset["table"].ref = new_table_ref
+
+    row_action = {
+        "type": "append_rows",
+        "range": _range_from_bounds(*bounds),
+        "rows_appended": len(matrix),
+    }
+    if dataset["table_name"]:
+        row_action["table_name"] = dataset["table_name"]
+    if new_table_ref:
+        row_action["table_ref_after"] = new_table_ref
+
+    return {
+        "bounds": [bounds],
+        "affected_ranges": [_range_from_bounds(*bounds)],
+        "changes": changes,
+        "row_actions": [row_action],
+        "counts": {"rows_appended": len(matrix)},
+        "structural": True,
+    }
+
+
+def _dataset_key_rows(ws, dataset: dict[str, Any], key_column: str) -> tuple[int, dict[Any, int], list[Any]]:
+    key_offset = _lookup_header(dataset["headers"], key_column)
+    key_col = dataset["min_col"] + key_offset
+    key_rows: dict[Any, int] = {}
+    duplicates: list[Any] = []
+    for row_idx in range(dataset["data_min_row"], dataset["data_max_row"] + 1):
+        value = ws.cell(row=row_idx, column=key_col).value
+        if value in (None, ""):
+            continue
+        if value in key_rows:
+            duplicates.append(value)
+        else:
+            key_rows[value] = row_idx
+    return key_col, key_rows, duplicates
+
+
+def _plan_update_rows_by_key(ws, payload: dict[str, Any], apply: bool, include_changes: bool) -> dict[str, Any]:
+    key_column = payload.get("key_column")
+    updates = payload.get("updates")
+    if not key_column:
+        raise ValueError("update_rows_by_key payload 必须包含 key_column")
+    if not isinstance(updates, list) or not updates:
+        raise ValueError("update_rows_by_key payload.updates 必须是非空数组")
+
+    missing = payload.get("missing", "error")
+    if missing not in ("error", "ignore", "append"):
+        raise ValueError("missing 可选: error, ignore, append")
+
+    dataset = _resolve_dataset(ws, payload)
+    if missing == "append" and dataset["totals_row_count"]:
+        raise ValueError("目标 Excel table 包含 totals row，当前不支持 missing='append'")
+    _, key_rows, duplicates = _dataset_key_rows(ws, dataset, str(key_column))
+    if duplicates:
+        raise ValueError(f"关键列 {key_column!r} 存在重复 key: {duplicates[:5]}")
+
+    changes: list[dict[str, Any]] = []
+    bounds: list[tuple[int, int, int, int]] = []
+    appended_records: list[dict[str, Any]] = []
+    rows_updated = 0
+    rows_ignored = 0
+    value_input = payload.get("value_input", "auto")
+
+    for update in updates:
+        if not isinstance(update, dict) or "key" not in update or not isinstance(update.get("values"), dict):
+            raise ValueError("updates 中每一项必须包含 key 和 values object")
+        key = update["key"]
+        values = update["values"]
+        row_idx = key_rows.get(key)
+        if row_idx is None:
+            if missing == "ignore":
+                rows_ignored += 1
+                continue
+            if missing == "append":
+                record = {str(key_column): key}
+                record.update(values)
+                appended_records.append(record)
+                continue
+            raise ValueError(f"关键列 {key_column!r} 未找到 key={key!r}")
+
+        touched_cols: list[int] = []
+        for header, raw_value in values.items():
+            offset = _lookup_header(dataset["headers"], str(header))
+            col_idx = dataset["min_col"] + offset
+            cell = ws.cell(row=row_idx, column=col_idx)
+            new_value, _ = _coerce_cell_value(raw_value, value_input=value_input)
+            changes.append(_cell_change(cell, new_value))
+            if apply:
+                _write_cell(cell, raw_value, value_input=value_input)
+            touched_cols.append(col_idx)
+        if touched_cols:
+            bounds.append((min(touched_cols), row_idx, max(touched_cols), row_idx))
+            rows_updated += 1
+
+    rows_appended = 0
+    if appended_records:
+        append_payload = dict(payload)
+        append_payload["rows"] = appended_records
+        append_payload.pop("updates", None)
+        append_plan = _plan_append_rows(ws, append_payload, apply=apply, include_changes=include_changes)
+        bounds.extend(append_plan["bounds"])
+        changes.extend(append_plan["changes"])
+        appended_row_actions = append_plan.get("row_actions", [])
+        rows_appended = append_plan["counts"].get("rows_appended", 0)
+    else:
+        appended_row_actions = []
+
+    return {
+        "bounds": bounds,
+        "affected_ranges": [_range_from_bounds(*b) for b in bounds],
+        "changes": changes,
+        "row_actions": appended_row_actions,
+        "counts": {
+            "rows_updated": rows_updated,
+            "rows_appended": rows_appended,
+            "rows_ignored": rows_ignored,
+        },
+        "structural": bool(appended_records),
+    }
+
+
+def _plan_upsert_rows(ws, payload: dict[str, Any], apply: bool, include_changes: bool) -> dict[str, Any]:
+    key_column = payload.get("key_column")
+    rows = payload.get("rows")
+    if not key_column:
+        raise ValueError("upsert_rows payload 必须包含 key_column")
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("upsert_rows payload.rows 必须是非空数组")
+    updates = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("upsert_rows rows 中每一项必须是 object")
+        if key_column not in row:
+            raise ValueError(f"upsert row 缺少 key_column {key_column!r}")
+        values = dict(row)
+        key = values.pop(key_column)
+        updates.append({"key": key, "values": values})
+    update_payload = dict(payload)
+    update_payload["updates"] = updates
+    update_payload["missing"] = "append"
+    return _plan_update_rows_by_key(ws, update_payload, apply=apply, include_changes=include_changes)
+
+
+def _plan_delete_rows(ws, payload: dict[str, Any], apply: bool, include_changes: bool) -> dict[str, Any]:
+    rows = payload.get("rows")
+    if rows is None and payload.get("keys") is not None:
+        key_column = payload.get("key_column")
+        if not key_column:
+            raise ValueError("按 key 删除时必须提供 key_column")
+        keys = payload.get("keys")
+        if not isinstance(keys, list) or not keys:
+            raise ValueError("delete_rows payload.keys 必须是非空数组")
+        dataset = _resolve_dataset(ws, payload)
+        _, key_rows, duplicates = _dataset_key_rows(ws, dataset, str(key_column))
+        if duplicates:
+            raise ValueError(f"关键列 {key_column!r} 存在重复 key: {duplicates[:5]}")
+        rows = []
+        for key in keys:
+            row_idx = key_rows.get(key)
+            if row_idx is None:
+                raise ValueError(f"关键列 {key_column!r} 未找到 key={key!r}")
+            rows.append(row_idx)
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("delete_rows payload 必须包含非空 rows 或 keys")
+
+    row_nums = sorted({int(row) for row in rows})
+    if any(row < 1 for row in row_nums):
+        raise ValueError("删除行号必须从 1 开始")
+    max_col = ws.max_column or 1
+    bounds = [(1, row, max_col, row) for row in row_nums]
+    if apply:
+        for row in sorted(row_nums, reverse=True):
+            ws.delete_rows(row, 1)
+    return {
+        "bounds": bounds,
+        "affected_ranges": [_range_from_bounds(*b) for b in bounds],
+        "changes": [],
+        "row_actions": [{
+            "type": "delete_rows",
+            "range": ",".join(_range_from_bounds(*b) for b in bounds),
+            "rows_deleted": len(row_nums),
+            "rows": row_nums,
+        }],
+        "counts": {"rows_deleted": len(row_nums)},
+        "structural": True,
+    }
+
+
+def _plan_insert_rows(ws, payload: dict[str, Any], apply: bool, include_changes: bool) -> dict[str, Any]:
+    rows = payload.get("rows")
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("insert_rows payload.rows 必须是非空数组")
+    if payload.get("before_row") is not None:
+        insert_at = int(payload["before_row"])
+    elif payload.get("after_row") is not None:
+        insert_at = int(payload["after_row"]) + 1
+    else:
+        raise ValueError("insert_rows payload 必须包含 before_row 或 after_row")
+    if insert_at < 1:
+        raise ValueError("插入行号必须从 1 开始")
+
+    if all(isinstance(row, dict) for row in rows):
+        dataset = _resolve_dataset(ws, payload)
+        matrix = _records_to_matrix(rows, dataset["headers"])
+    elif all(isinstance(row, list) for row in rows):
+        matrix = rows
+    else:
+        raise ValueError("insert_rows rows 必须全部是 object 或全部是 array")
+
+    value_input = payload.get("value_input", "auto")
+    max_width = max(len(row) for row in matrix)
+    bounds = (1, insert_at, max(max_width, ws.max_column or 1), insert_at + len(matrix) - 1)
+
+    if apply:
+        ws.insert_rows(insert_at, len(matrix))
+        copy_style_from = payload.get("copy_style_from", "none")
+        if copy_style_from not in ("above", "below", "none"):
+            raise ValueError("copy_style_from 可选: above, below, none")
+        if copy_style_from == "above":
+            template_row = insert_at - 1
+        elif copy_style_from == "below":
+            template_row = insert_at + len(matrix)
+        else:
+            template_row = 0
+        if template_row:
+            for offset in range(len(matrix)):
+                _copy_row_style(ws, template_row, insert_at + offset, bounds[2])
+        for r_offset, row_values in enumerate(matrix):
+            for c_offset, raw_value in enumerate(row_values):
+                cell = ws.cell(row=insert_at + r_offset, column=1 + c_offset)
+                _write_cell(cell, raw_value, value_input=value_input)
+
+    return {
+        "bounds": [bounds],
+        "affected_ranges": [_range_from_bounds(*bounds)],
+        "changes": [],
+        "row_actions": [{
+            "type": "insert_rows",
+            "range": _range_from_bounds(*bounds),
+            "rows_inserted": len(matrix),
+            "before_row": insert_at,
+        }],
+        "counts": {"rows_inserted": len(matrix)},
+        "structural": True,
+    }
+
+
+def _run_xlsx_operation(
+    wb,
+    ws,
+    operation: str,
+    payload: dict[str, Any],
+    apply: bool,
+    include_changes: bool,
+) -> dict[str, Any]:
+    if operation == "set_range":
+        result = _plan_set_range(ws, payload, apply, include_changes)
+    elif operation == "update_cells":
+        result = _plan_update_cells(ws, payload, apply, include_changes)
+    elif operation == "clear_range":
+        result = _plan_clear_range(ws, payload, apply, include_changes)
+    elif operation == "format_range":
+        result = _plan_format_range(ws, payload, apply, include_changes)
+    elif operation == "append_rows":
+        result = _plan_append_rows(ws, payload, apply, include_changes)
+    elif operation == "update_rows_by_key":
+        result = _plan_update_rows_by_key(ws, payload, apply, include_changes)
+    elif operation == "upsert_rows":
+        result = _plan_upsert_rows(ws, payload, apply, include_changes)
+    elif operation == "delete_rows":
+        result = _plan_delete_rows(ws, payload, apply, include_changes)
+    elif operation == "insert_rows":
+        result = _plan_insert_rows(ws, payload, apply, include_changes)
+    else:
+        raise ValueError(
+            "不支持的 operation: "
+            f"{operation!r}。可选: set_range, update_cells, clear_range, format_range, "
+            "append_rows, update_rows_by_key, upsert_rows, delete_rows, insert_rows"
+        )
+    result.setdefault("bounds", [])
+    result.setdefault("affected_ranges", [])
+    result.setdefault("changes", [])
+    result.setdefault("format_actions", [])
+    result.setdefault("row_actions", [])
+    result.setdefault("counts", {})
+    result.setdefault("structural", operation in _XLSX_STRUCTURAL_OPS)
+    return result
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# file_edit_table — XLSX 结构化编辑工具
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 @tool(name="file_edit_table",
       description=(
-          "编辑 XLSX 表格文件。通过行级匹配进行精确替换。\n"
-          "target_content 和 replacement_content 均使用 'cell1 | cell2 | cell3' 格式，\n"
-          "与 file_read 输出格式一致。\n\n"
-          "功能：\n"
-          "- 单行替换：匹配一行，替换为新内容\n"
-          "- 多行替换：target_content 和 replacement_content 用 \\n 分隔多行\n"
-          "- 删除行：replacement_content 设为 '__DELETE__'\n"
-          "- 消歧：当多行匹配时，通过 target_rows 指定行号\n\n"
-          "注意：\n"
-          "- 单元格值中若包含 ' | '，匹配时需注意可能的列错位\n"
-          "- 匹配失败时先 file_read 确认最新内容再重试\n"
-          "- 不支持 .xls 旧格式"
+          "结构化编辑 XLSX 表格文件。使用 operation + payload 表达明确动作，"
+          "不再支持 target_content/replacement_content 文本行匹配。\n\n"
+          "支持 operation：\n"
+          "- set_range: 按 A1 range 写入二维数组\n"
+          "- update_cells: 按单元格地址批量更新\n"
+          "- clear_range: 清空区域值并保留样式\n"
+          "- format_range: 设置标色、字体和批注\n"
+          "- append_rows: 向 native Excel table 或 header dataset 追加行\n"
+          "- update_rows_by_key: 按关键列更新匹配行\n"
+          "- upsert_rows: 按关键列更新并追加缺失行\n"
+          "- delete_rows: 删除指定行或 key 匹配行\n"
+          "- insert_rows: 在指定位置插入行\n\n"
+          "默认 dry_run=True 只预览不保存。结构性写入需 dry_run=False 且 allow_structure_change=True。"
       ))
 async def file_edit_table(
     path: str,
-    target_content: str,
-    replacement_content: str,
+    operation: str,
     sheet_name: str | None = None,
-    target_rows: list[int] | None = None,
-    allow_multiple: bool = False,
-    highlight: str | None = None,
-    comment: str | None = None,
+    payload: dict = None,
+    dry_run: bool = True,
+    allow_structure_change: bool = False,
+    expected_structure_token: str | None = None,
+    expected_content_token: str | None = None,
+    include_changes: bool = False,
 ) -> ToolResult:
     """
-    编辑 XLSX 表格文件。
+    结构化编辑 XLSX 表格文件。
 
     Args:
         path: 文件路径，仅支持 .xlsx
-        target_content: 要被替换的行内容（与 file_read 输出格式一致）
-            格式: "cell1 | cell2 | cell3"
-            多行: 用 \n 分隔多行
-        replacement_content: 替换后的行内容
-            格式: "cell1 | cell2 | cell3"
-            多行: 用 \n 分隔多行
-            删除行: 使用 "__DELETE__"
-        sheet_name: 工作表名（单 Sheet 自动选择，多 Sheet 必填）
-        target_rows: 可选消歧参数。当 target_content 匹配多行时，
-            通过行号（1-based）指定要替换哪些行
-        allow_multiple: 是否允许替换多个匹配行（默认 False）
-        highlight: 标色颜色: "yellow"/"green"/"red"/"pink"/None
-        comment: 批注内容，None=不添加批注
+        operation: 编辑动作。可选 set_range/update_cells/clear_range/format_range/append_rows/update_rows_by_key/upsert_rows/delete_rows/insert_rows
+        sheet_name: 工作表名。单 Sheet 自动选择；table_name 可唯一定位时也可省略
+        payload: operation 对应的结构化参数
+        dry_run: 是否只预览不保存，默认 True
+        allow_structure_change: 是否允许插入/删除/追加等结构性写入，默认 False
+        expected_structure_token: 可选结构 token，不匹配时拒绝写入
+        expected_content_token: 可选内容 token，不匹配时拒绝写入
+        include_changes: 是否在 metadata 中返回单元格级 changes
     """
-    import difflib
-
     try:
         import openpyxl
-        from openpyxl.comments import Comment as XlComment
     except ImportError:
         return ToolResult(
             content="缺少 openpyxl 库。请安装: pip install openpyxl",
             is_error=True,
         )
 
-    # ── 路径安全检查 ──
+    operation = (operation or "").strip().lower()
+    payload = payload or {}
+    if not isinstance(payload, dict):
+        return ToolResult(
+            content="payload 必须是 object。",
+            is_error=True,
+            metadata={"ok": False, "operation": operation, "dry_run": dry_run},
+        )
+
     error = _check_path_safety(path)
     if error:
         return ToolResult(content=error, is_error=True)
@@ -1610,266 +2869,206 @@ async def file_edit_table(
             is_error=True,
         )
 
-    # ── highlight 值校验 ──
-    if highlight is not None and highlight not in ("yellow", "green", "red", "pink"):
-        return ToolResult(
-            content=f"不支持的 highlight 颜色: {highlight!r}。可选: yellow, green, red, pink",
-            is_error=True,
-        )
-
-    logger.info("file_edit_table 开始: path=%s", path)
+    logger.info("file_edit_table 开始: path=%s, operation=%s, dry_run=%s", path, operation, dry_run)
 
     try:
-        wb = openpyxl.load_workbook(str(path))
+        wb = openpyxl.load_workbook(str(path), data_only=False)
     except Exception as e:
         return ToolResult(content=f"打开 XLSX 失败: {e}", is_error=True)
 
-    # ── 获取目标 Sheet ──
     try:
-        sheet_names = wb.sheetnames
+        ws, sheet_error = _resolve_worksheet_for_table_edit(wb, sheet_name, payload)
+        if sheet_error:
+            wb.close()
+            return ToolResult(
+                content=sheet_error,
+                is_error=True,
+                metadata={"ok": False, "operation": operation, "dry_run": dry_run},
+            )
 
-        if sheet_name is None:
-            if len(sheet_names) == 1:
-                ws = wb[sheet_names[0]]
-            else:
-                wb.close()
-                return ToolResult(
-                    content=(
-                        f"文件包含 {len(sheet_names)} 个工作表，必须指定 sheet_name。\n"
-                        f"可用工作表: {', '.join(repr(n) for n in sheet_names)}"
-                    ),
-                    is_error=True,
-                    metadata={"sheet_names": sheet_names},
-                )
-        else:
-            if sheet_name not in sheet_names:
-                wb.close()
-                return ToolResult(
-                    content=(
-                        f"工作表 \"{sheet_name}\" 不存在。\n"
-                        f"可用工作表: {', '.join(repr(n) for n in sheet_names)}"
-                    ),
-                    is_error=True,
-                    metadata={"sheet_names": sheet_names},
-                )
-            ws = wb[sheet_name]
-    except Exception as e:
-        wb.close()
-        return ToolResult(content=f"获取工作表失败: {e}", is_error=True)
+        previous_profile = _profile_workbook(wb)
+        previous_structure_token = _hash_json(previous_profile)
 
-    # ── 收集格式化行 ──
-    max_col = ws.max_column or 0
-    formatted_rows: list[str] = []
-    for row in ws.iter_rows(min_row=1, max_row=ws.max_row, values_only=True):
-        formatted_rows.append(_format_xlsx_row(row))
-
-    total_rows = len(formatted_rows)
-    if total_rows == 0:
-        wb.close()
-        return ToolResult(
-            content="工作表为空，无法执行编辑。",
-            is_error=True,
+        # 先 dry-plan 一次：计算影响范围、校验 payload，不写入 workbook。
+        plan = _run_xlsx_operation(
+            wb, ws, operation, payload, apply=False, include_changes=include_changes
         )
+        bounds = plan.get("bounds", [])
+        previous_content_token = _hash_json([_content_token(ws, bound) for bound in bounds]) if bounds else _content_token(ws)
 
-    # ── 解析 target_content 为多行 ──
-    target_lines = [_normalize_xlsx_row(line) for line in target_content.split("\n")]
-    is_delete = replacement_content.strip() == "__DELETE__"
+        if expected_structure_token and expected_structure_token != previous_structure_token:
+            wb.close()
+            return ToolResult(
+                content="结构 token 不匹配，文件结构可能已变化，请重新 file_read 后再编辑。",
+                is_error=True,
+                metadata={
+                    "ok": False,
+                    "operation": operation,
+                    "dry_run": dry_run,
+                    "expected_structure_token": expected_structure_token,
+                    "current_structure_token": previous_structure_token,
+                },
+            )
+        if expected_content_token and expected_content_token != previous_content_token:
+            wb.close()
+            return ToolResult(
+                content="内容 token 不匹配，目标区域可能已变化，请重新 file_read 后再编辑。",
+                is_error=True,
+                metadata={
+                    "ok": False,
+                    "operation": operation,
+                    "dry_run": dry_run,
+                    "expected_content_token": expected_content_token,
+                    "current_content_token": previous_content_token,
+                },
+            )
 
-    if is_delete:
-        replacement_lines = []
-    else:
-        replacement_lines = replacement_content.split("\n")
-
-    # ── 多行匹配：在格式化行序列中搜索连续 N 行完全匹配的位置 ──
-    normalized_rows = [_normalize_xlsx_row(r) for r in formatted_rows]
-    match_count = len(target_lines)
-    all_matches: list[int] = []  # 起始行号列表（1-based）
-
-    for i in range(len(normalized_rows) - match_count + 1):
-        if all(normalized_rows[i + j] == target_lines[j] for j in range(match_count)):
-            all_matches.append(i + 1)  # 1-based
-
-    # ── 匹配结果判断 ──
-    if len(all_matches) == 0:
-        wb.close()
-        # 模糊搜索提示
-        close = difflib.get_close_matches(
-            _normalize_xlsx_row(target_content.split("\n")[0]),
-            normalized_rows,
-            n=3, cutoff=0.6,
-        )
-        hint = ""
-        if close:
-            hint = "\n最接近的行:\n" + "\n".join(f"  - {r}" for r in close)
-        return ToolResult(
-            content=f"未找到目标内容。请使用 file_read 确认工作表内容后重试。{hint}",
-            is_error=True,
-            metadata={"path": str(target.resolve()), "match_count": 0},
-        )
-
-    # 确定要操作的匹配
-    matches_to_apply: list[int] = []
-
-    if len(all_matches) == 1:
-        matches_to_apply = all_matches
-    else:
-        # 多个匹配
-        if target_rows is not None:
-            # 验证 target_rows 在匹配结果中
-            for row_num in target_rows:
-                if row_num not in all_matches:
-                    wb.close()
-                    return ToolResult(
-                        content=(
-                            f"行 {row_num} 不在匹配结果中。\n"
-                            f"匹配起始行: {all_matches}\n"
-                            f"请检查 target_rows 参数。"
-                        ),
-                        is_error=True,
-                        metadata={"matches": all_matches},
-                    )
-            matches_to_apply = sorted(target_rows)
-        elif allow_multiple:
-            matches_to_apply = all_matches
-        else:
+        is_structural = bool(plan.get("structural")) or operation in _XLSX_STRUCTURAL_OPS
+        if is_structural and not dry_run and not allow_structure_change:
             wb.close()
             return ToolResult(
                 content=(
-                    f"找到 {len(all_matches)} 处匹配，请通过以下方式消歧：\n"
-                    f"1. 使用 target_rows 指定行号（匹配起始行: {all_matches}）\n"
-                    f"2. 使用 allow_multiple=True 替换所有匹配\n"
-                    f"3. 提供更精确的 target_content"
+                    f"{operation} 属于结构性操作。请先 dry_run 预览，确认后设置 "
+                    "dry_run=False 且 allow_structure_change=True。"
                 ),
                 is_error=True,
-                metadata={"matches": all_matches},
+                metadata={
+                    "ok": False,
+                    "operation": operation,
+                    "dry_run": dry_run,
+                    "data": {
+                        "sheet": ws.title,
+                        "affected_ranges": plan.get("affected_ranges", []),
+                        "requires_structure_change": True,
+                    },
+                },
             )
 
-    # ── 合并单元格安全检查 ──
-    all_affected_rows: list[int] = []
-    for match_start in matches_to_apply:
-        all_affected_rows.extend(range(match_start, match_start + match_count))
+        impact = _analyze_range_impact(wb, ws, bounds, operation)
+        warnings = sorted(set(plan.get("warnings", []) + impact.get("warnings", [])))
+        if is_structural and dry_run and not allow_structure_change:
+            warnings.append("该操作属于结构性变更；实际写入时需要 allow_structure_change=True")
 
-    operation = "delete" if is_delete else "replace"
-    merge_conflict = _check_merge_conflicts(ws, list(set(all_affected_rows)), operation)
-    if merge_conflict:
-        wb.close()
-        return ToolResult(content=merge_conflict, is_error=True)
+        if impact.get("errors"):
+            wb.close()
+            message = "操作被阻止：" + "; ".join(impact["errors"][:5])
+            return ToolResult(
+                content=message,
+                is_error=True,
+                metadata={
+                    "ok": False,
+                    "operation": operation,
+                    "dry_run": dry_run,
+                    "error": {"type": "ImpactError", "message": message},
+                    "data": {
+                        "path": str(target.resolve()),
+                        "sheet": ws.title,
+                        "affected_ranges": plan.get("affected_ranges", []),
+                        "warnings": warnings,
+                        "impact": impact,
+                    },
+                },
+            )
 
-    # ── 标色映射 ──
-    from openpyxl.styles import PatternFill
-    _XLSX_FILL_MAP = {
-        "yellow": PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid"),
-        "green":  PatternFill(start_color="92D050", end_color="92D050", fill_type="solid"),
-        "red":    PatternFill(start_color="FF6B6B", end_color="FF6B6B", fill_type="solid"),
-        "pink":   PatternFill(start_color="FFB6C1", end_color="FFB6C1", fill_type="solid"),
-    }
+        if dry_run:
+            diff_preview = _build_xlsx_diff_preview(plan)
+            wb.close()
+            message = (
+                f"XLSX 表格编辑预览: {target.name}，operation={operation}，"
+                f"将影响 {len(plan.get('affected_ranges', []))} 个区域。\n"
+                f"{diff_preview}"
+            )
+            return ToolResult(
+                content=message,
+                metadata={
+                    "ok": True,
+                    "operation": operation,
+                    "dry_run": True,
+                    "data": {
+                        "path": str(target.resolve()),
+                        "sheet": ws.title,
+                        "affected_ranges": plan.get("affected_ranges", []),
+                        "counts": plan.get("counts", {}),
+                        "warnings": warnings,
+                        "diff_preview": diff_preview,
+                        "changes": plan.get("changes", []) if include_changes else _compact_changes(plan.get("changes", [])),
+                        "change_count": len(plan.get("changes", [])),
+                        "format_actions": plan.get("format_actions", []),
+                        "row_actions": plan.get("row_actions", []),
+                        "requires_structure_change": is_structural,
+                        "previous_structure_token": previous_structure_token,
+                        "previous_content_token": previous_content_token,
+                        "impact": impact,
+                    },
+                },
+            )
 
-    actual_count = 0
-    warnings: list[str] = []
+        applied = _run_xlsx_operation(
+            wb, ws, operation, payload, apply=True, include_changes=include_changes
+        )
+        new_profile = _profile_workbook(wb)
+        new_structure_token = _hash_json(new_profile)
+        new_content_token = _hash_json([_content_token(ws, bound) for bound in applied.get("bounds", [])]) if applied.get("bounds") else _content_token(ws)
 
-    # ── 从后往前执行，避免行号偏移 ──
-    for match_start in sorted(matches_to_apply, reverse=True):
-        if is_delete:
-            # ── Case B: 删除行 ──
-            for offset in range(match_count - 1, -1, -1):
-                row_idx = match_start + offset
-                ws.delete_rows(row_idx, 1)
-            actual_count += 1
+        sheet_title = ws.title
+        try:
+            buf = io.BytesIO()
+            wb.save(buf)
+            wb.close()
+            _atomic_write_binary(target, buf.getvalue())
+        except Exception as e:
+            return ToolResult(content=f"保存 XLSX 失败: {e}", is_error=True)
 
-        elif match_count == 1 and len(replacement_lines) == 1:
-            # ── Case A: 单行替换单行（最常见）──
-            row_idx = match_start
-            new_cells = replacement_lines[0].split(" | ")
-            target_cell_count = formatted_rows[row_idx - 1].count(" | ") + 1 if formatted_rows[row_idx - 1] else 1
+        persistence = _verify_xlsx_persisted(target, sheet_title, applied)
+        diff_preview = _build_xlsx_diff_preview(applied)
+        counts = applied.get("counts", {})
+        count_summary = ", ".join(f"{k}={v}" for k, v in counts.items() if v) or "已完成"
+        persisted_text = "落盘校验通过" if persistence.get("persisted") else "落盘校验失败"
+        message = (
+            f"XLSX 表格编辑成功: {target.name}，operation={operation}，{count_summary}。"
+            f" {persisted_text}。\n{diff_preview}"
+        )
+        if warnings:
+            message += f"\n警告: {'; '.join(warnings[:5])}"
+        if not persistence.get("persisted"):
+            message += "\n校验问题: " + "; ".join(persistence.get("mismatches", [])[:5])
 
-            if len(new_cells) != target_cell_count:
-                warnings.append(
-                    f"行 {row_idx}: 替换列数({len(new_cells)})与原列数({target_cell_count})不一致"
-                )
-
-            for col_idx, value in enumerate(new_cells, start=1):
-                cell = ws.cell(row=row_idx, column=col_idx)
-                cell.value = _infer_cell_value(value)
-                if highlight and highlight in _XLSX_FILL_MAP:
-                    cell.fill = _XLSX_FILL_MAP[highlight]
-                if comment:
-                    cell.comment = XlComment(comment, "Agent")
-
-            # 清空多余列
-            for col_idx in range(len(new_cells) + 1, max_col + 1):
-                ws.cell(row=row_idx, column=col_idx).value = None
-            actual_count += 1
-
-        else:
-            # ── Case C: 多行替换多行（N→M）──
-            # 先处理：替换前 min(N,M) 行
-            min_count = min(match_count, len(replacement_lines))
-            for i in range(min_count):
-                row_idx = match_start + i
-                new_cells = replacement_lines[i].split(" | ")
-                for col_idx, value in enumerate(new_cells, start=1):
-                    cell = ws.cell(row=row_idx, column=col_idx)
-                    cell.value = _infer_cell_value(value)
-                    if highlight and highlight in _XLSX_FILL_MAP:
-                        cell.fill = _XLSX_FILL_MAP[highlight]
-                    if comment:
-                        cell.comment = XlComment(comment, "Agent")
-                # 清空多余列
-                for col_idx in range(len(new_cells) + 1, max_col + 1):
-                    ws.cell(row=row_idx, column=col_idx).value = None
-
-            if len(replacement_lines) > match_count:
-                # 插入额外行
-                extra_count = len(replacement_lines) - match_count
-                insert_after = match_start + match_count - 1
-                ws.insert_rows(insert_after + 1, extra_count)
-                # 填入新行数据
-                for i, line in enumerate(replacement_lines[match_count:]):
-                    row_idx = insert_after + 1 + i
-                    cells = line.split(" | ")
-                    for col_idx, value in enumerate(cells, start=1):
-                        cell = ws.cell(row=row_idx, column=col_idx)
-                        cell.value = _infer_cell_value(value)
-                        if highlight and highlight in _XLSX_FILL_MAP:
-                            cell.fill = _XLSX_FILL_MAP[highlight]
-                        if comment:
-                            cell.comment = XlComment(comment, "Agent")
-
-            elif len(replacement_lines) < match_count:
-                # 删除多余行（从后往前）
-                for i in range(match_count - 1, len(replacement_lines) - 1, -1):
-                    ws.delete_rows(match_start + i, 1)
-
-            actual_count += 1
-
-    # ── 原子写入 ──
-    try:
-        buf = io.BytesIO()
-        wb.save(buf)
-        wb.close()
-        _atomic_write_binary(target, buf.getvalue())
+        logger.info("file_edit_table 成功: path=%s, operation=%s", target, operation)
+        return ToolResult(
+            content=message,
+            metadata={
+                "ok": True,
+                "operation": operation,
+                "dry_run": False,
+                "data": {
+                    "path": str(target.resolve()),
+                    "sheet": sheet_title,
+                    "affected_ranges": applied.get("affected_ranges", []),
+                    "counts": counts,
+                    "warnings": warnings,
+                    "diff_preview": diff_preview,
+                    "persistence_verification": persistence,
+                    "changes": applied.get("changes", []) if include_changes else _compact_changes(applied.get("changes", [])),
+                    "change_count": len(applied.get("changes", [])),
+                    "format_actions": applied.get("format_actions", []),
+                    "row_actions": applied.get("row_actions", []),
+                    "previous_structure_token": previous_structure_token,
+                    "new_structure_token": new_structure_token,
+                    "previous_content_token": previous_content_token,
+                    "new_content_token": new_content_token,
+                },
+            },
+        )
     except Exception as e:
-        return ToolResult(content=f"保存 XLSX 失败: {e}", is_error=True)
-
-    msg = f"XLSX 表格编辑成功: {target.name}，共 {actual_count} 处操作。"
-    if warnings:
-        msg += f" 警告: {'; '.join(warnings[:5])}"
-    if highlight:
-        msg += " 已标色。"
-    if comment:
-        msg += " 已添加批注。"
-
-    logger.info("file_edit_table 成功: path=%s, operations=%d", target, actual_count)
-    return ToolResult(
-        content=msg,
-        metadata={
-            "path": str(target.resolve()),
-            "format": "xlsx",
-            "replacements": actual_count,
-            "highlight": highlight,
-            "comment_added": bool(comment),
-        },
-    )
+        try:
+            wb.close()
+        except Exception:
+            pass
+        return ToolResult(
+            content=f"XLSX 表格编辑失败: {type(e).__name__}: {e}",
+            is_error=True,
+            metadata={"ok": False, "operation": operation, "dry_run": dry_run},
+        )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

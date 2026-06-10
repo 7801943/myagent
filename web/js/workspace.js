@@ -20,6 +20,7 @@ let workspaceExplorerToggle;
 let explorerContainer;
 let selectedWorkspacePath = '';
 let workspaceContextMenu = null;
+let tabListPopup = null;
 let lastRenderedTreeSignature = '';
 let optimisticActiveFilePath = '';
 let optimisticActiveRequestedAt = 0;
@@ -65,6 +66,11 @@ export function initWorkspace() {
     on('auth:logout', resetWorkspacePreview);
     on('session:changed', resetWorkspacePreview);
     document.addEventListener('click', hideWorkspaceContextMenu);
+    document.addEventListener('click', function (e) {
+        if (tabListPopup && !tabListPopup.contains(e.target)) {
+            hideTabListPopup();
+        }
+    });
 }
 
 function resetWorkspacePreview() {
@@ -331,7 +337,7 @@ function createAddButton() {
     const button = document.createElement('button');
     button.className = 'canvas-tab-add';
     button.type = 'button';
-    button.title = '新建文档标签';
+    button.title = '查看所有打开的标签';
     button.innerHTML = `
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             stroke-width="2">
@@ -339,7 +345,68 @@ function createAddButton() {
             <line x1="5" y1="12" x2="19" y2="12" />
         </svg>
     `;
+    button.addEventListener('click', function (event) {
+        event.stopPropagation();
+        toggleTabListPopup(button);
+    });
     return button;
+}
+
+function toggleTabListPopup(anchorButton) {
+    if (tabListPopup) {
+        hideTabListPopup();
+        return;
+    }
+    showTabListPopup(anchorButton);
+}
+
+function showTabListPopup(anchorButton) {
+    hideTabListPopup();
+    if (!latestWorkspaceState) return;
+
+    const files = latestWorkspaceState.open_files || [];
+    const activeIndex = latestWorkspaceState.active_file_index;
+
+    const popup = document.createElement('div');
+    popup.className = 'canvas-tab-list-popup';
+
+    if (!files.length) {
+        const empty = document.createElement('div');
+        empty.className = 'canvas-tab-list-empty';
+        empty.textContent = '暂无打开的文件';
+        popup.appendChild(empty);
+    } else {
+        files.forEach(function (file, index) {
+            const item = document.createElement('button');
+            item.type = 'button';
+            item.className = 'canvas-tab-list-item' + (index === activeIndex ? ' active' : '');
+            item.innerHTML = `
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                    stroke-width="2">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                    <polyline points="14 2 14 8 20 8" />
+                </svg>
+                <span class="canvas-tab-list-item-name">${escapeHtml(fileName(file.path))}</span>
+                <span class="canvas-tab-list-item-path">${escapeHtml(file.path)}</span>
+            `;
+            item.addEventListener('click', function () {
+                hideTabListPopup();
+                activateFileTab(index);
+            });
+            popup.appendChild(item);
+        });
+    }
+
+    anchorButton.style.position = 'relative';
+    anchorButton.appendChild(popup);
+    tabListPopup = popup;
+}
+
+function hideTabListPopup() {
+    if (tabListPopup && tabListPopup.parentNode) {
+        tabListPopup.parentNode.removeChild(tabListPopup);
+    }
+    tabListPopup = null;
 }
 
 function activateFileTab(index) {
