@@ -249,9 +249,9 @@ class SessionManager:
         session_id: str | None = None,
         approval_handler=None,
         system_prompt: str | None = None,
-        max_tokens_budget: int = 100000,
-        context_window_size: int = 128000,
-        tool_result_max_chars: int = 100000,
+        max_tokens_budget: int | None = None,
+        context_window_size: int | None = None,
+        tool_result_max_chars: int | None = None,
         no_safety: bool = False,
         workspace_root: str | None = None,
     ) -> Session:
@@ -263,15 +263,20 @@ class SessionManager:
             if root_dir:
                 workspace_root = str(Path(root_dir).expanduser())
 
+        # 从配置文件解析默认值（config.yaml → ContextConfig）
+        effective_budget = max_tokens_budget if max_tokens_budget is not None else self._config.context.max_tokens_budget
+        effective_window = context_window_size if context_window_size is not None else self.context_window_size
+        effective_max_chars = tool_result_max_chars if tool_result_max_chars is not None else self._config.context.tool_result_max_chars
+
         session = Session(
             session_id=session_id,
             harness=harness,
             user=user,
             state_store=self._state_store,
             system_prompt=effective_prompt,
-            max_tokens_budget=max_tokens_budget,
-            context_window_size=context_window_size,
-            tool_result_max_chars=tool_result_max_chars,
+            max_tokens_budget=effective_budget,
+            context_window_size=effective_window,
+            tool_result_max_chars=effective_max_chars,
             workspace_root=workspace_root,
         )
         self._sessions[session.id] = session
@@ -311,9 +316,9 @@ class SessionManager:
         session_id: str,
         user: UserContext,
         approval_handler=None,
-        max_tokens_budget: int = 100000,
-        context_window_size: int = 128000,
-        tool_result_max_chars: int = 100000,
+        max_tokens_budget: int | None = None,
+        context_window_size: int | None = None,
+        tool_result_max_chars: int | None = None,
     ) -> Session:
         if not self._state_store:
             raise RuntimeError("No StateStore configured")
@@ -322,14 +327,19 @@ class SessionManager:
 
         agent_run_state, metadata_dict = await self._state_store.load_state(session_id)
 
+        # 从配置文件解析默认值（config.yaml → ContextConfig）
+        effective_budget = max_tokens_budget if max_tokens_budget is not None else self._config.context.max_tokens_budget
+        effective_window = context_window_size if context_window_size is not None else self.context_window_size
+        effective_max_chars = tool_result_max_chars if tool_result_max_chars is not None else self._config.context.tool_result_max_chars
+
         session = Session(
             session_id=session_id,
             harness=harness,
             user=user,
             state_store=self._state_store,
-            max_tokens_budget=max_tokens_budget,
-            context_window_size=context_window_size,
-            tool_result_max_chars=tool_result_max_chars,
+            max_tokens_budget=effective_budget,
+            context_window_size=effective_window,
+            tool_result_max_chars=effective_max_chars,
         )
 
         if isinstance(metadata_dict, dict):

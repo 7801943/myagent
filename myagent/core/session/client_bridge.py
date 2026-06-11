@@ -118,8 +118,15 @@ class ClientBridge:
                           "args": event.args, "call_id": event.call_id})
 
         async def _on_tool_end(event: ToolEnd):
+            # 前端 tool chip 只展示摘要，截断超长结果
+            result_text = event.result.content
+            _CHIP_MAX_CHARS = 2000
+            if isinstance(result_text, str) and len(result_text) > _CHIP_MAX_CHARS:
+                result_text = result_text[:_CHIP_MAX_CHARS] + (
+                    f"\n...[截断：原文 {len(event.result.content)} 字符]"
+                )
             await sender({"type": "tool_end", "tool_name": event.tool_name,
-                          "result": event.result.content, "latency_ms": event.latency_ms,
+                          "result": result_text, "latency_ms": event.latency_ms,
                           "call_id": event.call_id})
 
         async def _on_tool_error(event: ToolError):
