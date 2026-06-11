@@ -3,7 +3,8 @@ import asyncio
 from openpyxl import Workbook, load_workbook
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
-from myagent.tools.builtin.file_tools import file_edit_table, file_read
+from myagent.tools.builtin.file_edit import file_edit_table
+from myagent.tools.builtin.file_read import file_read
 
 
 def run_tool(coro):

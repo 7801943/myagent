@@ -3,7 +3,9 @@ import asyncio
 from docx import Document
 
 from myagent.tools.api import generate_schema
-from myagent.tools.builtin.file_tools import file_edit, file_edit_table, file_read, file_write
+from myagent.tools.builtin.file_edit import file_edit, file_edit_table
+from myagent.tools.builtin.file_read import file_read
+from myagent.tools.builtin.file_write import file_write
 
 
 def run_tool(coro):

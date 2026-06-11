@@ -494,16 +494,20 @@ class ToolManager:
         )
         self._tools["cli_execute"] = cli_record
 
-        from myagent.tools.builtin.file_tools import file_read, file_write, file_edit, file_edit_table
+        from myagent.tools.builtin.file_edit import file_edit, file_edit_table
+        from myagent.tools.builtin.file_read import file_read
+        from myagent.tools.builtin.file_query import file_query
+        from myagent.tools.builtin.file_write import file_write
 
-        base = str(Path(__file__).parent / "builtin" / "file_tools.py")
-        self._register_file_tool(base, file_read)
-        self._register_file_tool(base, file_write)
-        self._register_file_tool(base, file_edit)
-        self._register_file_tool(base, file_edit_table)
+        builtin_dir = Path(__file__).parent / "builtin"
+        self._register_file_tool(str(builtin_dir / "file_read.py"), file_read)
+        self._register_file_tool(str(builtin_dir / "file_query.py"), file_query)
+        self._register_file_tool(str(builtin_dir / "file_write.py"), file_write)
+        self._register_file_tool(str(builtin_dir / "file_edit.py"), file_edit)
+        self._register_file_tool(str(builtin_dir / "file_edit.py"), file_edit_table)
 
         logger.info(
-            "Registered builtin tools: cli_execute, file_read, file_write, file_edit, file_edit_table")
+            "Registered builtin tools: cli_execute, file_read, file_query, file_write, file_edit, file_edit_table")
 
     # ── MCP ──
 

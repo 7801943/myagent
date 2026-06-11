@@ -10,7 +10,7 @@ doc.save("test_edit.docx")
 import sys
 sys.path.append("/home/zhouxiang/myagent")
 
-from myagent.tools.builtin.file_tools import file_edit
+from myagent.tools.builtin.file_edit import file_edit
 
 async def main():
     result = await file_edit(
