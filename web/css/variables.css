@@ -33,7 +33,7 @@
     --text-secondary: hsl(220, 10%, 65%);
     --text-tertiary: hsl(220, 8%, 50%);
     --accent: hsl(210, 100%, 60%);
-    --accent-soft: hsl(210, 100%, 60%, 0.12);
+    --accent-soft: hsl(210, 100%, 60%, 0.18);
     --accent-hover: hsl(210, 100%, 68%);
     --success: hsl(152, 68%, 48%);
     --success-soft: hsl(152, 68%, 48%, 0.12);
@@ -75,7 +75,7 @@
     --text-secondary: hsl(220, 10%, 42%);
     --text-tertiary: hsl(220, 8%, 58%);
     --accent: hsl(210, 100%, 50%);
-    --accent-soft: hsl(210, 100%, 50%, 0.08);
+    --accent-soft: hsl(210, 100%, 50%, 0.14);
     --accent-hover: hsl(210, 100%, 42%);
     --success: hsl(152, 68%, 38%);
     --success-soft: hsl(152, 68%, 38%, 0.08);

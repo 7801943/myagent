@@ -380,6 +380,7 @@ function showTabListPopup(anchorButton) {
             const item = document.createElement('button');
             item.type = 'button';
             item.className = 'canvas-tab-list-item' + (index === activeIndex ? ' active' : '');
+            item.title = file.path || '';
             item.innerHTML = `
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                     stroke-width="2">

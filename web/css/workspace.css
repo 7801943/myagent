@@ -96,7 +96,7 @@
     scroll-behavior: smooth;
     scrollbar-width: none;
     -ms-overflow-style: none;
-    padding: 0 28px 0 2px;
+    padding: 0 38px 0 2px;
 }
 
 .canvas-tab-scroll-area::-webkit-scrollbar {
@@ -105,16 +105,16 @@
 
 /* ── Tab Scroll Buttons ── */
 .canvas-tab-scroll-btn {
-    width: 24px;
-    height: 24px;
+    width: 26px;
+    height: 26px;
     flex-shrink: 0;
     display: none;
     align-items: center;
     justify-content: center;
-    border: none;
+    border: 1px solid var(--bg-glass-border);
     border-radius: 6px;
-    background: var(--bg-glass-hover);
-    color: var(--text-secondary);
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
     cursor: pointer;
     transition: all var(--transition-fast);
     z-index: 3;
@@ -124,6 +124,7 @@
 .canvas-tab-scroll-btn:hover {
     background: var(--accent-soft);
     color: var(--accent);
+    border-color: var(--accent);
 }
 
 .canvas-tab-scroll-btn.visible {
@@ -589,9 +590,9 @@
     top: 100%;
     right: 0;
     z-index: 100;
-    min-width: 220px;
-    max-width: 320px;
-    max-height: 320px;
+    min-width: 260px;
+    max-width: 420px;
+    max-height: 360px;
     overflow-y: auto;
     padding: 5px;
     border: 1px solid var(--bg-glass-border);
@@ -635,9 +636,6 @@
 }
 
 .canvas-tab-list-item-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
     flex: 1;
     min-width: 0;
 }
@@ -645,10 +643,6 @@
 .canvas-tab-list-item-path {
     font-size: 10px;
     color: var(--text-tertiary);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 120px;
     flex-shrink: 0;
 }
 
