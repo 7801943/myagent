@@ -3,9 +3,10 @@
  * 职责：折叠/展开、Tab 切换、根据 workspace_state 打开 OnlyOffice 文档。
  */
 
-import { on } from './state.js';
+import { state, emit, on } from './state.js';
 import { activateDocument, closeAllDocuments, closeDocument, openDocument } from './onlyoffice-editor.js';
 import { send } from './connection.js';
+import { getToken } from './auth.js';
 
 let panel;
 let chatPanel;
@@ -28,11 +29,21 @@ let optimisticActiveRequestedAt = 0;
 const OPTIMISTIC_ACTIVE_TTL_MS = 4000;
 
 const OFFICE_EXTENSIONS = new Set([
-    '.doc', '.docx', '.odt', '.rtf', '.txt',
+    '.doc', '.docx', '.odt', '.rtf', '.txt', '.md', '.markdown',
     '.xls', '.xlsx', '.ods', '.csv',
     '.ppt', '.pptx', '.odp',
     '.pdf',
 ]);
+
+const FORBIDDEN_ARCHIVE_SUFFIXES = [
+    '.tar.gz', '.tar.bz2', '.tar.xz', '.tar.zst',
+    '.zip', '.rar', '.7z', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.zst',
+    '.cab', '.iso', '.jar', '.war', '.ear', '.apk', '.dmg',
+];
+
+let workspaceUploadFileInput = null;
+let workspaceUploadFolderInput = null;
+let pendingUploadTargetDir = '';
 
 export function initWorkspace() {
     panel = document.getElementById("workspacePanel");
@@ -65,6 +76,7 @@ export function initWorkspace() {
     on('workspace:state', handleWorkspaceState);
     on('auth:logout', resetWorkspacePreview);
     on('session:changed', resetWorkspacePreview);
+    ensureWorkspaceUploadInputs();
     document.addEventListener('click', hideWorkspaceContextMenu);
     document.addEventListener('click', function (e) {
         if (tabListPopup && !tabListPopup.contains(e.target)) {
@@ -513,6 +525,9 @@ function createExplorerHeader(rootName, rootPath) {
     actions.appendChild(createExplorerAction('刷新', '↻', function () {
         send({ type: 'workspace_refresh' });
     }));
+    actions.appendChild(createExplorerAction('上传', '↑', function (button) {
+        showWorkspaceUploadMenu(button, getDefaultUploadDir());
+    }));
     actions.appendChild(createExplorerAction('折叠全部', '−', function () {
         if (!latestWorkspaceState) return;
         latestWorkspaceState = Object.assign({}, latestWorkspaceState, { expanded_dirs: [] });
@@ -532,9 +547,340 @@ function createExplorerAction(title, label, onClick) {
     button.textContent = label;
     button.addEventListener('click', function (event) {
         event.stopPropagation();
-        onClick();
+        onClick(button, event);
     });
     return button;
+}
+
+function ensureWorkspaceUploadInputs() {
+    if (!workspaceUploadFileInput) {
+        workspaceUploadFileInput = document.createElement('input');
+        workspaceUploadFileInput.type = 'file';
+        workspaceUploadFileInput.multiple = true;
+        workspaceUploadFileInput.hidden = true;
+        workspaceUploadFileInput.addEventListener('change', function () {
+            startWorkspaceUpload(workspaceUploadFileInput.files, false, pendingUploadTargetDir);
+        });
+        document.body.appendChild(workspaceUploadFileInput);
+    }
+    if (!workspaceUploadFolderInput) {
+        workspaceUploadFolderInput = document.createElement('input');
+        workspaceUploadFolderInput.type = 'file';
+        workspaceUploadFolderInput.multiple = true;
+        workspaceUploadFolderInput.hidden = true;
+        workspaceUploadFolderInput.setAttribute('webkitdirectory', '');
+        workspaceUploadFolderInput.addEventListener('change', function () {
+            startWorkspaceUpload(workspaceUploadFolderInput.files, true, pendingUploadTargetDir);
+        });
+        document.body.appendChild(workspaceUploadFolderInput);
+    }
+}
+
+function showWorkspaceUploadMenu(anchorButton, defaultDir) {
+    hideWorkspaceContextMenu();
+    workspaceContextMenu = document.createElement('div');
+    workspaceContextMenu.className = 'workspace-context-menu';
+
+    workspaceContextMenu.appendChild(createContextMenuItem('上传文件', function () {
+        openWorkspaceUploadPicker(false, defaultDir);
+    }));
+    workspaceContextMenu.appendChild(createContextMenuItem('上传文件夹', function () {
+        openWorkspaceUploadPicker(true, defaultDir);
+    }));
+
+    const rect = anchorButton.getBoundingClientRect();
+    workspaceContextMenu.style.left = `${rect.left}px`;
+    workspaceContextMenu.style.top = `${rect.bottom + 4}px`;
+    document.body.appendChild(workspaceContextMenu);
+    keepContextMenuInViewport(workspaceContextMenu);
+}
+
+function openWorkspaceUploadPicker(isFolder, defaultDir) {
+    if (!latestWorkspaceState || !latestWorkspaceState.root_path) {
+        window.alert('未设置工作空间目录');
+        return;
+    }
+    pendingUploadTargetDir = defaultDir || '';
+    ensureWorkspaceUploadInputs();
+    const input = isFolder ? workspaceUploadFolderInput : workspaceUploadFileInput;
+    input.value = '';
+    input.click();
+}
+
+async function startWorkspaceUpload(fileList, isFolder, defaultTargetDir) {
+    const entries = collectUploadEntries(fileList, isFolder);
+    clearWorkspaceUploadInputs();
+    if (!entries.length) return;
+    if (!state.currentSessionId) {
+        window.alert('当前会话尚未连接');
+        return;
+    }
+
+    const invalid = entries.filter(function (entry) {
+        return hasForbiddenArchiveSuffix(entry.path);
+    });
+    if (invalid.length) {
+        window.alert(`不允许上传压缩或归档文件：\n${invalid.slice(0, 8).map(function (entry) { return entry.path; }).join('\n')}`);
+        return;
+    }
+
+    const targetDir = requestWorkspaceUploadTarget(defaultTargetDir);
+    if (targetDir === null) return;
+
+    try {
+        const preflight = await workspaceFilesJson('/preflight', {
+            session_id: state.currentSessionId,
+            target_dir: targetDir,
+            paths: entries.map(function (entry) { return entry.path; }),
+        });
+        if (preflight.rejected && preflight.rejected.length) {
+            window.alert(formatRejectedMessage('部分文件无法上传', preflight.rejected));
+            return;
+        }
+
+        let overwrite = false;
+        if (preflight.conflicts && preflight.conflicts.length) {
+            overwrite = window.confirm(formatConflictMessage(preflight.conflicts));
+            if (!overwrite) return;
+        }
+
+        const form = new FormData();
+        form.append('session_id', state.currentSessionId);
+        form.append('target_dir', targetDir);
+        form.append('overwrite', overwrite ? 'true' : 'false');
+        entries.forEach(function (entry) {
+            form.append('files[]', entry.file, entry.file.name);
+            form.append('paths[]', entry.path);
+        });
+
+        const result = await workspaceFilesForm('/upload', form);
+        if (result.rejected && result.rejected.length) {
+            window.alert(formatRejectedMessage('部分文件未上传', result.rejected));
+            return;
+        }
+        showOnlyOfficeHint(`已上传 ${result.uploaded ? result.uploaded.length : entries.length} 个文件`);
+    } catch (err) {
+        window.alert(err.message || '上传失败');
+    }
+}
+
+function collectUploadEntries(fileList, isFolder) {
+    return Array.from(fileList || []).map(function (file) {
+        return {
+            file: file,
+            path: normalizeClientUploadPath(isFolder ? (file.webkitRelativePath || file.name) : file.name),
+        };
+    }).filter(function (entry) {
+        return !!entry.path;
+    });
+}
+
+function clearWorkspaceUploadInputs() {
+    if (workspaceUploadFileInput) workspaceUploadFileInput.value = '';
+    if (workspaceUploadFolderInput) workspaceUploadFolderInput.value = '';
+}
+
+function requestWorkspaceUploadTarget(defaultTargetDir) {
+    const dirs = getKnownWorkspaceDirs();
+    const preview = dirs.slice(0, 12).join('\n') || '根目录';
+    const message = `请输入上传目标目录（留空表示 workspace 根目录）。\n已加载目录示例：\n${preview}`;
+    const value = window.prompt(message, defaultTargetDir || '');
+    if (value === null) return null;
+    return normalizeClientUploadPath(value);
+}
+
+function getDefaultUploadDir() {
+    const selected = findWorkspaceFile(selectedWorkspacePath);
+    if (selected && selected.is_dir) return selected.path;
+    if (selected && selected.path) return parentDir(selected.path);
+    return '';
+}
+
+function getKnownWorkspaceDirs() {
+    if (!latestWorkspaceState) return [''];
+    const dirs = (latestWorkspaceState.files || [])
+        .filter(function (file) { return file.is_dir; })
+        .map(function (file) { return file.path; })
+        .sort(function (a, b) { return a.localeCompare(b, 'zh-Hans-CN'); });
+    return [''].concat(dirs);
+}
+
+function findWorkspaceFile(path) {
+    if (!path || !latestWorkspaceState) return null;
+    return (latestWorkspaceState.files || []).find(function (file) {
+        return file.path === path;
+    }) || null;
+}
+
+function parentDir(path) {
+    const parts = String(path || '').split('/').filter(Boolean);
+    parts.pop();
+    return parts.join('/');
+}
+
+function normalizeClientUploadPath(path) {
+    return String(path || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+}
+
+function hasForbiddenArchiveSuffix(path) {
+    const lower = String(path || '').toLowerCase();
+    return FORBIDDEN_ARCHIVE_SUFFIXES.some(function (suffix) {
+        return lower.endsWith(suffix);
+    });
+}
+
+async function workspaceFilesJson(route, payload) {
+    const response = await fetch(`/api/workspace/files${route}`, {
+        method: 'POST',
+        headers: {
+            'Authorization': 'Bearer ' + getToken(),
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+    });
+    return parseWorkspaceFilesResponse(response);
+}
+
+async function workspaceFilesForm(route, form) {
+    const response = await fetch(`/api/workspace/files${route}`, {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + getToken() },
+        body: form,
+    });
+    return parseWorkspaceFilesResponse(response);
+}
+
+async function parseWorkspaceFilesResponse(response) {
+    let data = null;
+    try {
+        data = await response.json();
+    } catch (e) {
+        data = null;
+    }
+    if (!response.ok) {
+        const detail = data && data.detail ? data.detail : null;
+        if (detail && typeof detail === 'object') {
+            throw new Error(formatRejectedMessage('操作失败', detail.rejected || []));
+        }
+        throw new Error((detail && String(detail)) || (data && data.error) || '请求失败');
+    }
+    return data || {};
+}
+
+function formatConflictMessage(conflicts) {
+    const lines = conflicts.slice(0, 10).map(function (item) {
+        return item.target_path || item.path;
+    });
+    const more = conflicts.length > lines.length ? `\n... 还有 ${conflicts.length - lines.length} 个冲突` : '';
+    return `以下文件已存在，是否覆盖？\n${lines.join('\n')}${more}`;
+}
+
+function formatRejectedMessage(title, rejected) {
+    if (!rejected || !rejected.length) return title;
+    const lines = rejected.slice(0, 10).map(function (item) {
+        return `${item.target_path || item.path || ''}: ${item.reason || '失败'}`;
+    });
+    const more = rejected.length > lines.length ? `\n... 还有 ${rejected.length - lines.length} 项` : '';
+    return `${title}：\n${lines.join('\n')}${more}`;
+}
+
+async function renameWorkspaceEntry(file) {
+    if (!file || !file.path || !state.currentSessionId) return;
+    const currentName = fileName(file.path);
+    const nextName = window.prompt('请输入新名称', currentName);
+    if (nextName === null) return;
+    const trimmed = nextName.trim();
+    if (!trimmed || trimmed === currentName) return;
+
+    try {
+        await workspaceFilesJson('/rename', {
+            session_id: state.currentSessionId,
+            path: file.path,
+            new_name: trimmed,
+        });
+    } catch (err) {
+        window.alert(err.message || '重命名失败');
+    }
+}
+
+async function downloadWorkspaceEntry(file) {
+    if (!file || !file.path || !state.currentSessionId) return;
+    const params = new URLSearchParams({
+        session_id: state.currentSessionId,
+        path: file.path,
+    });
+
+    try {
+        const response = await fetch(`/api/workspace/files/download?${params.toString()}`, {
+            headers: { 'Authorization': 'Bearer ' + getToken() },
+        });
+        if (!response.ok) {
+            let message = '下载失败';
+            try {
+                const data = await response.json();
+                message = data.detail || data.error || message;
+            } catch (e) {
+                // 保持默认文案。
+            }
+            throw new Error(message);
+        }
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = file.is_dir ? `${fileName(file.path)}.zip` : fileName(file.path);
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+    } catch (err) {
+        window.alert(err.message || '下载失败');
+    }
+}
+
+function aiReadWorkspaceFile(file) {
+    if (!file || !file.path || file.is_dir) return;
+    const rootPath = latestWorkspaceState && latestWorkspaceState.root_path
+        ? String(latestWorkspaceState.root_path).replace(/\/+$/g, '')
+        : '';
+    const absolutePath = rootPath ? `${rootPath}/${file.path}` : file.path;
+    const text = [
+        '请使用 file_read 工具读取以下 workspace 文件，并总结主要内容，指出与当前任务相关的关键信息。',
+        `相对路径：${file.path}`,
+        `绝对路径：${absolutePath}`,
+    ].join('\n');
+
+    const input = document.getElementById('userInput');
+    const sendButton = document.getElementById('sendBtn');
+    if (input && sendButton) {
+        input.value = text;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        sendButton.click();
+        return;
+    }
+
+    emit('chat:send', { text: text });
+}
+
+async function deleteWorkspaceEntry(file) {
+    if (!file || !file.path || !state.currentSessionId) return;
+    const message = file.is_dir
+        ? `确定删除目录及其全部内容？\n${file.path}`
+        : `确定删除文件？\n${file.path}`;
+    if (!window.confirm(message)) return;
+
+    try {
+        const result = await workspaceFilesJson('/delete', {
+            session_id: state.currentSessionId,
+            paths: [file.path],
+            recursive: Boolean(file.is_dir),
+        });
+        if (result.rejected && result.rejected.length) {
+            window.alert(formatRejectedMessage('部分路径未删除', result.rejected));
+        }
+    } catch (err) {
+        window.alert(err.message || '删除失败');
+    }
 }
 
 function createExplorerEmpty(message) {
@@ -668,16 +1014,28 @@ function showWorkspaceContextMenu(file, x, y) {
             renderFileTree(latestWorkspaceState);
             send({ type: 'workspace_scan_dir', path: file.path });
         }));
-    } else {
-        workspaceContextMenu.appendChild(createContextMenuItem('打开', function () {
-            openWorkspaceFile(file.path);
+        workspaceContextMenu.appendChild(createContextMenuItem('上传到此目录', function () {
+            openWorkspaceUploadPicker(false, file.path);
         }));
-        workspaceContextMenu.appendChild(createContextMenuItem('在 OnlyOffice 中打开', function () {
+    } else {
+        workspaceContextMenu.appendChild(createContextMenuItem('ai读取', function () {
+            aiReadWorkspaceFile(file);
+        }));
+        workspaceContextMenu.appendChild(createContextMenuItem('预览/编辑', function () {
             openWorkspaceFile(file.path);
         }, !isOnlyOfficeFile(file.path)));
     }
+    workspaceContextMenu.appendChild(createContextMenuItem('重命名', function () {
+        renameWorkspaceEntry(file);
+    }));
+    workspaceContextMenu.appendChild(createContextMenuItem('下载', function () {
+        downloadWorkspaceEntry(file);
+    }));
     workspaceContextMenu.appendChild(createContextMenuItem('复制相对路径', function () {
         copyText(file.path);
+    }));
+    workspaceContextMenu.appendChild(createContextMenuItem('删除', function () {
+        deleteWorkspaceEntry(file);
     }));
 
     document.body.appendChild(workspaceContextMenu);

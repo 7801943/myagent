@@ -28,7 +28,7 @@ logger = get_logger(__name__)
 
 
 DEFAULT_SUPPORTED_EXTENSIONS = [
-    ".doc", ".docx", ".odt", ".rtf", ".txt",
+    ".doc", ".docx", ".odt", ".rtf", ".txt", ".md", ".markdown",
     ".xls", ".xlsx", ".ods", ".csv",
     ".ppt", ".pptx", ".odp",
     ".pdf",
@@ -337,7 +337,7 @@ class DocumentService:
 
     @staticmethod
     def _document_type(ext: str) -> str:
-        if ext in {".doc", ".docx", ".odt", ".rtf", ".txt"}:
+        if ext in {".doc", ".docx", ".odt", ".rtf", ".txt", ".md", ".markdown"}:
             return "word"
         if ext in {".xls", ".xlsx", ".ods", ".csv"}:
             return "cell"

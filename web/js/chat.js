@@ -4,7 +4,7 @@
  * 依赖：state.js, connection.js, markdown.js, utils.js, tool-chip.js
  */
 
-import { state, emit } from './state.js';
+import { state, emit, on } from './state.js';
 import { send } from './connection.js';
 import { renderMarkdown, renderMarkdownStream } from './markdown.js';
 import { resetToolState, appendToolStart, appendToolEnd } from './tool-chip.js';
@@ -71,6 +71,11 @@ export function initChat() {
             const text = this.dataset.text;
             if (text) sendMessage(text);
         });
+    });
+
+    on('chat:send', function (payload) {
+        const text = typeof payload === 'string' ? payload : (payload && payload.text);
+        if (text) sendMessage(text);
     });
 }
 

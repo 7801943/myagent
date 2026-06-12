@@ -123,7 +123,7 @@ export async function openDocument(relativePath, mode, options) {
     });
 
     const cached = editorCache.get(relativePath);
-    if (cached) {
+    if (cached && cached.signature === signature) {
         pendingPath = '';
         activateCachedEditor(relativePath);
         console.info('[OnlyOffice] editor cache activated', {
@@ -134,6 +134,14 @@ export async function openDocument(relativePath, mode, options) {
         });
         showStatus('');
         return;
+    }
+    if (cached && cached.signature !== signature) {
+        console.info('[OnlyOffice] editor cache invalidated', {
+            path: relativePath,
+            cachedSignature: cached.signature,
+            requestedSignature: signature,
+        });
+        destroyCachedEditor(relativePath, 'signature-changed');
     }
 
     showStatus('正在打开文档...');

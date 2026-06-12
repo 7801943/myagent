@@ -143,6 +143,8 @@ documents:
     - ".odt"
     - ".rtf"
     - ".txt"
+    - ".md"
+    - ".markdown"
     - ".xls"
     - ".xlsx"
     - ".ods"

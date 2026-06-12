@@ -342,6 +342,22 @@ class WorkspaceManager:
         if not self._state.root_path:
             return
 
+        changed_paths = self._normalize_path_list(data.get("changed_paths"))
+        deleted_paths = self._normalize_path_list(data.get("deleted_paths"))
+        renamed_paths = self._normalize_rename_list(data.get("renamed_paths"))
+
+        if renamed_paths:
+            self._apply_renamed_paths(renamed_paths)
+
+        if changed_paths:
+            changed_set = set(changed_paths)
+            for tab in self._state.open_files:
+                if tab.path in changed_set:
+                    tab.revision += 1
+
+        if deleted_paths:
+            self._remove_deleted_open_tabs(deleted_paths)
+
         # 保存 flag 状态
         flag_map = {f.path: (f.is_user_opened, f.is_llm_read) for f in self._state.files}
 
@@ -479,6 +495,79 @@ class WorkspaceManager:
             f for f in self._state.files
             if not self._is_direct_child(f.path, parent)
         ]
+
+    def _remove_deleted_open_tabs(self, deleted_paths: list[str]) -> None:
+        """关闭已删除文件或删除目录下的打开 Tab。"""
+        if not deleted_paths:
+            return
+
+        def is_deleted(path: str) -> bool:
+            return any(path == deleted or path.startswith(deleted + "/") for deleted in deleted_paths)
+
+        active_path = self.get_active_file_path()
+        self._state.open_files = [
+            tab for tab in self._state.open_files
+            if not is_deleted(tab.path)
+        ]
+        if not self._state.open_files:
+            self._state.active_file_index = None
+            return
+        if active_path and not is_deleted(active_path):
+            for index, tab in enumerate(self._state.open_files):
+                if tab.path == active_path:
+                    self._state.active_file_index = index
+                    return
+        self._state.active_file_index = min(
+            self._state.active_file_index or 0,
+            len(self._state.open_files) - 1,
+        )
+
+    @classmethod
+    def _normalize_path_list(cls, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        result: list[str] = []
+        for item in value[:500]:
+            path = cls._normalize_relative_path(str(item or ""))
+            if path and path not in result:
+                result.append(path)
+        return result
+
+    @classmethod
+    def _normalize_rename_list(cls, value: Any) -> list[tuple[str, str]]:
+        if not isinstance(value, list):
+            return []
+        result: list[tuple[str, str]] = []
+        for item in value[:200]:
+            if not isinstance(item, dict):
+                continue
+            from_path = cls._normalize_relative_path(str(item.get("from") or ""))
+            to_path = cls._normalize_relative_path(str(item.get("to") or ""))
+            if from_path and to_path:
+                result.append((from_path, to_path))
+        return result
+
+    def _apply_renamed_paths(self, renamed_paths: list[tuple[str, str]]) -> None:
+        for from_path, to_path in renamed_paths:
+            for tab in self._state.open_files:
+                if tab.path == from_path:
+                    tab.path = to_path
+                    tab.revision += 1
+                elif tab.path.startswith(from_path + "/"):
+                    tab.path = to_path + tab.path[len(from_path):]
+                    tab.revision += 1
+
+            next_expanded: list[str] = []
+            for dir_path in self._state.expanded_dirs:
+                if dir_path == from_path:
+                    next_path = to_path
+                elif dir_path.startswith(from_path + "/"):
+                    next_path = to_path + dir_path[len(from_path):]
+                else:
+                    next_path = dir_path
+                if next_path not in next_expanded:
+                    next_expanded.append(next_path)
+            self._state.expanded_dirs = next_expanded
 
     @staticmethod
     def _is_direct_child(path: str, parent: str) -> bool:
