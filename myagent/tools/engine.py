@@ -4,8 +4,12 @@ ExecutionEngine: 纯执行逻辑，不包含协议和传输。
 """
 import asyncio
 import importlib.util
+import logging
 import os
+import sys
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 _MAX_CONCURRENT = 10
 _DEFAULT_MAX_OUTPUT_BYTES = 512000
@@ -133,6 +137,7 @@ class ExecutionEngine:
                 }
             except Exception as e:
                 self._tool_cache.pop(cache_key, None)
+                logger.exception(f"函数执行异常: {fn_name}")
                 return {
                     "content": f"函数执行异常: {type(e).__name__}: {e}",
                     "is_error": True,
@@ -160,7 +165,12 @@ class ExecutionEngine:
         if spec is None or spec.loader is None:
             raise ImportError(f"Cannot load module: {file_path}")
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception:
+            sys.modules.pop(spec.name, None)
+            raise
         self._tool_cache[cache_key] = (module, current_mtime)
         return module
 

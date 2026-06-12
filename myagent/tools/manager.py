@@ -10,6 +10,7 @@ import importlib.util
 import inspect
 import logging
 import os
+import sys
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -420,7 +421,12 @@ class ToolManager:
             return
 
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception:
+            sys.modules.pop(spec.name, None)
+            raise
 
         async_funcs = [
             (name, obj)

@@ -61,6 +61,19 @@ def test_file_query_evidence_mode_keeps_evidence_without_answer_summary(tmp_path
     assert result.metadata['evidence'][0]['answer'] == 'Beta is relevant.'
 
 
+def test_file_query_treats_null_optional_args_as_defaults(tmp_path, monkeypatch):
+    path = tmp_path / 'notes.txt'
+    path.write_text('alpha\nbeta evidence\n', encoding='utf-8')
+    patch_subagent(monkeypatch, make_fake_response(2, 2, answer='Beta default answer.'))
+
+    result = run_tool(file_query(str(path), 'beta?', mode=None, sheet_name=None, max_evidence=None))
+
+    assert not result.is_error, result.content
+    assert result.metadata['mode'] == 'answer'
+    assert result.metadata['evidence_count'] == 1
+    assert 'Beta default answer. [S1]' in result.content
+
+
 def test_file_query_discards_answer_when_no_evidence(tmp_path, monkeypatch):
     path = tmp_path / 'notes.txt'
     path.write_text('alpha\nbeta\n', encoding='utf-8')
@@ -194,6 +207,33 @@ def test_file_query_returns_error_when_subagent_unavailable(tmp_path, monkeypatc
     assert result.metadata['chunk_failures'][0]['kind'] == 'subagent_error'
 
 
+def test_hot_reload_dataclass_tool_registers_without_sys_modules_error(tmp_path):
+    tools_dir = tmp_path / 'tools'
+    tool_dir = tools_dir / 'dataclass_tool'
+    tool_dir.mkdir(parents=True)
+    (tool_dir / 'dataclass_tool.py').write_text(
+        """from dataclasses import dataclass
+from myagent.tools.api import ToolResult
+
+@dataclass
+class Payload:
+    value: str = 'ok'
+
+async def dataclass_probe() -> ToolResult:
+    return ToolResult(content=Payload().value)
+""",
+        encoding='utf-8',
+    )
+
+    manager = ToolManager(tools_dir=str(tools_dir))
+    run_tool(manager._scan())
+
+    assert 'dataclass_probe' in manager.tool_names
+    record = manager.get('dataclass_probe')
+    assert record is not None
+    assert record.file_path is not None
+
+
 def test_file_query_registered_as_builtin_tool():
     manager = ToolManager()
     manager._register_builtin_tools()
@@ -202,6 +242,7 @@ def test_file_query_registered_as_builtin_tool():
     record = manager.get('file_query')
     assert record is not None
     assert record.meta.timeout == 180
+    assert record.parameters_schema['required'] == ['path', 'query']
     assert 'query' in record.parameters_schema['properties']
     assert 'overlap_lines' not in record.parameters_schema['properties']
     assert 'excerpt_context_lines' not in record.parameters_schema['properties']

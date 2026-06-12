@@ -81,6 +81,7 @@ class _SimpleMessage:
         return {"role": self.role, "content": self.content}
 
 
+
 @tool(
     name="file_query",
     timeout=180,
@@ -88,7 +89,7 @@ class _SimpleMessage:
         "使用子代理模型查询大型文件内容。适用于文件过长、直接读取会超过模型最佳上下文区间的场景；"
         "工具会将文件按行自动切块并保留重叠上下文，把每个片段交给子代理判断是否包含答案，"
         "再根据子代理返回的证据行号回填原文引用。支持文本/CSV/DOCX/XLSX/PDF文本层；"
-        "不支持图片、二进制、扫描PDF/OCR。"
+        "暂不支持图片、二进制、扫描PDF/OCR。"
     ),
 )
 async def file_query(
@@ -97,6 +98,49 @@ async def file_query(
     mode: str = "answer",
     sheet_name: str | None = None,
     max_evidence: int = 8,
+) -> ToolResult:
+    """
+    从大型文件中查询与 query 相关的信息，并返回答案总结与引用原文。
+
+    Args:
+        path: 文件路径。推荐传入绝对路径；如果用户给的是相对路径，调用前请先用当前 workspace root 拼接成绝对路径。本工具不会按 workspace root 自动解析相对路径
+        query: 需要在文件中回答的问题或检索目标
+        mode: 返回模式，可选 "answer" 或 "evidence"。"answer" 返回答案总结和引用；"evidence" 只返回引用原文
+        sheet_name: XLSX 工作表名称。未指定时检索全部工作表
+        max_evidence: 最多返回的证据段落数
+    """
+    logger.info(
+        "file_query start: path=%s query_length=%s mode=%s sheet_name=%s max_evidence=%s",
+        path,
+        len(str(query)) if query is not None else None,
+        mode,
+        sheet_name,
+        max_evidence,
+    )
+    try:
+        result = await _file_query_impl(path, query, mode, sheet_name, max_evidence)
+        logger.info(
+            "file_query done: is_error=%s evidence_count=%s content_length=%s",
+            result.is_error,
+            (result.metadata or {}).get("evidence_count"),
+            len(result.content or ""),
+        )
+        return result
+    except Exception as exc:
+        logger.exception("file_query unexpected error")
+        return ToolResult(
+            content=f"file_query 执行异常: {type(exc).__name__}: {exc}",
+            is_error=True,
+            metadata={"type": type(exc).__name__},
+        )
+
+
+async def _file_query_impl(
+    path: str | None,
+    query: str | None,
+    mode: str | None = "answer",
+    sheet_name: str | None = None,
+    max_evidence: int | None = 8,
 ) -> ToolResult:
     """
     从文件中检索与 query 相关的信息，并返回答案总结与引用原文。
@@ -108,13 +152,15 @@ async def file_query(
         sheet_name: XLSX 工作表名称。未指定时检索全部工作表
         max_evidence: 最多返回的证据段落数
     """
-    mode = (mode or "answer").lower()
+    path, query, mode, sheet_name, max_evidence = _normalize_inputs(
+        path, query, mode, sheet_name, max_evidence
+    )
+    if not path:
+        return ToolResult(content="path 不能为空。", is_error=True)
+    if not query:
+        return ToolResult(content="query 不能为空。", is_error=True)
     if mode not in ("answer", "evidence"):
         return ToolResult(content=f"不支持的 mode: {mode}。可选: answer, evidence", is_error=True)
-    if not query or not query.strip():
-        return ToolResult(content="query 不能为空。", is_error=True)
-
-    max_evidence = _coerce_int(max_evidence, 8, minimum=1, maximum=50)
 
     error = _check_path_safety(path)
     if error:
@@ -135,7 +181,9 @@ async def file_query(
 
     try:
         lines = await _extract_located_lines(target, file_type, sheet_name)
+        logger.info("file_query extracted: file_type=%s line_count=%s", file_type, len(lines))
     except Exception as exc:
+        logger.exception("file_query extract failed")
         return ToolResult(content=f"解析文件失败: {type(exc).__name__}: {exc}", is_error=True)
 
     if not lines:
@@ -147,6 +195,12 @@ async def file_query(
     context_window = _get_primary_context_window()
     chunk_token_limit = int(min(_MAX_CHUNK_INPUT_TOKENS, max(1000, context_window * _CONTEXT_WINDOW_FRACTION)))
     chunks = _chunk_lines(lines, chunk_token_limit, _CHUNK_OVERLAP_LINES)
+    logger.info(
+        "file_query chunked: chunk_count=%s first_chunk=%s last_chunk=%s",
+        len(chunks),
+        (chunks[0].start_line, chunks[0].end_line) if chunks else None,
+        (chunks[-1].start_line, chunks[-1].end_line) if chunks else None,
+    )
     if not chunks:
         return ToolResult(content="文件未生成可发送给子代理的文本 chunk。", is_error=True)
 
@@ -158,7 +212,7 @@ async def file_query(
         try:
             parsed = await _query_chunk_with_retry(query=query, chunk=chunk)
         except Exception as exc:
-            logger.warning("file_query 子代理 chunk %s 失败: %s", chunk.index, exc)
+            logger.exception("file_query subagent chunk failed: chunk=%s", chunk.index)
             failure_kind = "invalid_json" if isinstance(exc, ValueError) else "subagent_error"
             chunk_failures.append({
                 "chunk": chunk.index,
@@ -211,6 +265,21 @@ async def file_query(
         metadata["chunk_failures"] = chunk_failures
 
     return ToolResult(content=content, metadata=metadata)
+
+
+def _normalize_inputs(
+    path: Any,
+    query: Any,
+    mode: Any,
+    sheet_name: Any,
+    max_evidence: Any,
+) -> tuple[str, str, str, str | None, int]:
+    path_text = "" if path is None else str(path).strip()
+    query_text = "" if query is None else str(query).strip()
+    mode_text = "answer" if mode is None else str(mode).strip().lower() or "answer"
+    sheet_text = None if sheet_name is None else str(sheet_name).strip() or None
+    evidence_count = _coerce_int(max_evidence, 8, minimum=1, maximum=50)
+    return path_text, query_text, mode_text, sheet_text, evidence_count
 
 
 def _coerce_int(value: Any, default: int, minimum: int, maximum: int) -> int:
@@ -349,7 +418,7 @@ def _get_primary_context_window(config_path: str = "config.yaml") -> int:
             primary = sorted(cfg.providers, key=lambda provider: provider.priority)[0]
             return primary.context_window_size
     except Exception as exc:
-        logger.debug("读取 provider context_window_size 失败，使用默认值: %s", exc)
+        logger.exception("file_query failed to read provider context_window_size, using default")
     return _DEFAULT_CONTEXT_WINDOW
 
 
@@ -382,7 +451,7 @@ async def _query_chunk_with_retry(query: str, chunk: LineChunk) -> dict[str, Any
             _SimpleMessage(
                 "system",
                 (
-                    "你是文件内容检索子代理。你只能依据用户提供的当前文件片段回答。"
+                    "你是文件内容检索agent。你只能依据用户提供的当前文件片段回答。"
                     "如果片段没有答案，必须返回 has_answer=false 和空 evidence。"
                     "只输出 JSON，不要输出 Markdown。"
                 ),
@@ -391,11 +460,12 @@ async def _query_chunk_with_retry(query: str, chunk: LineChunk) -> dict[str, Any
         ]
         raw = await _call_subagent_model(messages)
         try:
-            return _parse_json_object(raw)
+            parsed = _parse_json_object(raw)
+            return parsed
         except ValueError as exc:
             last_error = exc
             invalid_response = raw[:1000]
-            logger.debug("file_query 子代理 JSON 解析失败 attempt=%d chunk=%d: %s", attempt + 1, chunk.index, exc)
+            logger.exception("file_query subagent JSON parse failed: attempt=%s chunk=%s", attempt + 1, chunk.index)
     raise ValueError(f"子代理未返回合法 JSON: {last_error}")
 
 
@@ -478,7 +548,12 @@ async def _call_subagent_model(
                 parts.append(event.text)
         return "".join(parts)
 
-    return await asyncio.wait_for(collect(), timeout=timeout)
+    try:
+        result = await asyncio.wait_for(collect(), timeout=timeout)
+        return result
+    except Exception:
+        logger.exception("file_query subagent collect failed")
+        raise
 
 
 def _parse_json_object(raw: str) -> dict[str, Any]:
