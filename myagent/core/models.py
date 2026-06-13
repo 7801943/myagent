@@ -116,6 +116,13 @@ class WorkspaceInfo(BaseModel):
     state: dict[str, Any] | None = None
 
 
+class SafetyInfo(BaseModel):
+    """当前会话独立的 CLI 安全策略状态。"""
+    active_policy: str = "whitelist"
+    available_policies: list[str] = []
+    mode: str = "whitelist"
+
+
 class ClientStateInfo(BaseModel):
     """前端运行态快照。
 
@@ -150,6 +157,7 @@ class SessionData(BaseModel):
     context: SessionContext = SessionContext()
     agent: AgentInfo = AgentInfo()
     workspace: WorkspaceInfo = WorkspaceInfo()
+    safety: SafetyInfo = SafetyInfo()
     client_state: ClientStateInfo = ClientStateInfo()
     extra: dict[str, Any] = {}
 

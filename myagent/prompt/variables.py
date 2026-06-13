@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import platform
 import sys
 from dataclasses import dataclass, field, asdict
@@ -114,12 +113,13 @@ def _get_platform_info() -> dict:
 
 
 def _get_safety_summary(session: "Session") -> str:
-    """提取安全策略摘要。"""
+    """提取当前会话的 CLI 安全策略摘要。"""
     try:
-        guard = session._harness.safety_guard
-        if guard is None:
-            return ""
-        return "已启用安全策略，部分敏感操作可能需要审批"
+        safety = session.data.safety
+        return (
+            f"CLI安全策略: {safety.active_policy} ({safety.mode})；"
+            "file_write、file_edit、file_edit_table 永久拒绝"
+        )
     except Exception:
         return ""
 

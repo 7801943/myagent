@@ -214,6 +214,8 @@ class WebSocketHandler:
             await self._handle_cancel()
         elif msg_type == "hitl_response":
             self._handle_approval_response(data)
+        elif msg_type == "safety_policy_set":
+            await self._handle_safety_policy_set(data)
         elif msg_type == "session_list":
             await self._handle_session_list()
         elif msg_type == "session_create":
@@ -297,13 +299,20 @@ class WebSocketHandler:
 
     def _handle_approval_response(self, data: dict) -> None:
         """处理人工审批回复（通过 ClientBridge）。"""
-        ticket_id = data.get("ticket_id", "") or data.get("call_id", "")
-        decisions = data.get("decisions", [])
-        # 兼容旧前端格式：单个 approved → 转为 decisions 列表
-        if not decisions and "approved" in data:
-            decisions = [data.get("approved", False)]
+        ticket_id = data.get("ticket_id", "")
+        decisions = [bool(data.get("approved", False))]
         if self._session and ticket_id:
             self._session._bridge.resolve_approval(ticket_id, decisions)
+
+    async def _handle_safety_policy_set(self, data: dict) -> None:
+        """切换当前会话独立的 CLI 安全策略。"""
+        if not self._session:
+            await self._send_json({"type": "error", "message": "会话不存在"})
+            return
+        try:
+            await self._session.set_safety_policy(data.get("policy", ""))
+        except (RuntimeError, ValueError) as exc:
+            await self._send_json({"type": "error", "message": str(exc)})
 
     async def _handle_session_list(self) -> None:
         """处理会话列表请求。"""

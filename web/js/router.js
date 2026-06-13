@@ -6,7 +6,7 @@
 
 import { state, on, emit } from './state.js';
 import { requestSessionList, createNewSession } from './session.js';
-import { resetProcessingState, loadHistoryMessages, finalizeAssistantMessage, appendTextDelta, appendThinkingDelta, appendErrorMessage, setStatus, getCurrentAssistantEl, updateChatEmptyState } from './chat.js';
+import { resetProcessingState, loadHistoryMessages, finalizeAssistantMessage, appendTextDelta, appendThinkingDelta, appendErrorMessage, setStatus, getCurrentAssistantEl, updateChatEmptyState, handleStreamStart, markRoundHasTools } from './chat.js';
 import { appendToolStart, appendToolEnd, appendToolError, appendSafetyBlocked, showHitlApproval } from './tool-chip.js';
 import { updateContextProgress, setStateAnimation } from './context-bar.js';
 import { handleConversationState, handleStateChange, updateSessionList } from './header.js';
@@ -97,6 +97,7 @@ function handleMessage(data) {
             break;
 
         case "stream_start":
+            handleStreamStart();
             break;
 
         case "stream_end":
@@ -108,6 +109,7 @@ function handleMessage(data) {
 
         case "tool_start":
             {
+                markRoundHasTools();
                 const assistantEl = getCurrentAssistantEl();
                 appendToolStart(assistantEl, data.tool_name, data.args, data.call_id);
             }
@@ -131,7 +133,15 @@ function handleMessage(data) {
         case "hitl_request":
             {
                 const assistantEl = getCurrentAssistantEl();
-                showHitlApproval(assistantEl, data.tool_name, data.reason, data.args, data.call_id);
+                showHitlApproval(
+                    assistantEl,
+                    data.tool_name,
+                    data.reason,
+                    data.args,
+                    data.call_id,
+                    data.ticket_id,
+                    data.timeout_seconds
+                );
             }
             break;
 

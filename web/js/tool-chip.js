@@ -11,7 +11,7 @@ import { send } from './connection.js';
 // ── Tool Chip 内部状态 ──
 let currentToolCallMap = {};
 let toolCount = 0;
-let pendingHitlCallId = null;
+let pendingHitlTicketId = null;
 
 // ── HITL Modal DOM ──
 let hitlModal;
@@ -32,16 +32,16 @@ export function initToolChip() {
     // HITL Modal 事件
     if (hitlApprove) {
         hitlApprove.addEventListener("click", function () {
-            if (pendingHitlCallId) {
-                send({ type: "hitl_response", call_id: pendingHitlCallId, approved: true });
+            if (pendingHitlTicketId) {
+                send({ type: "hitl_response", ticket_id: pendingHitlTicketId, approved: true });
             }
             hideHitlModal();
         });
     }
     if (hitlReject) {
         hitlReject.addEventListener("click", function () {
-            if (pendingHitlCallId) {
-                send({ type: "hitl_response", call_id: pendingHitlCallId, approved: false });
+            if (pendingHitlTicketId) {
+                send({ type: "hitl_response", ticket_id: pendingHitlTicketId, approved: false });
             }
             hideHitlModal();
         });
@@ -51,7 +51,7 @@ export function initToolChip() {
 export function resetToolState() {
     currentToolCallMap = {};
     toolCount = 0;
-    pendingHitlCallId = null;
+    pendingHitlTicketId = null;
 }
 
 // ── 创建 Tool Chip 的 HTML 模板（统一模板，消除重复） ──
@@ -186,8 +186,9 @@ export function appendSafetyBlocked(assistantEl, rule, reason, action, callId, t
 
 // ── HITL In-Chip 审批 ──
 
-export function showHitlApproval(assistantEl, toolName, reason, args, callId) {
-    pendingHitlCallId = callId;
+export function showHitlApproval(assistantEl, toolName, reason, args, callId, ticketId, timeoutSeconds) {
+    pendingHitlTicketId = ticketId;
+    const approvalTimeout = Math.max(1, Math.ceil(Number(timeoutSeconds) || HITL_TIMEOUT_SECONDS));
 
     // 尝试找到已有的 tool chip
     let chipEl = currentToolCallMap[callId];
@@ -235,12 +236,12 @@ export function showHitlApproval(assistantEl, toolName, reason, args, callId) {
         actionContainer.className = "hitl-header-actions";
         actionContainer.innerHTML = `
             <button class="hitl-header-btn approve" data-call-id="${escapeHtml(callId)}">批准</button>
-            <button class="hitl-header-btn reject" data-call-id="${escapeHtml(callId)}">拒绝(${HITL_TIMEOUT_SECONDS}s)</button>
+            <button class="hitl-header-btn reject" data-call-id="${escapeHtml(callId)}">拒绝(${approvalTimeout}s)</button>
         `;
 
         header.insertBefore(actionContainer, summary.nextSibling);
 
-        let timeLeft = HITL_TIMEOUT_SECONDS;
+        let timeLeft = approvalTimeout;
         let timerInterval;
 
         const btnApprove = actionContainer.querySelector(".approve");
@@ -248,7 +249,7 @@ export function showHitlApproval(assistantEl, toolName, reason, args, callId) {
 
         function handleResponse(approved) {
             clearInterval(timerInterval);
-            send({ type: "hitl_response", call_id: callId, approved: approved });
+            send({ type: "hitl_response", ticket_id: ticketId, approved: approved });
             actionContainer.innerHTML = approved
                 ? '<span style="color: var(--success); font-size: 12px; margin-right: 8px;">✅ 已批准</span>'
                 : '<span style="color: var(--danger); font-size: 12px; margin-right: 8px;">❌ 已拒绝</span>';
@@ -277,14 +278,14 @@ export function showHitlApproval(assistantEl, toolName, reason, args, callId) {
         chipEl.classList.add("expanded");
     } else {
         // 无法创建 in-chip 审批时，降级到全局 modal
-        showHitlModal(toolName, reason, args, callId);
+        showHitlModal(toolName, reason, args, ticketId);
     }
 }
 
 // ── HITL 全局 Modal（降级方案） ──
 
-export function showHitlModal(toolName, reason, args, callId) {
-    pendingHitlCallId = callId;
+export function showHitlModal(toolName, reason, args, ticketId) {
+    pendingHitlTicketId = ticketId;
     if (hitlToolName) hitlToolName.textContent = toolName;
     if (hitlReason) hitlReason.textContent = reason;
     if (hitlArgs) hitlArgs.textContent = args ? JSON.stringify(args, null, 2) : "{}";
@@ -293,5 +294,5 @@ export function showHitlModal(toolName, reason, args, callId) {
 
 function hideHitlModal() {
     if (hitlModal) hitlModal.style.display = "none";
-    pendingHitlCallId = null;
+    pendingHitlTicketId = null;
 }

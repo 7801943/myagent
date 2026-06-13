@@ -25,7 +25,6 @@ from typing import Callable, Awaitable, TYPE_CHECKING
 from myagent.core.llm import LLMClient, StreamResult
 from myagent.core.tools import ToolInterface
 from myagent.core.events import (
-    ApprovalNeeded,
     EventBus,
     ExecutionContext,
     SafetyBlocked,
@@ -225,11 +224,6 @@ class AgentHarness:
                 call_id=tc.id,
             ))
             logger.debug(f"Tool start: {tc.name} (call_id={tc.id})")
-
-        # 如果有待审批工具，发射 ApprovalNeeded 事件
-        # （注意：实际的审批判断在 ToolInterface 内部完成，这里仅做事件通知）
-        if approval_handler:
-            await self._events.publish(ctx.event(ApprovalNeeded, tool_calls=tool_calls))
 
         # 委托 ToolInterface 完成全部执行管线（含安全检查 + 人工审批 + 批准后重执行）
         executed_tools = await self._tools.execute_with_approval(

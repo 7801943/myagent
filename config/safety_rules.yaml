@@ -1,0 +1,217 @@
+# 会话级 CLI 安全策略。每个 Session 只保存 active_policy 名称。
+# file_write / file_edit / file_edit_table 由 ToolInterface 永久拒绝，不在此配置。
+
+default_cli_policy: whitelist
+
+policy_engine:
+  default_action: allow
+  tool_policies: []
+
+cli_policies:
+  # 1. 完全访问：CLI 命令和 shell 组合全部直接通过。
+  full_access:
+    mode: allow_all
+
+  # 2. 白名单：组合中的每个命令都在白名单时通过，否则请求人工批准。
+  whitelist:
+    mode: whitelist
+    allowed_commands:
+      - ls
+      - pwd
+      - cat
+      - head
+      - tail
+      - wc
+      - diff
+      - cmp
+      - stat
+      - file
+      - du
+      - df
+      - tree
+      - find
+      - locate
+      - which
+      - whereis
+      - readlink
+      - realpath
+      - basename
+      - dirname
+      - rg
+      - grep
+      - git
+
+    # git 本身在白名单内，但只有这些只读子命令可直接通过。
+    allowed_subcommands:
+      git:
+        - status
+        - diff
+        - log
+        - show
+        - grep
+        - blame
+        - rev-parse
+        - ls-files
+        - ls-tree
+        - cat-file
+
+    # 即使命令在白名单中，可能执行程序或改变文件的参数仍需批准。
+    approval_patterns:
+      - "\\bfind\\b.*\\s-(delete|exec|execdir|ok|okdir|fls|fprint|fprint0|fprintf)(\\s|$)"
+      - "\\brg\\b.*\\s--pre(?:=|\\s|$)"
+      - "\\bgit\\b.*\\s--(?:ext-diff|textconv|filters|output)(?:=|\\s|$)"
+      - "\\bdiff\\b.*\\s--output(?:=|\\s|$)"
+      - "\\btree\\b.*\\s-o(?:\\s|$)"
+
+    # 普通管道/串联会逐段检查；这些动态 shell 结构统一转人工批准。
+    approval_shell_features:
+      - redirection
+      - background
+      - command_substitution
+      - process_substitution
+
+  # 3. 黑名单：任一组合命令命中即直接拒绝，其余全部通过，不请求批准。
+  blacklist:
+    mode: blacklist
+    denied_commands:
+      # 删除、覆盖、权限和文件系统操作
+      - rm
+      - rmdir
+      - shred
+      - unlink
+      - mv
+      - cp
+      - mkdir
+      - touch
+      - chmod
+      - chown
+      - chgrp
+      - ln
+      - truncate
+      - dd
+      - tee
+      - install
+      - mkfs
+      - mount
+      - umount
+
+      # 安装、下载和包管理
+      - curl
+      - wget
+      - pip
+      - pip3
+      - uv
+      - poetry
+      - conda
+      - npm
+      - npx
+      - yarn
+      - pnpm
+      - apt
+      - apt-get
+      - apk
+      - dnf
+      - yum
+      - pacman
+      - snap
+      - brew
+
+      # 提权、解释器和可执行包装器
+      - sudo
+      - su
+      - doas
+      - bash
+      - sh
+      - zsh
+      - fish
+      - eval
+      - source
+      - "."
+      - xargs
+      - python
+      - python3
+      - perl
+      - ruby
+      - node
+      - php
+      - lua
+      - awk
+      - gawk
+      - mawk
+      - make
+      - cmake
+      - ninja
+      - tar
+      - unzip
+      - zip
+      - 7z
+      - docker
+      - podman
+      - chroot
+
+      # Git 写操作。只读 git 子命令不受影响。
+      - git-receive-pack
+      - git-upload-archive
+
+      # 系统控制和网络服务
+      - shutdown
+      - reboot
+      - poweroff
+      - halt
+      - systemctl
+      - service
+      - kill
+      - killall
+      - pkill
+      - nc
+      - netcat
+      - ssh
+      - scp
+      - sftp
+      - rsync
+
+    denied_shell_features:
+      - redirection
+      - command_substitution
+      - process_substitution
+      - variable_expansion
+      - shell_control_flow
+
+    denied_subcommands:
+      git:
+        - add
+        - apply
+        - am
+        - branch
+        - checkout
+        - cherry-pick
+        - clean
+        - clone
+        - commit
+        - fetch
+        - init
+        - merge
+        - mv
+        - pull
+        - push
+        - rebase
+        - reset
+        - restore
+        - revert
+        - rm
+        - stash
+        - switch
+        - tag
+        - worktree
+
+    # 参数型危险操作和无法仅靠首命令识别的组合。
+    denied_patterns:
+      - "(^|[;&|(){}]\\s*)git(?:\\s+-C\\s+\\S+)?\\s+(add|apply|am|branch|checkout|cherry-pick|clean|clone|commit|fetch|init|merge|mv|pull|push|rebase|reset|restore|revert|rm|stash|switch|tag|worktree)(\\s|$)"
+      - "\\bfind\\b.*\\s-(delete|exec|execdir|ok|okdir|fls|fprint|fprint0|fprintf)(\\s|$)"
+      - "\\brg\\b.*\\s--pre(?:=|\\s|$)"
+      - "\\bgit\\b.*\\s--output(?:=|\\s|$)"
+      - "\\bdiff\\b.*\\s--output(?:=|\\s|$)"
+      - "\\btree\\b.*\\s-o(?:\\s|$)"
+      - "\\bpython(?:3)?\\b.*(pip|subprocess|os\\.system|shutil\\.(rmtree|move|copy))"
+      - "\\bsed\\b.*\\s-[^\\s]*i[^\\s]*(?:\\s|$)"
+      - "(^|\\s)(DROP\\s+TABLE|DELETE\\s+FROM|TRUNCATE\\s+TABLE)(\\s|$)"

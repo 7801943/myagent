@@ -11,6 +11,11 @@ export const state = {
     currentSessionId: null,
     sessions: [],
     contextWindowSize: 0,
+    safetyPolicy: {
+        active_policy: "",
+        available_policies: [],
+        mode: "",
+    },
     // 认证状态
     isAuthenticated: false,
     authToken: '',

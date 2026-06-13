@@ -49,6 +49,8 @@ class Session:
         context_window_size: int = 200000,
         tool_result_max_chars: int = 200000,
         workspace_root: str | None = None,
+        hitl_enabled: bool = True,
+        approval_timeout: float = 300.0,
         name: str | None = "新会话",
     ):
         self.id: str = session_id or uuid4().hex[:16]
@@ -87,11 +89,15 @@ class Session:
         self._cancel_detail: str = ""
 
         # WS 多客户端管理 + 审批桥接（委托给 ClientBridge）
-        self._bridge = ClientBridge(harness.events, self.id)
+        self._bridge = ClientBridge(
+            harness.events,
+            self.id,
+            approval_timeout=approval_timeout,
+        )
 
         # 审批回调：默认使用 ClientBridge（Web 场景），CLI 可覆盖
         self._approval_handler: Callable[[list], Awaitable[list[bool]]] | None = (
-            self._bridge.approval_handler
+            self._bridge.approval_handler if hitl_enabled else None
         )
 
         # PromptRenderer（由 SessionManager 注入）
@@ -109,6 +115,7 @@ class Session:
 
         # ── 从 Harness 采集初始状态 ──
         self._init_meta_from_harness()
+        self._sync_safety_policy_state()
 
         # 注册状态同步事件
         self._event_handles: list[EventHandle] = []
@@ -248,6 +255,38 @@ class Session:
                     "source": record.source,
                 })
         self.data.tool.tools = tools
+
+    # ── 会话级安全策略 ──
+
+    def _sync_safety_policy_state(self) -> dict:
+        state = self._harness.tool_interface.get_cli_policy_state()
+        self.data.safety.active_policy = state["active_policy"]
+        self.data.safety.available_policies = state["available_policies"]
+        self.data.safety.mode = state["mode"]
+        self.data.agent.safety_enabled = (
+            getattr(self._harness, "safety_guard", None) is not None
+        )
+        return state
+
+    def _apply_safety_policy(self, policy_name: str) -> dict:
+        state = self._harness.tool_interface.set_cli_policy(policy_name)
+        self.data.safety.active_policy = state["active_policy"]
+        self.data.safety.available_policies = state["available_policies"]
+        self.data.safety.mode = state["mode"]
+        return state
+
+    async def set_safety_policy(
+        self,
+        policy_name: str,
+        *,
+        allow_while_running: bool = False,
+    ) -> dict:
+        if self._chat_lock.locked() and not allow_while_running:
+            raise RuntimeError("Session is busy; safety policy cannot be changed")
+        state = self._apply_safety_policy(policy_name)
+        await self._persist_state(self.agent_run_state)
+        await self.push_conversation_state()
+        return state
 
     # ── PromptRenderer 注入 ──
 
@@ -502,6 +541,17 @@ class Session:
                         logger.info(f"System command: /model → {provider_name}")
                     except Exception as e:
                         logger.warning(f"Failed to switch model: {e}")
+            elif cmd == "safety":
+                policy_name = args.strip()
+                if policy_name:
+                    try:
+                        await session.set_safety_policy(
+                            policy_name,
+                            allow_while_running=True,
+                        )
+                        logger.info(f"System command: /safety → {policy_name}")
+                    except Exception as e:
+                        logger.warning(f"Failed to switch safety policy: {e}")
             else:
                 logger.debug(f"Unknown system command: /{cmd} {args}")
 

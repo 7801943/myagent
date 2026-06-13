@@ -175,19 +175,20 @@ class SessionManager:
             with open(rules_path) as f:
                 rules_cfg = yaml.safe_load(f) or {}
         else:
-            logger.warning(f"Safety rules file not found: {rules_path}.")
+            raise RuntimeError(
+                f"Safety is enabled but rules file was not found: {rules_path}"
+            )
         policy_cfg = rules_cfg.get("policy_engine", {})
         policy_engine = PolicyEngine(
             tool_policies=policy_cfg.get("tool_policies", []),
             default_action=policy_cfg.get("default_action", safety_cfg.default_action),
         )
-        cli_fence_cfg = rules_cfg.get("cli_fence", {})
+        cli_policies = rules_cfg.get("cli_policies", {})
+        default_cli_policy = rules_cfg.get("default_cli_policy", "whitelist")
         rules = [
             CLIFence(
-                allowed_commands=cli_fence_cfg.get("allowed_commands"),
-                approval_commands=cli_fence_cfg.get("approval_commands"),
-                denied_patterns=cli_fence_cfg.get("denied_patterns"),
-                denied_paths=cli_fence_cfg.get("denied_paths"),
+                policies=cli_policies,
+                default_policy=default_cli_policy,
             ),
             InputContentFilter(),
             OutputContentFilter(),
@@ -278,6 +279,8 @@ class SessionManager:
             context_window_size=effective_window,
             tool_result_max_chars=effective_max_chars,
             workspace_root=workspace_root,
+            hitl_enabled=self._config.hitl.enabled,
+            approval_timeout=self._config.hitl.approval_timeout,
         )
         self._sessions[session.id] = session
 
@@ -340,13 +343,29 @@ class SessionManager:
             max_tokens_budget=effective_budget,
             context_window_size=effective_window,
             tool_result_max_chars=effective_max_chars,
+            hitl_enabled=self._config.hitl.enabled,
+            approval_timeout=self._config.hitl.approval_timeout,
         )
+
+        if approval_handler:
+            session._approval_handler = approval_handler
 
         if isinstance(metadata_dict, dict):
             restored_data = SessionData.model_validate(metadata_dict)
             restored_data.model.available = session.data.model.available
             restored_data.tool.tools = session.data.tool.tools
             session.data = restored_data
+            restored_policy = restored_data.safety.active_policy
+            try:
+                session._apply_safety_policy(restored_policy)
+            except ValueError:
+                fallback_state = session._harness.tool_interface.get_cli_policy_state()
+                logger.warning(
+                    "Stored safety policy '%s' is unavailable; using default '%s'",
+                    restored_policy,
+                    fallback_state["active_policy"],
+                )
+                session._sync_safety_policy_state()
             session._context._last_usage_input_tokens = restored_data.context.token_usage.used
         else:
             session.agent_run_state = agent_run_state

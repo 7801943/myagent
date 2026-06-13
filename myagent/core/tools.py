@@ -23,6 +23,7 @@ from myagent.tools.manager import ToolManager
 from myagent.tools.api import ToolResult
 from myagent.safety.base import BaseRule, SafetyContext, GuardResult
 from myagent.safety.policy import PolicyEngine
+from myagent.safety.cli_fence import CLIFence
 from myagent.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -62,6 +63,8 @@ class ToolInterface:
         result = await tools.execute("file_read", {"path": "/tmp/test.txt"}, tool_call_id="tc_xxx")
     """
 
+    _ALWAYS_DENIED_TOOLS = {"file_write", "file_edit", "file_edit_table"}
+
     def __init__(
         self,
         tool_manager: ToolManager,
@@ -73,6 +76,10 @@ class ToolInterface:
         self._policy_engine = policy_engine
         self._rules: list[BaseRule] = sorted(rules or [], key=lambda r: r.priority)
         self._secret_manager = secret_manager
+        self._cli_fence = next(
+            (rule for rule in self._rules if isinstance(rule, CLIFence)),
+            None,
+        )
 
     @property
     def has_safety(self) -> bool:
@@ -83,7 +90,24 @@ class ToolInterface:
         """添加安全规则并重新排序。"""
         self._rules.append(rule)
         self._rules.sort(key=lambda r: r.priority)
+        if isinstance(rule, CLIFence):
+            self._cli_fence = rule
         logger.debug(f"Rule added: {rule.name} (priority={rule.priority})")
+
+    def get_cli_policy_state(self) -> dict[str, Any]:
+        if not self._cli_fence:
+            return {
+                "active_policy": "full_access",
+                "available_policies": ["full_access"],
+                "mode": "allow_all",
+            }
+        return self._cli_fence.state()
+
+    def set_cli_policy(self, policy_name: str) -> dict[str, Any]:
+        if not self._cli_fence:
+            raise RuntimeError("CLI safety policy is not configured")
+        self._cli_fence.set_policy(policy_name)
+        return self._cli_fence.state()
 
     # ── 安全责任链 ──
 
@@ -148,6 +172,17 @@ class ToolInterface:
         执行单个工具。
         执行链路：安全检查 → 密钥注入 → ToolManager.execute（含幂等缓存）
         """
+        # 文件变更工具是不可配置的硬拒绝项，审批和 skip_safety 均不能绕过。
+        if name in self._ALWAYS_DENIED_TOOLS:
+            return ToolResult(
+                content=f"安全策略永久拒绝执行工具 '{name}'",
+                is_error=True,
+                metadata={
+                    "denied_by": "hard_policy:file_mutation",
+                    "tool_call_id": tool_call_id,
+                },
+            )
+
         # 1. 安全检查
         if not skip_safety and self.has_safety:
             guard_result = await self.check_tool_call(name, args)

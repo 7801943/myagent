@@ -62,9 +62,15 @@ class ClientBridge:
       - approval_handler / resolve_approval: 人工审批 Future 桥接
     """
 
-    def __init__(self, events: EventBus, session_id: str):
+    def __init__(
+        self,
+        events: EventBus,
+        session_id: str,
+        approval_timeout: float = 300.0,
+    ):
         self._events = events
         self._session_id = session_id
+        self._approval_timeout = approval_timeout
         self._ws_notifiers: list = []
         self._pending_approvals: dict[str, _PendingApproval] = {}
 
@@ -171,32 +177,42 @@ class ClientBridge:
         会话级审批回调：广播 hitl_request → 等待客户端响应 → 返回决策。
         超时默认全部拒绝。
         """
-        ticket_id = uuid4().hex[:8]
-        loop = asyncio.get_running_loop()
-        fut = loop.create_future()
-        self._pending_approvals[ticket_id] = _PendingApproval(future=fut, tool_calls=tool_calls)
+        decisions: list[bool] = []
+        for tool_call in tool_calls:
+            ticket_id = uuid4().hex[:12]
+            loop = asyncio.get_running_loop()
+            fut = loop.create_future()
+            self._pending_approvals[ticket_id] = _PendingApproval(
+                future=fut,
+                tool_calls=[tool_call],
+            )
 
-        await self.notify_clients("hitl_request", {
-            "ticket_id": ticket_id,
-            "tool_calls": [
-                {"name": tc.name, "args": tc.arguments, "call_id": tc.id}
-                for tc in tool_calls
-            ],
-        })
+            await self.notify_clients("hitl_request", {
+                "ticket_id": ticket_id,
+                "tool_name": tool_call.name,
+                "args": tool_call.arguments,
+                "call_id": tool_call.id,
+                "reason": "安全策略要求人工审批",
+                "timeout_seconds": self._approval_timeout,
+            })
 
-        try:
-            decisions = await asyncio.wait_for(fut, timeout=120.0)
-            return decisions
-        except asyncio.TimeoutError:
-            return [False] * len(tool_calls)
-        finally:
-            self._pending_approvals.pop(ticket_id, None)
+            try:
+                response = await asyncio.wait_for(
+                    fut,
+                    timeout=self._approval_timeout,
+                )
+                decisions.append(bool(response[0]) if response else False)
+            except asyncio.TimeoutError:
+                decisions.append(False)
+            finally:
+                self._pending_approvals.pop(ticket_id, None)
+        return decisions
 
     def resolve_approval(self, ticket_id: str, decisions: list[bool]) -> None:
         """任意客户端调用此方法完成审批。"""
         pa = self._pending_approvals.get(ticket_id)
         if pa and not pa.future.done():
-            pa.future.set_result(decisions)
+            pa.future.set_result([bool(decisions[0])] if decisions else [False])
 
 
 # ─── 内部数据类 ──────────────────────────────────────────────

@@ -18,6 +18,10 @@ let currentThinkingList = null;
 let currentThinkingItem = null;
 let thinkingCount = 0;
 
+// ── 轮次追踪（用于 ReAct 多轮分隔） ──
+let _roundHasContent = false;   // 当前轮次是否已有文本内容
+let _roundHasTools = false;     // 当前轮次是否已有工具调用
+
 // ── DOM 元素引用 ──
 let messageList;
 let welcomeMsg;
@@ -84,6 +88,50 @@ export function getCurrentAssistantEl() {
     return currentAssistantEl;
 }
 
+// ── ReAct 多轮分隔 ──
+
+/**
+ * 标记当前轮次有工具调用。
+ * 在 tool_start 事件时调用。
+ */
+export function markRoundHasTools() {
+    _roundHasTools = true;
+}
+
+/**
+ * 处理 stream_start 事件。
+ * 如果前一轮已有内容且执行了工具，新建 assistant 元素以分隔轮次。
+ */
+export function handleStreamStart() {
+    if (_roundHasContent && _roundHasTools) {
+        // Finalize 当前 assistant 元素的 markdown
+        if (currentContentEl) {
+            currentContentEl.classList.remove("streaming-cursor");
+            const rawText = currentContentEl._rawText || "";
+            if (rawText) {
+                currentContentEl.innerHTML = renderMarkdown(rawText);
+            }
+        }
+        // 创建新的 assistant 元素
+        startNewAssistantRound();
+    }
+}
+
+/**
+ * 创建新的 assistant message 元素，开始新的一轮。
+ */
+function startNewAssistantRound() {
+    currentAssistantEl = createAssistantMessage();
+    currentContentEl = currentAssistantEl.querySelector(".message-content");
+    currentThinkingList = currentAssistantEl.querySelector(".msg-thinking-list");
+    currentContentEl.classList.add("streaming-cursor");
+    resetToolState();
+    thinkingCount = 0;
+    currentThinkingItem = null;
+    _roundHasContent = false;
+    _roundHasTools = false;
+}
+
 // ── 发送消息 ──
 export function sendMessage(text) {
     if (!text || !text.trim()) return;
@@ -108,6 +156,8 @@ export function sendMessage(text) {
     resetToolState();
     thinkingCount = 0;
     currentThinkingItem = null;
+    _roundHasContent = false;
+    _roundHasTools = false;
 
     send({ type: "chat", text: text, client_state: buildClientStateSnapshot() });
     userInput.value = "";
@@ -191,6 +241,7 @@ export function createAssistantMessage() {
 
 export function appendTextDelta(text) {
     if (!currentContentEl) return;
+    _roundHasContent = true;
     currentContentEl.classList.remove("streaming-cursor");
     let rawText = currentContentEl._rawText || "";
     rawText += text;
@@ -252,22 +303,43 @@ export function loadHistoryMessages(messages) {
         updateChatEmptyState(true);
     }
 
+    // 追踪当前轮次是否已有内容和工具（用于历史加载时分轮次渲染）
+    let histRoundHasContent = false;
+    let histRoundHasTools = false;
     let hasActiveAssistant = false;
+
+    /**
+     * 为历史消息创建新的 assistant 元素（分轮次）。
+     */
+    function startNewHistoryAssistant() {
+        currentAssistantEl = createAssistantMessage();
+        currentContentEl = currentAssistantEl.querySelector(".message-content");
+        currentThinkingList = currentAssistantEl.querySelector(".msg-thinking-list");
+        resetToolState();
+        thinkingCount = 0;
+        currentThinkingItem = null;
+        histRoundHasContent = false;
+        histRoundHasTools = false;
+        hasActiveAssistant = true;
+    }
 
     messages.forEach(function (msg) {
         try {
             if (msg.role === "user") {
                 appendUserMessage(msg.content);
                 hasActiveAssistant = false;
+                histRoundHasContent = false;
+                histRoundHasTools = false;
             } else if (msg.role === "assistant") {
-                if (!hasActiveAssistant) {
-                    currentAssistantEl = createAssistantMessage();
-                    currentContentEl = currentAssistantEl.querySelector(".message-content");
-                    currentThinkingList = currentAssistantEl.querySelector(".msg-thinking-list");
-                    resetToolState();
-                    thinkingCount = 0;
-                    currentThinkingItem = null;
-                    hasActiveAssistant = true;
+                // 如果当前轮次已有内容且有工具，说明是新的 ReAct 迭代轮次
+                // 需要创建新的 assistant 元素来分隔
+                const needNewRound = hasActiveAssistant
+                    && histRoundHasContent
+                    && histRoundHasTools
+                    && msg.content;
+
+                if (!hasActiveAssistant || needNewRound) {
+                    startNewHistoryAssistant();
                 }
 
                 if (msg.metadata && msg.metadata.thinking) {
@@ -283,6 +355,7 @@ export function loadHistoryMessages(messages) {
                         }
                         appendToolStart(currentAssistantEl, tc.name || "tool", args, tc.id || ("hist_" + idx));
                     });
+                    histRoundHasTools = true;
                 }
 
                 if (msg.content) {
@@ -292,6 +365,7 @@ export function loadHistoryMessages(messages) {
                     currentContentEl.innerHTML = renderMarkdown(rawText);
                     const replySection = currentContentEl.closest(".msg-reply-section");
                     if (replySection) replySection.style.display = "";
+                    histRoundHasContent = true;
                 }
             } else if (msg.role === "tool") {
                 if (hasActiveAssistant) {
@@ -319,6 +393,8 @@ export function resetProcessingState() {
     currentThinkingList = null;
     currentThinkingItem = null;
     thinkingCount = 0;
+    _roundHasContent = false;
+    _roundHasTools = false;
     resetToolState();
     state.isProcessing = false;
     showSendButton();

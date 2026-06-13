@@ -24,3 +24,8 @@ export function deleteSession(sessionId) {
     if (state.isProcessing) return;
     send({ type: "session_delete", session_id: sessionId });
 }
+
+export function setSafetyPolicy(policy) {
+    if (state.isProcessing || !policy) return false;
+    return send({ type: "safety_policy_set", policy: policy });
+}

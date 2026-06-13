@@ -1,6 +1,7 @@
 # 用户配置（含敏感信息）
 config.yaml
 *.yaml
+!config/safety_rules.yaml
 
 # 虚拟环境
 venv/

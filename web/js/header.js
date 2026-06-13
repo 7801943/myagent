@@ -250,6 +250,11 @@ export function handleStateChange(agentState) {
 
 export function handleConversationState(data) {
     updateModelDisplays((data.model && data.model.active) || {});
+    state.safetyPolicy = data.safety || {
+        active_policy: "",
+        available_policies: [],
+        mode: "",
+    };
 
     // 更新上下文进度条（通过 context-bar.js）
     if (data.context && data.context.token_usage) {

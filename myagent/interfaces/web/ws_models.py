@@ -30,8 +30,14 @@ class CancelMessage(BaseModel):
 class HitlResponseMessage(BaseModel):
     """HITL 审批回复。"""
     type: Literal["hitl_response"] = "hitl_response"
-    call_id: str = Field(..., description="工具调用 ID")
+    ticket_id: str = Field(..., min_length=1, description="审批工单 ID")
     approved: bool = Field(False, description="是否批准")
+
+
+class SafetyPolicySetMessage(BaseModel):
+    """切换当前会话的 CLI 安全策略。"""
+    type: Literal["safety_policy_set"] = "safety_policy_set"
+    policy: str = Field(..., min_length=1, description="CLI 安全策略名称")
 
 
 class SessionCreateMessage(BaseModel):
@@ -162,10 +168,12 @@ class SessionDeletedMessage(ServerMessage):
 
 class HitlRequestMessage(ServerMessage):
     type: str = "hitl_request"
+    ticket_id: str = ""
     tool_name: str = ""
     reason: str = ""
     args: Any = None
     call_id: str = ""
+    timeout_seconds: float = 0
 
 
 class TimeoutWarningMessage(ServerMessage):
@@ -252,6 +260,7 @@ INCOMING_MESSAGE_TYPES: dict[str, type[BaseModel]] = {
     "chat": ChatMessage,
     "cancel": CancelMessage,
     "hitl_response": HitlResponseMessage,
+    "safety_policy_set": SafetyPolicySetMessage,
     "session_create": SessionCreateMessage,
     "session_switch": SessionSwitchMessage,
     "session_delete": SessionDeleteMessage,

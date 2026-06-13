@@ -1,127 +1,365 @@
-"""
-CLIFence：CLI 命令安全围栏。
-白名单 + 黑名单 + 路径限制 的三层防御。
-"""
+"""CLI 命令安全策略：完全访问、白名单和黑名单三种会话级 profile。"""
+from __future__ import annotations
+
 import re
 import shlex
+from enum import Enum
 from pathlib import Path
+from typing import Any
 
-from myagent.safety.base import BaseRule, SafetyContext, GuardResult, PolicyDecision
+from myagent.safety.base import BaseRule, GuardResult, PolicyDecision, SafetyContext
 from myagent.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
 
-class CLIFence(BaseRule):
-    """
-    CLI 命令安全围栏。
+class CLIPolicyMode(str, Enum):
+    ALLOW_ALL = "allow_all"
+    WHITELIST = "whitelist"
+    BLACKLIST = "blacklist"
 
-    检查逻辑（按顺序执行，短路返回）：
-    1. 黑名单模式匹配 -> DENY
-    2. 路径检查 -> DENY
-    3. 审批命令检查 -> REQUIRE_HITL（需要人工确认）
-    4. 白名单命令检查 -> DENY（如果命令不在白名单中）
-    5. 通过所有检查 -> ALLOW
-    """
+
+class CLIFence(BaseRule):
+    """根据当前 profile 对 CLI 命令及其 shell 组合进行判定。"""
+
     name = "cli_fence"
-    priority = 10  # 高优先级
+    priority = 10
+
+    _CONTROL_OPERATORS = {"|", "|&", "||", "&&", ";", "&", "(", ")", "{", "}"}
+    _REDIRECT_OPERATORS = {">", ">>", "<", "<<", "<<<", "<>", ">|", "&>", "&>>"}
+    _COMMAND_BOUNDARIES = {"|", "|&", "||", "&&", ";", "&", "(", "{"}
+    _WRAPPER_COMMANDS = {
+        "env", "command", "builtin", "exec", "nohup", "time", "sudo",
+        "nice", "setsid", "stdbuf", "coproc",
+    }
+    _ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
     def __init__(
         self,
-        allowed_commands: list[str] | None = None,
-        approval_commands: list[str] | None = None,
-        denied_patterns: list[str] | None = None,
-        denied_paths: list[str] | None = None,
+        policies: dict[str, dict[str, Any]] | None = None,
+        default_policy: str = "whitelist",
     ):
-        self._allowed_commands = set(allowed_commands or [])
-        self._approval_commands = set(approval_commands or [])
-        self._denied_patterns = [
-            re.compile(p, re.IGNORECASE) for p in (denied_patterns or [])
-        ]
-        self._denied_paths = [Path(p) for p in (denied_paths or [])]
+        self._policies = self._compile_policies(policies or {})
+        if not self._policies:
+            self._policies = {
+                "full_access": {"mode": CLIPolicyMode.ALLOW_ALL},
+            }
+        if default_policy not in self._policies:
+            raise ValueError(f"Unknown default CLI policy: {default_policy}")
+        self._active_policy = default_policy
+
+    @property
+    def active_policy(self) -> str:
+        return self._active_policy
+
+    @property
+    def available_policies(self) -> list[str]:
+        return list(self._policies.keys())
+
+    def set_policy(self, policy_name: str) -> None:
+        if policy_name not in self._policies:
+            raise ValueError(
+                f"Unknown CLI policy '{policy_name}'. "
+                f"Available: {self.available_policies}"
+            )
+        self._active_policy = policy_name
+        logger.info("CLI safety policy switched to: %s", policy_name)
+
+    def state(self) -> dict[str, Any]:
+        profile = self._policies[self._active_policy]
+        return {
+            "active_policy": self._active_policy,
+            "available_policies": self.available_policies,
+            "mode": profile["mode"].value,
+        }
 
     async def check(self, context: SafetyContext) -> GuardResult:
-        """对 CLI 命令执行安全检查。"""
         if context.tool_name != "cli_execute":
-            return GuardResult()  # 非 CLI 工具直接放行
+            return GuardResult()
 
-        command = context.tool_args.get("command", "")
-        if not command:
-            return GuardResult(
-                decision=PolicyDecision.DENY,
-                rule_name=self.name,
-                reason="空命令",
+        profile = self._policies[self._active_policy]
+        mode = profile["mode"]
+        if mode == CLIPolicyMode.ALLOW_ALL:
+            return GuardResult()
+
+        command = str(context.tool_args.get("command", "") or "")
+        analysis = self._analyze_command(command)
+
+        if mode == CLIPolicyMode.WHITELIST:
+            return self._check_whitelist(command, analysis, profile)
+        return self._check_blacklist(command, analysis, profile)
+
+    def _check_whitelist(
+        self,
+        command: str,
+        analysis: dict[str, Any],
+        profile: dict[str, Any],
+    ) -> GuardResult:
+        if analysis["parse_error"]:
+            return self._require_approval(
+                f"命令无法可靠解析: {analysis['parse_error']}"
             )
 
-        # 1. 黑名单模式匹配
-        for pattern in self._denied_patterns:
+        for pattern in profile["approval_patterns"]:
             if pattern.search(command):
-                logger.warning(f"CLIFence DENIED (pattern): {command[:100]}")
-                return GuardResult(
-                    decision=PolicyDecision.DENY,
-                    rule_name=self.name,
-                    reason=f"命令匹配危险模式: {pattern.pattern}",
+                return self._require_approval(
+                    f"命令匹配需审批模式: {pattern.pattern}"
                 )
 
-        # 2. 路径检查（先剥离标准重定向，避免 2>/dev/null 误报）
-        cmd_for_path_check = self._strip_redirections(command)
-        for denied_path in self._denied_paths:
-            denied_str = str(denied_path)
-            if denied_str in cmd_for_path_check:
-                logger.warning(f"CLIFence DENIED (path): {command[:100]}")
-                return GuardResult(
-                    decision=PolicyDecision.REQUIRE_HITL,
-                    rule_name=self.name,
-                    reason=f"命令涉及禁止路径: {denied_str}",
+        risky_features = analysis["features"] & profile["approval_shell_features"]
+        if risky_features:
+            return self._require_approval(
+                "命令包含需审批的 shell 结构: " + ", ".join(sorted(risky_features))
+            )
+
+        unknown = [
+            command_name
+            for command_name in analysis["commands"]
+            if command_name not in profile["allowed_commands"]
+        ]
+        if unknown:
+            return self._require_approval(
+                "命令不在白名单中: " + ", ".join(dict.fromkeys(unknown))
+            )
+
+        for invocation in analysis["invocations"]:
+            allowed_subcommands = profile["allowed_subcommands"].get(
+                invocation["command"]
+            )
+            if allowed_subcommands is None:
+                continue
+            subcommand = self._extract_subcommand(
+                invocation["command"],
+                invocation["args"],
+            )
+            if subcommand not in allowed_subcommands:
+                return self._require_approval(
+                    f"命令 '{invocation['command']}' 的子命令 "
+                    f"'{subcommand or '(缺失)'}' 不在白名单中"
                 )
 
-        # 3. 审批命令检查（需要人工确认才可执行）
-        if self._approval_commands:
-            base_cmd = self._extract_base_command(command)
-            if base_cmd and base_cmd in self._approval_commands:
-                logger.info(f"CLIFence REQUIRE_HITL (approval): {base_cmd}")
-                return GuardResult(
-                    decision=PolicyDecision.REQUIRE_HITL,
-                    rule_name=self.name,
-                    reason=f"命令 '{base_cmd}' 需要人工审批后方可执行",
+        if not analysis["commands"]:
+            return self._require_approval("未识别到可验证的白名单命令")
+        return GuardResult()
+
+    def _check_blacklist(
+        self,
+        command: str,
+        analysis: dict[str, Any],
+        profile: dict[str, Any],
+    ) -> GuardResult:
+        for pattern in profile["denied_patterns"]:
+            if pattern.search(command):
+                return self._deny(f"命令匹配黑名单模式: {pattern.pattern}")
+
+        denied_features = analysis["features"] & profile["denied_shell_features"]
+        if denied_features:
+            return self._deny(
+                "命令包含黑名单 shell 结构: "
+                + ", ".join(sorted(denied_features))
+            )
+
+        denied = [
+            command_name
+            for command_name in analysis["commands"]
+            if command_name in profile["denied_commands"]
+        ]
+        if denied:
+            return self._deny(
+                "命令位于黑名单中: " + ", ".join(dict.fromkeys(denied))
+            )
+
+        for invocation in analysis["invocations"]:
+            denied_subcommands = profile["denied_subcommands"].get(
+                invocation["command"]
+            )
+            if denied_subcommands is None:
+                continue
+            subcommand = self._extract_subcommand(
+                invocation["command"],
+                invocation["args"],
+            )
+            if subcommand in denied_subcommands:
+                return self._deny(
+                    f"命令 '{invocation['command']}' 的子命令 "
+                    f"'{subcommand}' 位于黑名单中"
                 )
+        return GuardResult()
 
-        # 4. 白名单命令检查
-        if self._allowed_commands:
-            base_cmd = self._extract_base_command(command)
-            if base_cmd and base_cmd not in self._allowed_commands:
-                logger.warning(f"CLIFence DENIED (whitelist): {base_cmd}")
-                return GuardResult(
-                    decision=PolicyDecision.DENY,
-                    rule_name=self.name,
-                    reason=f"命令 '{base_cmd}' 不在白名单中。允许的命令: {sorted(self._allowed_commands)}",
-                )
+    @classmethod
+    def _analyze_command(cls, command: str) -> dict[str, Any]:
+        features: set[str] = set()
+        if re.search(r"`|\$\(", command):
+            features.add("command_substitution")
+        if re.search(r"(?:<|>)\(", command):
+            features.add("process_substitution")
+        if re.search(r"\$(?:[A-Za-z_]|\{)", command):
+            features.add("variable_expansion")
+        if re.search(
+            r"(?:^|[;&|]\s*)(?:for|while|until|if|case|select|function)\b",
+            command,
+        ):
+            features.add("shell_control_flow")
 
-        return GuardResult()  # 全部通过
-
-    @staticmethod
-    def _strip_redirections(command: str) -> str:
-        """剥离标准 shell 重定向，避免 2>/dev/null 等误触发路径检查。"""
-        # 白名单：允许重定向到这些特殊文件
-        _SAFE_DEV_FILES = {"/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/zero"}
-        # 匹配常见重定向模式：2>/dev/null, >/dev/null, &>/dev/null, 2>>/dev/null 等
-        result = re.sub(
-            r'[0-9]*>>[>]?\s*/dev/\w+|[0-9]*>\s*/dev/\w+|&>\s*/dev/\w+',
-            '', command
-        )
-        return result
-
-    @staticmethod
-    def _extract_base_command(command: str) -> str | None:
-        """提取命令的基础程序名（第一个 token）。"""
+        normalized_command = command.replace("\r\n", "\n").replace("\n", " ; ")
         try:
-            tokens = shlex.split(command)
-            if tokens:
-                # 处理可能的路径前缀：/usr/bin/python3 -> python3
-                return Path(tokens[0]).name
-        except ValueError:
-            # shlex 解析失败，用空格分割
-            parts = command.strip().split()
-            if parts:
-                return Path(parts[0]).name
+            lexer = shlex.shlex(
+                normalized_command,
+                posix=True,
+                punctuation_chars="|&;<>(){}",
+            )
+            lexer.whitespace_split = True
+            lexer.commenters = ""
+            tokens = list(lexer)
+        except ValueError as exc:
+            return {
+                "commands": [],
+                "invocations": [],
+                "features": features,
+                "parse_error": str(exc),
+            }
+
+        commands: list[str] = []
+        invocations: list[dict[str, Any]] = []
+        expect_command = True
+        redirect_target = False
+        wrapper_pending = False
+        current_invocation: dict[str, Any] | None = None
+
+        for token in tokens:
+            if token in cls._CONTROL_OPERATORS:
+                if token in {"|", "|&", "||", "&&", ";"}:
+                    features.add("command_chain")
+                elif token == "&":
+                    features.add("background")
+                elif token in {"(", ")", "{", "}"}:
+                    features.add("subshell")
+                if token in cls._COMMAND_BOUNDARIES:
+                    expect_command = True
+                    wrapper_pending = False
+                    current_invocation = None
+                continue
+
+            if token in cls._REDIRECT_OPERATORS or (
+                token and set(token) <= {"<", ">"}
+            ):
+                features.add("redirection")
+                redirect_target = True
+                continue
+            if redirect_target:
+                redirect_target = False
+                continue
+
+            if not expect_command:
+                if current_invocation is not None:
+                    current_invocation["args"].append(token)
+                continue
+            if token == "$":
+                continue
+            if cls._ASSIGNMENT_RE.match(token):
+                continue
+            if token.startswith("-") and wrapper_pending:
+                continue
+
+            command_name = Path(token).name
+            commands.append(command_name)
+            current_invocation = {"command": command_name, "args": []}
+            invocations.append(current_invocation)
+            if command_name in cls._WRAPPER_COMMANDS:
+                wrapper_pending = True
+                expect_command = True
+            else:
+                wrapper_pending = False
+                expect_command = False
+
+        return {
+            "commands": commands,
+            "invocations": invocations,
+            "features": features,
+            "parse_error": "",
+        }
+
+    @staticmethod
+    def _compile_policies(
+        policies: dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        compiled: dict[str, dict[str, Any]] = {}
+        for name, raw in policies.items():
+            mode = CLIPolicyMode(raw.get("mode", ""))
+            compiled[name] = {
+                "mode": mode,
+                "allowed_commands": set(raw.get("allowed_commands", [])),
+                "allowed_subcommands": {
+                    command: set(subcommands)
+                    for command, subcommands in raw.get(
+                        "allowed_subcommands", {}
+                    ).items()
+                },
+                "denied_commands": set(raw.get("denied_commands", [])),
+                "denied_subcommands": {
+                    command: set(subcommands)
+                    for command, subcommands in raw.get(
+                        "denied_subcommands", {}
+                    ).items()
+                },
+                "approval_patterns": [
+                    re.compile(pattern, re.IGNORECASE)
+                    for pattern in raw.get("approval_patterns", [])
+                ],
+                "denied_patterns": [
+                    re.compile(pattern, re.IGNORECASE)
+                    for pattern in raw.get("denied_patterns", [])
+                ],
+                "approval_shell_features": set(
+                    raw.get(
+                        "approval_shell_features",
+                        [
+                            "redirection",
+                            "background",
+                            "subshell",
+                            "command_substitution",
+                            "process_substitution",
+                        ],
+                    )
+                ),
+                "denied_shell_features": set(
+                    raw.get("denied_shell_features", [])
+                ),
+            }
+        return compiled
+
+    @staticmethod
+    def _extract_subcommand(command_name: str, args: list[str]) -> str | None:
+        if command_name != "git":
+            return args[0] if args else None
+
+        index = 0
+        while index < len(args):
+            token = args[index]
+            if token in {"--no-pager", "--paginate", "-P"}:
+                index += 1
+                continue
+            if token == "-C":
+                index += 2
+                continue
+            if token.startswith("-C") and len(token) > 2:
+                index += 1
+                continue
+            if token.startswith("-"):
+                return None
+            return token
         return None
+
+    def _deny(self, reason: str) -> GuardResult:
+        return GuardResult(
+            decision=PolicyDecision.DENY,
+            rule_name=f"{self.name}:{self._active_policy}",
+            reason=reason,
+        )
+
+    def _require_approval(self, reason: str) -> GuardResult:
+        return GuardResult(
+            decision=PolicyDecision.REQUIRE_HITL,
+            rule_name=f"{self.name}:{self._active_policy}",
+            reason=reason,
+        )
