@@ -112,6 +112,8 @@ class SessionManager:
         for sid in to_evict:
             session = self._sessions.pop(sid)
             session.unregister_events()
+            # [BUG-FIX] 停止 ToolManager，释放 JsonRpcProxy 连接 + 热加载 Task
+            await self._cleanup_session_resources(session)
             if not session.has_user_message():
                 if self._state_store:
                     await self._state_store.clear_session(sid)
@@ -207,8 +209,8 @@ class SessionManager:
         hr_cfg = self._config.hot_reload
         tools_dir = (hr_cfg.watch_dir if hr_cfg and hr_cfg.enabled else "myagent/tools/tools_store")
         runner_cfg = self._config.sandbox.model_dump()
+        # [RISK-FIX] builtin tools 已在 ToolManager.__init__ 中自动注册
         manager = ToolManager(tools_dir=tools_dir, runner_config=runner_cfg)
-        manager._register_builtin_tools()
         return manager
 
     def _create_harness(
@@ -380,7 +382,9 @@ class SessionManager:
                 from myagent.core.workspace import WorkspaceManager, WorkspaceState
                 ws_data = json.loads(workspace_json)
                 ws_state = WorkspaceState.from_dict(ws_data)
-                session.workspace = WorkspaceManager()
+                # [BUG-FIX] 传入 root_path 初始化，确保 WorkspaceManager.root_path 立即可用
+                # （restore_from 虽也会设置，但构造时初始化更安全，避免中间状态窗口）
+                session.workspace = WorkspaceManager(root_path=ws_state.root_path)
                 session.workspace.restore_from(ws_state)
                 session.workspace.set_on_change(session._on_workspace_change)
             except Exception as e:
@@ -434,9 +438,26 @@ class SessionManager:
         session = self._sessions.pop(session_id, None)
         if session:
             session.unregister_events()
+            # [BUG-FIX] 停止 ToolManager，释放资源
+            await self._cleanup_session_resources(session)
         if self._state_store:
             await self._state_store.clear_session(session_id)
         logger.info(f"Session deleted: {session_id}")
+
+    async def _cleanup_session_resources(self, session: Session) -> None:
+        """[BUG-FIX] 清理 Session 持有的 per-session 资源。
+
+        每个 Session 独占一套 Harness → ToolInterface → ToolManager，
+        ToolManager 内部持有 JsonRpcProxy 连接 + _watch_task asyncio.Task。
+        不显式 stop 会导致 fd / task 泄漏。
+        """
+        try:
+            harness = getattr(session, "_harness", None)
+            if harness:
+                await harness.tool_interface.stop()
+                logger.debug(f"ToolManager stopped for session: {session.id}")
+        except Exception as e:
+            logger.warning(f"Failed to stop ToolManager for session {session.id}: {e}")
 
     def get_user_active_session(self, user_id: str) -> Session | None:
         for sid in reversed(list(self._sessions.keys())):

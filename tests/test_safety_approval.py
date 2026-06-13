@@ -208,20 +208,23 @@ async def test_policy_change_is_written_into_persisted_session_metadata():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tool_name", ["file_write", "file_edit", "file_edit_table"])
-async def test_file_mutation_tools_are_always_denied(tool_name):
+async def test_file_mutation_tools_pass_through_to_manager(tool_name):
+    """内置文件工具不再被硬拒绝，而是正常委托给 ToolManager 执行。"""
+    from myagent.tools.api import ToolResult as ApiToolResult
+
     manager = AsyncMock()
+    manager.execute = AsyncMock(return_value=ApiToolResult(content="ok", is_error=False))
     interface = ToolInterface(manager, rules=[make_fence("full_access")])
 
     result = await interface.execute(
         tool_name,
         {"path": "output.txt"},
-        tool_call_id="tc-hard-deny",
+        tool_call_id="tc-file-tool",
         skip_safety=True,
     )
 
-    assert result.is_error is True
-    assert result.metadata["denied_by"] == "hard_policy:file_mutation"
-    manager.execute.assert_not_awaited()
+    assert result.is_error is False
+    manager.execute.assert_awaited_once()
 
 
 @pytest.mark.asyncio

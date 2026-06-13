@@ -123,6 +123,10 @@ class ToolManager:
         self._on_unregister: list[Callable[[str], None]] = []
         self._idempotency = IdempotencyCache()
 
+        # [RISK-FIX] 构造时立即注册内置工具，确保 ToolManager 构造后即可使用，
+        # 无需外部调用方手动触发 _register_builtin_tools()。
+        self._register_builtin_tools()
+
     def on_register(self, callback: Callable[[str, str], None]) -> None:
         self._on_register.append(callback)
 

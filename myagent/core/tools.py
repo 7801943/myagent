@@ -63,8 +63,6 @@ class ToolInterface:
         result = await tools.execute("file_read", {"path": "/tmp/test.txt"}, tool_call_id="tc_xxx")
     """
 
-    _ALWAYS_DENIED_TOOLS = {"file_write", "file_edit", "file_edit_table"}
-
     def __init__(
         self,
         tool_manager: ToolManager,
@@ -172,17 +170,6 @@ class ToolInterface:
         执行单个工具。
         执行链路：安全检查 → 密钥注入 → ToolManager.execute（含幂等缓存）
         """
-        # 文件变更工具是不可配置的硬拒绝项，审批和 skip_safety 均不能绕过。
-        if name in self._ALWAYS_DENIED_TOOLS:
-            return ToolResult(
-                content=f"安全策略永久拒绝执行工具 '{name}'",
-                is_error=True,
-                metadata={
-                    "denied_by": "hard_policy:file_mutation",
-                    "tool_call_id": tool_call_id,
-                },
-            )
-
         # 1. 安全检查
         if not skip_safety and self.has_safety:
             guard_result = await self.check_tool_call(name, args)

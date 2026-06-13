@@ -119,6 +119,18 @@ class LLMClient:
 
         # 迭代 Provider 流
         async for event in self._router.stream(messages, tools):
+
+            # [BUG-FIX] Provider failover：重置缓冲区，避免 Provider A 的残片
+            # 与 Provider B 的输出拼接成乱码。
+            if event.type == "provider_failover":
+                logger.warning(
+                    f"Provider failover: {event.meta.get('from_provider')} → "
+                    f"{event.meta.get('to_provider')}, reason: {event.meta.get('reason')}"
+                )
+                self._reset()
+                content_started = False
+                continue
+
             # 累积事件到内部缓冲区
             self._accumulate(event)
 
@@ -131,8 +143,12 @@ class LLMClient:
             await self._dispatch_event(event, ctx)
 
             # 每个 chunk 后检查取消信号
-            if asyncio.current_task() is not None and asyncio.current_task().cancelled():
+            # [BUG-FIX] task.cancelled() 仅在任务已结束后才返回 True，
+            # 无法检测挂起的取消。改用 cancelling()（3.11+）+ sleep(0) checkpoint。
+            task = asyncio.current_task()
+            if task is not None and hasattr(task, "cancelling") and task.cancelling() > 0:
                 raise asyncio.CancelledError()
+            await asyncio.sleep(0)
 
         # 构建最终聚合结果
         result = self._build_result()

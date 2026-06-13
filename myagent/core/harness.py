@@ -193,10 +193,19 @@ class AgentHarness:
     # ── 取消检查 ──
 
     async def _check_cancelled(self) -> None:
-        """协作式取消检查点。当前任务被取消时立即抛出 CancelledError。"""
+        """协作式取消检查点。
+
+        task.cancelled() 仅在任务 *已结束* 于 CancelledError 后返回 True，
+        运行期间即使被 cancel() 调用也返回 False，因此无法用于检测挂起的取消。
+
+        正确做法：yield 控制权（asyncio.sleep(0)），让 asyncio 在此 await 点
+        注入 CancelledError（如果 task.cancel() 已被调用）。
+        Python 3.11+ 额外用 task.cancelling() 做显式检查以应对 edge case。
+        """
         task = asyncio.current_task()
-        if task is not None and task.cancelled():
+        if task is not None and hasattr(task, "cancelling") and task.cancelling() > 0:
             raise asyncio.CancelledError()
+        await asyncio.sleep(0)
 
     # ── 工具执行（调度转发） ──
 

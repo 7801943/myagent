@@ -1,5 +1,5 @@
 # 会话级 CLI 安全策略。每个 Session 只保存 active_policy 名称。
-# file_write / file_edit / file_edit_table 由 ToolInterface 永久拒绝，不在此配置。
+# file_write / file_edit / file_edit_table 为内置工具，安全性在编码阶段保证，走正常安全流程。
 
 default_cli_policy: whitelist
 
