@@ -281,11 +281,14 @@ class WebSocketHandler:
         # stop_reason 由 session.data.context.stop_reason 判断
         stop_reason = session.data.context.stop_reason or "completed"
         context_usage = self._build_context_usage(session)
+        # 本轮耗时和 token 消耗（已写入最后一条 assistant 消息的 metadata）
+        turn_meta = self._build_turn_metadata(session)
         await self._send_json({
             "type": "message_end",
             "text": response,
             "stop_reason": stop_reason,
             "context_usage": context_usage,
+            **turn_meta,
         })
         await self._push_conversation_state()
 
@@ -465,6 +468,23 @@ class WebSocketHandler:
             "context_window_size": window_size,
             "percentage": percentage,
         }
+
+    def _build_turn_metadata(self, session: Session) -> dict:
+        """从最后一条 assistant 消息的 metadata 中提取本轮耗时和 token 消耗。
+
+        Session._chat_inner() 已在对话结束时将这些数据写入 metadata，
+        此处仅做读取和扁平化，供 message_end 消息即时展示。
+        """
+        ctx = session.context
+        messages = ctx.messages
+        for msg in reversed(messages):
+            if msg.role == "assistant" and msg.metadata:
+                return {
+                    "elapsed_ms": msg.metadata.get("elapsed_ms", 0),
+                    "input_tokens": msg.metadata.get("input_tokens", 0),
+                    "output_tokens": msg.metadata.get("output_tokens", 0),
+                }
+        return {"elapsed_ms": 0, "input_tokens": 0, "output_tokens": 0}
 
     # ── Workspace 消息处理（统一入口） ──
 

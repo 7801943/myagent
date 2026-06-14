@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Callable, Awaitable
 from uuid import uuid4
@@ -418,6 +419,10 @@ class Session:
 
         logger.info(f"Session chat start: {self.id}")
 
+        # 重置 per-turn token 累计 + 开始计时
+        self._context.reset_turn_usage()
+        turn_start_time = time.monotonic()
+
         try:
             await self.apply_client_state(client_state)
 
@@ -441,6 +446,14 @@ class Session:
             )
 
             logger.info(f"Session chat end: {self.id}, reason={result.stop_reason}")
+
+            # 3.5 将本轮耗时和 token 消耗写入最后一条 assistant 消息的 metadata（持久化，历史会话也能显示）
+            elapsed_ms = int((time.monotonic() - turn_start_time) * 1000)
+            await self._context.add_turn_metadata({
+                "elapsed_ms": elapsed_ms,
+                "input_tokens": self._context.turn_input_tokens,
+                "output_tokens": self._context.turn_output_tokens,
+            })
 
             # 4. 状态持久化
             self.data.context.stop_reason = result.stop_reason or "completed"

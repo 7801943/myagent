@@ -140,6 +140,44 @@
     padding-right: 4px;
 }
 
+/* ── Turn Meta (耗时 + token 消耗) ── */
+.msg-meta {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    padding: 6px 4px 0;
+    line-height: 1.4;
+    opacity: 0.9;
+    align-items: center;
+    gap: 6px;
+}
+
+.meta-item {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+}
+
+.meta-icon {
+    stroke-width: 2.5;
+}
+
+.meta-icon.clock {
+    color: #f59e0b;
+}
+
+.meta-icon.up {
+    color: #8b5cf6;
+}
+
+.meta-icon.down {
+    color: #10b981;
+}
+
+.meta-separator {
+    color: var(--text-tertiary);
+    opacity: 0.5;
+}
+
 /* ── Streaming Cursor ── */
 .streaming-cursor::after {
     content: "▊";

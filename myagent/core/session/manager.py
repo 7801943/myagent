@@ -392,9 +392,20 @@ class SessionManager:
 
         session.make_command_handler()
 
+        # 注入 PromptRenderer（SSPT 动态渲染）
+        # [BUG-FIX] restore_session 必须与 create_session 一样注入 PromptRenderer，
+        # 否则恢复的会话无法动态刷新 system prompt，workspace 文件变更（如打开新文件）
+        # 无法被 LLM 上下文感知。
+        try:
+            renderer = self.create_prompt_renderer()
+            session.set_prompt_renderer(renderer)
+        except Exception as e:
+            logger.warning(f"Failed to create PromptRenderer for restored session: {e}")
+
         # 启动 ToolManager
         try:
             await harness.tool_interface.start()
+            await session.update_tools()
         except Exception as e:
             logger.warning(f"ToolManager start failed for restored session (non-fatal): {e}")
 

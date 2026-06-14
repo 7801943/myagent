@@ -44,8 +44,11 @@ logging.basicConfig(
     stream=sys.stderr,
 )
 
-# 屏蔽第三方库的 DEBUG 噪音（PIL、httpx 等）
-for _noisy in ("PIL", "httpx", "httpcore", "urllib3", "matplotlib"):
+# 屏蔽第三方库的 DEBUG 噪音（PIL、httpx、openai 等）
+for _noisy in (
+    "PIL", "httpx", "httpcore", "urllib3", "matplotlib",
+    "openai", "openai._base_client", "openai._client",
+):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 

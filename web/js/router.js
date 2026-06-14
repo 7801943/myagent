@@ -149,7 +149,12 @@ function handleMessage(data) {
             if (data.context_usage) {
                 updateContextProgress(data.context_usage);
             }
-            finalizeAssistantMessage(data.stop_reason || "completed");
+            // 传递本轮耗时和 token 消耗给前端显示
+            finalizeAssistantMessage(data.stop_reason || "completed", {
+                elapsed_ms: data.elapsed_ms,
+                input_tokens: data.input_tokens,
+                output_tokens: data.output_tokens,
+            });
             requestSessionList();
             break;
 

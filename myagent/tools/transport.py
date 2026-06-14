@@ -166,12 +166,17 @@ class SubprocessTransport(Transport):
         logger.info("SubprocessTransport stopped")
 
     async def _drain_stderr(self) -> None:
+        # 截断超长日志行，防止 openai SDK / 大文件片段等淹没主进程日志
+        _MAX_LINE_LEN = 500
         try:
             while True:
                 line = await self._proc.stderr.readline()
                 if not line:
                     break
-                logger.info(f"[child] {line.decode().rstrip()}")
+                text = line.decode(errors="replace").rstrip()
+                if len(text) > _MAX_LINE_LEN:
+                    text = text[:_MAX_LINE_LEN] + "...(truncated)"
+                logger.info(f"[child] {text}")
         except Exception:
             pass
 

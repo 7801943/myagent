@@ -38,6 +38,9 @@ class ContextManager:
         self._tool_result_max_chars = tool_result_max_chars
         self._recent_turns = recent_turns
         self._last_usage_input_tokens: int = 0
+        # Per-turn token 累计（一轮对话中可能有多轮 ReAct 迭代）
+        self._turn_input_tokens: int = 0
+        self._turn_output_tokens: int = 0
         # 实时持久化
         self._state_store = state_store
         self._session_id = session_id
@@ -56,10 +59,41 @@ class ContextManager:
         return self._last_usage_input_tokens
 
     def update_usage(self, usage: dict) -> None:
-        """更新来自 API 返回的 token 使用量。取最后一次的 input_tokens。"""
+        """更新来自 API 返回的 token 使用量。取最后一次的 input_tokens，同时累计 per-turn。"""
         if usage and usage.get("input_tokens"):
             self._last_usage_input_tokens = usage["input_tokens"]
+            self._turn_input_tokens += usage.get("input_tokens", 0)
+            self._turn_output_tokens += usage.get("output_tokens", 0)
             logger.debug(f"Context usage updated: input_tokens={self._last_usage_input_tokens}")
+
+    @property
+    def turn_input_tokens(self) -> int:
+        """返回当前轮对话累计的 input_tokens（可能包含多轮 ReAct 迭代）。"""
+        return self._turn_input_tokens
+
+    @property
+    def turn_output_tokens(self) -> int:
+        """返回当前轮对话累计的 output_tokens。"""
+        return self._turn_output_tokens
+
+    def reset_turn_usage(self) -> None:
+        """重置 per-turn token 累计器（每轮新对话开始时调用）。"""
+        self._turn_input_tokens = 0
+        self._turn_output_tokens = 0
+
+    async def add_turn_metadata(self, metadata: dict) -> None:
+        """将 turn 统计数据写入最后一条 assistant 消息的 metadata，并重新持久化。
+
+        用于在前端显示每轮对话的耗时和 token 消耗，历史会话也能显示。
+        """
+        if not self._messages:
+            return
+        # 从末尾向前查找最后一条 assistant 消息
+        for msg in reversed(self._messages):
+            if msg.role == "assistant":
+                msg.metadata.update(metadata)
+                break
+        await self._persist_messages()
 
     @property
     def system_prompt(self) -> str | None:

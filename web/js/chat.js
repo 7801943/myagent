@@ -230,6 +230,7 @@ export function createAssistantMessage() {
             </div>
             <div class="msg-section msg-reply-section">
                 <div class="message-content"></div>
+                <div class="msg-meta" style="display:none;"></div>
             </div>
         </div>
     `;
@@ -237,6 +238,70 @@ export function createAssistantMessage() {
     messageList.appendChild(el);
     scrollToEnd(true);
     return el;
+}
+
+// ── 轮次统计信息渲染 ──
+
+/**
+ * 格式化耗时为人可读字符串。
+ * @param {number} ms 毫秒
+ * @returns {string} 如 "1.2s" 或 "1m 23s"
+ */
+function formatElapsed(ms) {
+    if (!ms || ms <= 0) return "";
+    const seconds = ms / 1000;
+    if (seconds < 60) {
+        return seconds.toFixed(1) + "s";
+    }
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.round(seconds % 60);
+    return mins + "m " + secs + "s";
+}
+
+/**
+ * 格式化 token 数（添加千分位逗号）。
+ * @param {number} n
+ * @returns {string}
+ */
+function formatTokens(n) {
+    return (n || 0).toLocaleString();
+}
+
+/**
+ * 渲染轮次统计信息（耗时 + token）到指定 assistant 元素。
+ * @param {HTMLElement} assistantEl - assistant 消息元素
+ * @param {object} meta - { elapsed_ms, input_tokens, output_tokens }
+ */
+function renderTurnMeta(assistantEl, meta) {
+    if (!assistantEl || !meta) return;
+    const metaEl = assistantEl.querySelector(".msg-meta");
+    if (!metaEl) return;
+
+    const parts = [];
+    if (meta.elapsed_ms && meta.elapsed_ms > 0) {
+        parts.push(
+            `<span class="meta-item">` +
+            `<svg class="meta-icon clock" viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>` +
+            `<span>${formatElapsed(meta.elapsed_ms)}</span></span>`
+        );
+    }
+    if ((meta.input_tokens || meta.output_tokens) &&
+        (meta.input_tokens > 0 || meta.output_tokens > 0)) {
+        parts.push(
+            `<span class="meta-item">` +
+            `<svg class="meta-icon up" viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>` +
+            `<span>${formatTokens(meta.input_tokens)}</span> ` +
+            `<svg class="meta-icon down" viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><polyline points="19 12 12 19 5 12"></polyline></svg>` +
+            `<span>${formatTokens(meta.output_tokens)} tokens</span></span>`
+        );
+    }
+
+    if (parts.length > 0) {
+        metaEl.innerHTML = parts.join('<span class="meta-separator">·</span>');
+        metaEl.style.display = "flex";
+    } else {
+        metaEl.style.display = "none";
+    }
 }
 
 export function appendTextDelta(text) {
@@ -367,6 +432,15 @@ export function loadHistoryMessages(messages) {
                     if (replySection) replySection.style.display = "";
                     histRoundHasContent = true;
                 }
+
+                // 如果此 assistant 消息有 turn 统计 metadata，渲染到当前元素
+                if (msg.metadata && (msg.metadata.elapsed_ms || msg.metadata.input_tokens || msg.metadata.output_tokens)) {
+                    renderTurnMeta(currentAssistantEl, {
+                        elapsed_ms: msg.metadata.elapsed_ms,
+                        input_tokens: msg.metadata.input_tokens,
+                        output_tokens: msg.metadata.output_tokens,
+                    });
+                }
             } else if (msg.role === "tool") {
                 if (hasActiveAssistant) {
                     let latency = 0;
@@ -402,7 +476,7 @@ export function resetProcessingState() {
 
 // ── 消息完成 ──
 
-export function finalizeAssistantMessage(stopReason) {
+export function finalizeAssistantMessage(stopReason, meta) {
     if (currentContentEl) {
         currentContentEl.classList.remove("streaming-cursor");
         const rawText = currentContentEl._rawText || "";
@@ -415,6 +489,11 @@ export function finalizeAssistantMessage(stopReason) {
         if (currentContentEl && !currentContentEl._rawText) {
             currentContentEl.innerHTML = '<p style="color: var(--text-tertiary); font-style: italic;">⏹ 已停止</p>';
         }
+    }
+
+    // 渲染本轮耗时和 token 消耗
+    if (meta && currentAssistantEl) {
+        renderTurnMeta(currentAssistantEl, meta);
     }
 
     if (stopReason !== "cancelled") {
