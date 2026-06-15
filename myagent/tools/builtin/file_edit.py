@@ -2,7 +2,6 @@
 import io
 import logging
 import os
-import re
 from copy import copy, deepcopy
 from pathlib import Path
 from typing import Any
@@ -69,23 +68,33 @@ def _get_comment_style(path: Path) -> tuple[str, str] | None:
 
 
 def _build_diff_preview(
-    original: str, replaced: str, match_pos: int
+    original: str,
+    replaced: str,
+    match_pos: int,
+    match_line_count: int = 1,
 ) -> str:
-    """构建替换位置 ±3 行的 diff 预览。"""
-    orig_lines = original.split("\n")
+    """构建替换位置 ±3 行的 diff 预览。
+
+    Args:
+        original: 原始文本（用于定位匹配行号）。
+        replaced: 替换后的文本（用于展示内容）。
+        match_pos: 匹配在 original 中的字符偏移。
+        match_line_count: 匹配区域占几行（target_content 跨多行时需传入）。
+    """
     # 找到匹配所在的行号
     before_text = original[:match_pos]
     match_line = before_text.count("\n")
+    match_end_line = match_line + max(1, match_line_count)
 
     # 计算新文本中替换区域的行号（近似）
     repl_lines = replaced.split("\n")
 
     ctx_start = max(0, match_line - 3)
-    ctx_end = min(len(repl_lines), match_line + 4)
+    ctx_end = min(len(repl_lines), match_end_line + 3)
 
     preview_lines = []
     for i in range(ctx_start, ctx_end):
-        marker = ">" if match_line <= i < match_line + max(1, 1) else " "
+        marker = ">" if match_line <= i < match_end_line else " "
         preview_lines.append(f"  {marker} {i + 1:>{len(str(ctx_end))}} | {repl_lines[i]}")
 
     return "\n".join(preview_lines)
@@ -154,9 +163,11 @@ async def _edit_text(
     # ── 行号范围约束 ──
     search_text = original
     offset = 0  # 原始文本中的字符偏移
+    lines = original.split("\n")
+    total_lines = len(lines)
+    s = 1
+    e = total_lines
     if start_line is not None or end_line is not None:
-        lines = original.split("\n")
-        total_lines = len(lines)
         s = max(1, start_line or 1)
         e = min(end_line or total_lines, total_lines) if end_line else total_lines
         if s > total_lines:
@@ -188,18 +199,15 @@ async def _edit_text(
         )
 
     # ── 执行替换 ──
+    # 替换次数恒等于匹配次数 count（之前用 new_search_text.count(replacement_content) 重算是错误的，
+    # 因为 replacement_content 可能正好在原文中也出现，导致计数偏大；删除场景下 "".count("") 更荒谬）
     if start_line is not None or end_line is not None:
         new_search_text = search_text.replace(target_content, replacement_content)
-        lines = original.split("\n")
-        total_lines = len(lines)
-        s = max(1, start_line or 1)
-        e = min(end_line or total_lines, total_lines) if end_line else total_lines
         new_lines = lines[:s - 1] + new_search_text.split("\n") + lines[e:]
         replaced = "\n".join(new_lines)
-        actual_count = new_search_text.count(replacement_content) if replacement_content != target_content else count
     else:
         replaced = original.replace(target_content, replacement_content)
-        actual_count = count
+    actual_count = count
 
     # ── 批注（在替换位置上方添加注释）──
     comment_applied = False
@@ -227,8 +235,13 @@ async def _edit_text(
         return ToolResult(content=f"写入文件失败: {e}", is_error=True)
 
     # ── 构建返回信息 ──
-    match_pos = offset if offset else original.find(target_content)
-    diff_preview = _build_diff_preview(original, replaced, max(0, match_pos))
+    # 真正的匹配位置：offset 是 search_text 起始偏移，需要再加上 target 在 search_text 中的相对位置。
+    # 之前直接用 offset 作为 match_pos 会导致 diff 高亮行号偏上（Issue 8）。
+    relative_pos = search_text.find(target_content)
+    match_pos = (offset + relative_pos) if relative_pos >= 0 else original.find(target_content)
+    # 匹配占多少行（target_content 跨行时高亮多行）
+    match_line_count = target_content.count("\n") + 1
+    diff_preview = _build_diff_preview(original, replaced, max(0, match_pos), match_line_count)
 
     msg = f"替换成功: {path.name}，共 {actual_count} 处替换。"
     if highlight:

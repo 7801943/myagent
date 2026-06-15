@@ -33,6 +33,7 @@ _MAX_CHUNK_INPUT_TOKENS = 32000
 _CONTEXT_WINDOW_FRACTION = 0.4
 _CHUNK_OVERLAP_LINES = 20
 _EXCERPT_CONTEXT_LINES = 2
+_SUBAGENT_CONCURRENCY = 6  # chunk 并发查询上限，避免过载 provider
 
 
 @dataclass(frozen=True)
@@ -208,24 +209,34 @@ async def _file_query_impl(
     chunk_failures: list[dict[str, Any]] = []
     chunks_with_answer = 0
 
-    for chunk in chunks:
-        try:
-            parsed = await _query_chunk_with_retry(query=query, chunk=chunk)
-        except Exception as exc:
-            logger.exception("file_query subagent chunk failed: chunk=%s", chunk.index)
-            failure_kind = "invalid_json" if isinstance(exc, ValueError) else "subagent_error"
-            chunk_failures.append({
-                "chunk": chunk.index,
-                "kind": failure_kind,
-                "error": f"{type(exc).__name__}: {exc}",
-            })
-            continue
+    # 在入口处构建一次 router，供所有 chunk 复用，避免每个 chunk 重新读 config
+    router = _build_subagent_router()
+    semaphore = asyncio.Semaphore(_SUBAGENT_CONCURRENCY)
+
+    async def _process_chunk(chunk: LineChunk) -> None:
+        nonlocal chunks_with_answer
+        async with semaphore:
+            try:
+                parsed = await _query_chunk_with_retry(
+                    query=query, chunk=chunk, router=router
+                )
+            except Exception as exc:
+                logger.exception("file_query subagent chunk failed: chunk=%s", chunk.index)
+                failure_kind = "invalid_json" if isinstance(exc, ValueError) else "subagent_error"
+                chunk_failures.append({
+                    "chunk": chunk.index,
+                    "kind": failure_kind,
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+                return
 
         valid = _evidence_from_chunk_result(parsed, chunk)
         if not valid:
-            continue
+            return
         chunks_with_answer += 1
         evidence_ranges.extend(valid)
+
+    await asyncio.gather(*(_process_chunk(chunk) for chunk in chunks))
 
     if (
         not evidence_ranges
@@ -359,6 +370,9 @@ def _extract_xlsx_lines(path: Path, sheet_name: str | None) -> list[LocatedLine]
             for row_idx, row in enumerate(ws.iter_rows(values_only=True), 1):
                 cells = ["" if value is None else str(value) for value in row]
                 text = " | ".join(cells).rstrip()
+                # 跳过空行，避免浪费子代理 token（保留 local_line 行号映射）
+                if not text:
+                    continue
                 located.append(
                     LocatedLine(
                         global_line=global_line,
@@ -442,7 +456,11 @@ def _chunk_lines(lines: list[LocatedLine], token_limit: int, overlap_lines: int)
     return chunks
 
 
-async def _query_chunk_with_retry(query: str, chunk: LineChunk) -> dict[str, Any]:
+async def _query_chunk_with_retry(
+    query: str,
+    chunk: LineChunk,
+    router: Any = None,
+) -> dict[str, Any]:
     last_error: Exception | None = None
     invalid_response = ""
     for attempt in range(2):
@@ -458,7 +476,8 @@ async def _query_chunk_with_retry(query: str, chunk: LineChunk) -> dict[str, Any
             ),
             _SimpleMessage("user", prompt),
         ]
-        raw = await _call_subagent_model(messages)
+        # router 复用：如果传入了预构建的 router，则不再每次重新读 config
+        raw = await _call_subagent_model(messages, router=router)
         try:
             parsed = _parse_json_object(raw)
             return parsed
@@ -492,12 +511,12 @@ def _build_chunk_prompt(query: str, chunk: LineChunk, invalid_response: str = ""
     )
 
 
-async def _call_subagent_model(
-    messages: list[_SimpleMessage],
-    config_path: str = "config.yaml",
-    max_tokens: int = _SUBAGENT_MAX_TOKENS,
-    timeout: float = _SUBAGENT_TIMEOUT_SECONDS,
-) -> str:
+def _build_subagent_router(config_path: str = "config.yaml") -> Any:
+    """构建子代理 ProviderRouter。在入口调用一次，供所有 chunk 复用。
+
+    Raises:
+        RuntimeError: 未配置任何 Provider 或未找到支持的 Provider。
+    """
     raw = load_yaml_config(config_path)
     app_config = raw.get("agent", raw) if raw else {}
     cfg = AgentConfig(**app_config)
@@ -540,6 +559,19 @@ async def _call_subagent_model(
         failure_threshold=cfg.failover.circuit_breaker_failure_threshold,
         recovery_seconds=cfg.failover.circuit_breaker_recovery_seconds,
     )
+    return router
+
+
+async def _call_subagent_model(
+    messages: list[_SimpleMessage],
+    config_path: str = "config.yaml",
+    max_tokens: int = _SUBAGENT_MAX_TOKENS,
+    timeout: float = _SUBAGENT_TIMEOUT_SECONDS,
+    router: Any = None,
+) -> str:
+    # router 复用：如果传入了预构建的 router，则跳过 config 读取和 router 构建
+    if router is None:
+        router = _build_subagent_router(config_path)
 
     async def collect() -> str:
         parts: list[str] = []

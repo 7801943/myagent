@@ -25,14 +25,31 @@ logger = logging.getLogger(__name__)
 # 安全策略
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+# 路径黑名单：使用绝对路径前缀，配合 _is_within 做边界安全的匹配。
+# 注意：所有路径在比较前都已 normalize（去除尾斜杠），避免 /etc/ 误判。
 _DENIED_PATHS = {
     "/etc", "/root",
-    "/sys", "/proc/sys", "/boot", "/dev",
+    "/sys", "/proc", "/boot", "/dev",
 }
+
+# 用户目录下的敏感目录（在运行时展开 ~ 后匹配）
+_DENIED_HOME_SUBPATHS = (".ssh", ".aws", ".gnupg", ".config/gcloud")
 
 _MAX_BASE64_BYTES = 20 * 1024 * 1024  # 20MB base64 输出上限
 _PDF_DEFAULT_MAX_PAGES = 3            # 未指定页码范围时，默认最多渲染页数
 _PDF_SCAN_FALLBACK_RATIO = 0.5        # 无文本页占比超过此阈值时，自动回退到 base64 渲染
+
+
+def _is_within(path: str, base: str) -> bool:
+    """判断 path 是否位于 base 之内（含 base 本身），使用路径边界避免前缀误判。
+
+    例如 _is_within("/etcfoo", "/etc") == False，
+    而 _is_within("/etc/passwd", "/etc") == True。
+    """
+    if not base:
+        return False
+    base_norm = base.rstrip("/") or "/"
+    return path == base_norm or path.startswith(base_norm + "/")
 
 
 def _check_path_safety(path: str) -> str | None:
@@ -41,9 +58,23 @@ def _check_path_safety(path: str) -> str | None:
         resolved = str(Path(path).resolve())
     except Exception:
         return f"路径解析失败: {path}"
+
+    # 检查绝对路径黑名单（带路径边界检查，避免 /etcfoo 这种误报）
     for denied_path in _DENIED_PATHS:
-        if resolved.startswith(denied_path):
+        if _is_within(resolved, denied_path):
             return f"路径被安全策略禁止: {path} (匹配: {denied_path})"
+
+    # 检查用户主目录下的敏感目录（如 ~/.ssh、~/.aws 等）
+    try:
+        home = str(Path.home().resolve())
+        for sub in _DENIED_HOME_SUBPATHS:
+            denied_home = str((Path(home) / sub).resolve())
+            if _is_within(resolved, denied_home):
+                return f"路径被安全策略禁止: {path} (匹配: ~/{sub})"
+    except Exception:
+        # 取不到 home 时跳过此检查（不影响黑名单检查）
+        pass
+
     return None
 
 
@@ -119,9 +150,10 @@ def _detect_encoding(path: Path, hint: str | None = None) -> str:
     if hint:
         return hint
 
-    # 尝试读取前 8KB 用于检测
+    # 尝试读取前 8KB 用于检测（使用 with 确保文件句柄关闭）
     try:
-        raw = path.open("rb").read(8192)
+        with path.open("rb") as f:
+            raw = f.read(8192)
     except Exception:
         return "utf-8"
 
@@ -412,7 +444,9 @@ async def _read_xlsx(
         )
     except Exception as e:
         wb.close()
-        if 'value_wb' in locals() and value_wb:
+        # value_wb 在此阶段必然已被定义（上面的 try 块成功才会到达这里），
+        # 无需使用 'value_wb' in locals() 字符串探测。
+        if value_wb:
             value_wb.close()
         return ToolResult(content=f"读取 XLSX 失败: {e}", is_error=True)
 
@@ -509,6 +543,15 @@ async def _format_xlsx_sheet(
         meta["tables"] = sheet_profile.get("tables", [])
     if include_merges:
         meta["merged_ranges"] = sheet_profile.get("merged_ranges", [])
+
+    # 公式缓存陷阱提示：data_only=True 模式下，程序生成且未经 Excel 打开保存的
+    # xlsx，公式单元格的计算缓存为 None，读取会得到空值。
+    if render_mode == "values":
+        meta["formula_value_caveat"] = (
+            "提示：以 values 模式读取，公式单元格返回的是缓存计算值。"
+            "程序生成且未经 Excel 打开保存的 xlsx，公式缓存可能为空（None）。"
+            "如需查看公式本身，请使用 render_mode='formulas' 或 'both'。"
+        )
 
     wb.close()
     if value_ws is not None:
