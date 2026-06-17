@@ -116,10 +116,7 @@ def _get_safety_summary(session: "Session") -> str:
     """提取当前会话的 CLI 安全策略摘要。"""
     try:
         safety = session.data.safety
-        return (
-            f"CLI安全策略: {safety.active_policy} ({safety.mode})；"
-            "file_write、file_edit、file_edit_table 永久拒绝"
-        )
+        return f"CLI安全策略: {safety.active_policy} ({safety.mode})"
     except Exception:
         return ""
 
