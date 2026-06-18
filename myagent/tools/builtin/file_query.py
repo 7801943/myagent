@@ -10,6 +10,7 @@ import asyncio
 import csv
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,7 +34,7 @@ _MAX_CHUNK_INPUT_TOKENS = 32000
 _CONTEXT_WINDOW_FRACTION = 0.4
 _CHUNK_OVERLAP_LINES = 20
 _EXCERPT_CONTEXT_LINES = 2
-_SUBAGENT_CONCURRENCY = 6  # chunk 并发查询上限，避免过载 provider
+_SUBAGENT_CONCURRENCY = 2  # chunk 并发查询上限，避免过载 provider
 
 
 @dataclass(frozen=True)
@@ -211,7 +212,7 @@ async def _file_query_impl(
 
     # 在入口处构建一次 router，供所有 chunk 复用，避免每个 chunk 重新读 config
     router = _build_subagent_router()
-    semaphore = asyncio.Semaphore(_SUBAGENT_CONCURRENCY)
+    semaphore = asyncio.Semaphore(_get_subagent_concurrency())
 
     async def _process_chunk(chunk: LineChunk) -> None:
         nonlocal chunks_with_answer
@@ -238,14 +239,13 @@ async def _file_query_impl(
 
     await asyncio.gather(*(_process_chunk(chunk) for chunk in chunks))
 
-    if (
-        not evidence_ranges
-        and chunk_failures
-        and len(chunk_failures) == len(chunks)
-        and all(item.get("kind") == "subagent_error" for item in chunk_failures)
-    ):
+    if not evidence_ranges and chunk_failures and len(chunk_failures) == len(chunks):
+        failure_summary = _summarize_chunk_failures(chunk_failures)
         return ToolResult(
-            content=f"file_query 子代理不可用，所有 chunk 均调用失败: {chunk_failures[0]['error']}",
+            content=(
+                "file_query 子代理不可用或未能完成检索，所有 chunk 均调用失败或返回无效结果。"
+                f"首个错误: {chunk_failures[0]['error']}"
+            ),
             is_error=True,
             metadata={
                 "path": str(target.resolve()),
@@ -254,6 +254,7 @@ async def _file_query_impl(
                 "mode": mode,
                 "chunk_count": len(chunks),
                 "chunk_failures": chunk_failures,
+                "failure_summary": failure_summary,
             },
         )
 
@@ -434,6 +435,22 @@ def _get_primary_context_window(config_path: str = "config.yaml") -> int:
     except Exception as exc:
         logger.exception("file_query failed to read provider context_window_size, using default")
     return _DEFAULT_CONTEXT_WINDOW
+
+
+def _get_subagent_concurrency() -> int:
+    try:
+        value = int(os.environ.get("MYAGENT_FILE_QUERY_CONCURRENCY", _SUBAGENT_CONCURRENCY))
+    except (TypeError, ValueError):
+        value = _SUBAGENT_CONCURRENCY
+    return max(1, min(8, value))
+
+
+def _summarize_chunk_failures(chunk_failures: list[dict[str, Any]]) -> dict[str, int]:
+    summary: dict[str, int] = {}
+    for item in chunk_failures:
+        kind = str(item.get("kind") or "unknown")
+        summary[kind] = summary.get(kind, 0) + 1
+    return summary
 
 
 def _chunk_lines(lines: list[LocatedLine], token_limit: int, overlap_lines: int) -> list[LineChunk]:

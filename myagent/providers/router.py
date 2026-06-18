@@ -70,6 +70,14 @@ class ProviderRouter:
         recovery_seconds: int = 60,
     ):
         self._providers = sorted(providers, key=lambda p: getattr(p, "_priority", 99))
+        self._provider_keys: dict[int, str] = {}
+        seen_names: dict[str, int] = {}
+        for provider in self._providers:
+            base_name = provider.name or provider.__class__.__name__
+            seen_names[base_name] = seen_names.get(base_name, 0) + 1
+            suffix = seen_names[base_name]
+            key = base_name if suffix == 1 else f"{base_name}#{suffix}"
+            self._provider_keys[id(provider)] = key
         self._breaker = CircuitBreaker(
             failure_threshold=failure_threshold,
             recovery_seconds=recovery_seconds,
@@ -83,7 +91,7 @@ class ProviderRouter:
     def current_provider(self) -> BaseProvider | None:
         """返回当前可用的主 Provider（列表中第一个未被熔断的）。"""
         for p in self._providers:
-            if not self._breaker.is_open(p.name):
+            if not self._breaker.is_open(self._provider_key(p)):
                 return p
         return self._providers[0] if self._providers else None
 
@@ -103,13 +111,14 @@ class ProviderRouter:
         tried_providers = set()
 
         for provider in self._providers:
-            if provider.name in tried_providers:
+            provider_key = self._provider_key(provider)
+            if provider_key in tried_providers:
                 continue
-            if self._breaker.is_open(provider.name):
-                logger.debug(f"Skipping {provider.name} (circuit breaker open)")
+            if self._breaker.is_open(provider_key):
+                logger.debug(f"Skipping {self._provider_label(provider)} (circuit breaker open)")
                 continue
 
-            tried_providers.add(provider.name)
+            tried_providers.add(provider_key)
 
             try:
                 # 用 async for 包装，确保流式传输中的错误也能被捕获
@@ -119,34 +128,44 @@ class ProviderRouter:
                 async for event in provider.stream(formatted_messages, formatted_tools, **kwargs):
                     yield event
                 # 成功完成
-                self._breaker.record_success(provider.name)
+                self._breaker.record_success(provider_key)
                 return
 
             except _RETRYABLE_ERRORS as e:
-                errors.append((provider.name, e))
-                self._breaker.record_failure(provider.name)
+                errors.append((self._provider_label(provider), e))
+                self._breaker.record_failure(provider_key)
                 # 找到下一个可用 Provider，通过流通知上层发生了 failover
-                next_p = self._find_next_available(tried_providers | {provider.name})
+                next_p = self._find_next_available(tried_providers | {provider_key})
                 yield StreamEvent(
                     type="provider_failover",
                     meta={
-                        "from_provider": provider.name,
-                        "to_provider": next_p.name if next_p else "",
+                        "from_provider": self._provider_label(provider),
+                        "to_provider": self._provider_label(next_p) if next_p else "",
                         "reason": str(e),
                     },
                 )
-                logger.warning(f"Provider {provider.name} failed: {e}, trying next...")
+                logger.warning(f"Provider {self._provider_label(provider)} failed: {e}, trying next...")
                 continue
 
             except Exception as e:
-                errors.append((provider.name, e))
-                logger.error(f"Provider {provider.name} unexpected error: {e}")
+                errors.append((self._provider_label(provider), e))
+                logger.error(f"Provider {self._provider_label(provider)} unexpected error: {e}")
                 continue
 
         raise AllProvidersFailedError(errors)
 
     def _find_next_available(self, tried: set[str]) -> BaseProvider | None:
         for p in self._providers:
-            if p.name not in tried and not self._breaker.is_open(p.name):
+            provider_key = self._provider_key(p)
+            if provider_key not in tried and not self._breaker.is_open(provider_key):
                 return p
         return None
+
+    def _provider_key(self, provider: BaseProvider) -> str:
+        return self._provider_keys.get(id(provider), provider.name)
+
+    def _provider_label(self, provider: BaseProvider) -> str:
+        key = self._provider_key(provider)
+        if key == provider.name:
+            return provider.name
+        return f"{provider.name} ({provider.model})"

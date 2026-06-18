@@ -207,6 +207,32 @@ def test_file_query_returns_error_when_subagent_unavailable(tmp_path, monkeypatc
     assert result.metadata['chunk_failures'][0]['kind'] == 'subagent_error'
 
 
+def test_file_query_returns_error_when_all_chunks_fail_with_mixed_failure_kinds(tmp_path, monkeypatch):
+    path = tmp_path / 'notes.txt'
+    path.write_text('alpha\nbeta\n', encoding='utf-8')
+
+    def two_chunks(lines, token_limit, overlap_lines):
+        return [
+            file_query_module.LineChunk(index=1, lines=[lines[0]]),
+            file_query_module.LineChunk(index=2, lines=[lines[1]]),
+        ]
+
+    async def fake_query_chunk_with_retry(query, chunk, router=None):
+        if chunk.index == 1:
+            raise RuntimeError('provider unavailable')
+        raise ValueError('响应中未找到 JSON 对象')
+
+    monkeypatch.setattr(file_query_module, '_chunk_lines', two_chunks)
+    monkeypatch.setattr(file_query_module, '_query_chunk_with_retry', fake_query_chunk_with_retry)
+    monkeypatch.setattr(file_query_module, '_build_subagent_router', lambda: object())
+
+    result = run_tool(file_query(str(path), 'beta?'))
+
+    assert result.is_error
+    assert '所有 chunk 均调用失败或返回无效结果' in result.content
+    assert result.metadata['failure_summary'] == {'subagent_error': 1, 'invalid_json': 1}
+
+
 def test_hot_reload_dataclass_tool_registers_without_sys_modules_error(tmp_path):
     tools_dir = tmp_path / 'tools'
     tool_dir = tools_dir / 'dataclass_tool'

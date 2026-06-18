@@ -59,6 +59,8 @@ class SessionManager:
         self._cleanup_task: asyncio.Task | None = None
 
         # ── 加载配置并缓存 ──
+        self._config_file = Path(config_path).expanduser()
+        self._config_dir = self._config_file.resolve().parent if self._config_file.exists() else Path.cwd()
         self._raw = load_yaml_config(config_path)
         app_config = self._raw.get("agent", self._raw) if self._raw else {}
         self._config = AgentConfig(**app_config)
@@ -503,8 +505,10 @@ class SessionManager:
 
     def load_prompt_template(self):
         from myagent.prompt.template import PromptTemplate
-        template_path = self._config.prompt_template_path
-        if Path(template_path).exists():
+        template_path = Path(self._config.prompt_template_path).expanduser()
+        if not template_path.is_absolute():
+            template_path = self._config_dir / template_path
+        if template_path.exists():
             return PromptTemplate.from_yaml(template_path)
         logger.warning(f"prompt_template.yaml not found at {template_path}, using default")
         return PromptTemplate.default()

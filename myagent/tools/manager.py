@@ -504,6 +504,7 @@ class ToolManager:
         )
         self._tools["cli_execute"] = cli_record
 
+        from myagent.tools.builtin.file_diff import file_diff
         from myagent.tools.builtin.file_edit import file_edit, file_edit_table
         from myagent.tools.builtin.file_read import file_read
         from myagent.tools.builtin.file_query import file_query
@@ -515,9 +516,11 @@ class ToolManager:
         self._register_file_tool(str(builtin_dir / "file_write.py"), file_write)
         self._register_file_tool(str(builtin_dir / "file_edit.py"), file_edit)
         self._register_file_tool(str(builtin_dir / "file_edit.py"), file_edit_table)
+        self._register_file_tool(str(builtin_dir / "file_diff.py"), file_diff)
 
         logger.info(
-            "Registered builtin tools: cli_execute, file_read, file_query, file_write, file_edit, file_edit_table")
+            "Registered builtin tools: cli_execute, file_read, file_query, file_write, "
+            "file_edit, file_edit_table, file_diff")
 
     # ── MCP ──
 
