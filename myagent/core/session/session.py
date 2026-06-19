@@ -215,19 +215,45 @@ class Session:
         router = self._harness.router
 
         # 采集模型信息
-        current_provider = router.current_provider
+        self._sync_model_state_from_router()
+
+        # 采集工具列表
+        tools: list[dict] = []
+        tm = self._harness.tool_manager
+        if tm:
+            for record in tm.list_schemas() or []:
+                tools.append({
+                    "name": record.name,
+                    "description": record.description,
+                    "parameters_schema": getattr(record, "parameters_schema", {}),
+                    "source": record.source,
+                })
+        self.data.tool.tools = tools
+
+    def _sync_model_state_from_router(self) -> None:
+        """同步 router/provider 状态到 SessionData.model。"""
+        router = self._harness.router
+        selected_key = getattr(router, "selected_provider_key", "")
         available_models: list[dict] = []
         active_model: dict = {}
 
         for p in router.providers:
             ptype = type(p).__name__.replace("Provider", "").lower()
             cws = getattr(p, "_context_window_size", 128000)
-            is_current = (current_provider is not None and p.name == current_provider.name)
+            provider_key = (
+                router.provider_key(p)
+                if hasattr(router, "provider_key")
+                else p.name
+            )
+            is_current = provider_key == selected_key
             info = {
+                "provider_key": provider_key,
                 "provider_name": p.name,
                 "model_id": p.model,
                 "provider_type": ptype,
                 "context_window_size": cws,
+                "thinking_supported": bool(getattr(p, "thinking_supported", False)),
+                "thinking_enabled": bool(getattr(p, "thinking_enabled", False)),
                 "is_active": is_current,
             }
             available_models.append(info)
@@ -243,19 +269,8 @@ class Session:
 
         active_cws = active_model.get("context_window_size", 200000)
         self.data.context.token_usage.total = active_cws
-
-        # 采集工具列表
-        tools: list[dict] = []
-        tm = self._harness.tool_manager
-        if tm:
-            for record in tm.list_schemas() or []:
-                tools.append({
-                    "name": record.name,
-                    "description": record.description,
-                    "parameters_schema": getattr(record, "parameters_schema", {}),
-                    "source": record.source,
-                })
-        self.data.tool.tools = tools
+        if hasattr(self._context, "_context_window_size"):
+            self._context._context_window_size = active_cws
 
     # ── 会话级安全策略 ──
 
@@ -288,6 +303,28 @@ class Session:
         await self._persist_state(self.agent_run_state)
         await self.push_conversation_state()
         return state
+
+    async def set_model_selection(
+        self,
+        provider_key: str,
+        *,
+        thinking_enabled: bool | None = None,
+        allow_while_running: bool = False,
+    ) -> dict:
+        if self._chat_lock.locked() and not allow_while_running:
+            raise RuntimeError("Session is busy; model cannot be changed")
+        router = self._harness.router
+        provider = router.set_provider(provider_key)
+        if thinking_enabled is not None:
+            if thinking_enabled and not getattr(provider, "thinking_supported", False):
+                raise ValueError("当前模型不支持 Thinking 开关")
+            provider.thinking_enabled = bool(
+                thinking_enabled and getattr(provider, "thinking_supported", False)
+            )
+        self._sync_model_state_from_router()
+        await self._persist_state(self.agent_run_state)
+        await self.push_conversation_state()
+        return self.data.model.model_dump()
 
     # ── PromptRenderer 注入 ──
 
@@ -545,12 +582,10 @@ class Session:
                 provider_name = args.strip()
                 if provider_name and hasattr(session._harness, 'router'):
                     try:
-                        session._harness.router.set_provider(provider_name)
-                        available = session.data.model.available
-                        for m in available:
-                            m["is_active"] = (m.get("provider_name") == provider_name)
-                            if m["is_active"]:
-                                session.data.model.active = m
+                        await session.set_model_selection(
+                            provider_name,
+                            allow_while_running=True,
+                        )
                         logger.info(f"System command: /model → {provider_name}")
                     except Exception as e:
                         logger.warning(f"Failed to switch model: {e}")

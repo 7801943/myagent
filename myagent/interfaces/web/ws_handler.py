@@ -216,6 +216,8 @@ class WebSocketHandler:
             self._handle_approval_response(data)
         elif msg_type == "safety_policy_set":
             await self._handle_safety_policy_set(data)
+        elif msg_type == "model_select":
+            await self._handle_model_select(data)
         elif msg_type == "session_list":
             await self._handle_session_list()
         elif msg_type == "session_create":
@@ -314,6 +316,19 @@ class WebSocketHandler:
             return
         try:
             await self._session.set_safety_policy(data.get("policy", ""))
+        except (RuntimeError, ValueError) as exc:
+            await self._send_json({"type": "error", "message": str(exc)})
+
+    async def _handle_model_select(self, data: dict) -> None:
+        """切换当前会话独立的模型和 Thinking 设置。"""
+        if not self._session:
+            await self._send_json({"type": "error", "message": "会话不存在"})
+            return
+        try:
+            await self._session.set_model_selection(
+                data.get("provider_key", ""),
+                thinking_enabled=data.get("thinking_enabled"),
+            )
         except (RuntimeError, ValueError) as exc:
             await self._send_json({"type": "error", "message": str(exc)})
 

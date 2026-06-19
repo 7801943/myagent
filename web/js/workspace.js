@@ -400,7 +400,6 @@ function showTabListPopup(anchorButton) {
                     <polyline points="14 2 14 8 20 8" />
                 </svg>
                 <span class="canvas-tab-list-item-name">${escapeHtml(fileName(file.path))}</span>
-                <span class="canvas-tab-list-item-path">${escapeHtml(file.path)}</span>
             `;
             item.addEventListener('click', function () {
                 hideTabListPopup();

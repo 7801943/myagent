@@ -29,6 +29,15 @@ agent:
       api_key: ""                        # TODO: 填入你的 API Key
       api_base: "https://open.bigmodel.cn/api/coding/paas/v4"
       priority: 1
+      thinking:
+        supported: true
+        default_enabled: false
+        enabled_extra_body:
+          thinking:
+            type: "enabled"
+        disabled_extra_body:
+          thinking:
+            type: "disabled"
 
     - name: "openai-backup"
       type: "openai"

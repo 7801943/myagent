@@ -129,12 +129,22 @@ class SessionManager:
     def _build_router(self) -> ProviderRouter:
         providers = []
         for p_cfg in self._config.providers:
+            thinking_supported = (
+                p_cfg.thinking.supported
+                if p_cfg.thinking.supported is not None
+                else p_cfg.model.lower().startswith("glm-5")
+            )
+            thinking_enabled = bool(thinking_supported and p_cfg.thinking.default_enabled)
             if p_cfg.type.lower() == "openai":
                 p = OpenAIProvider(
                     name=p_cfg.name,
                     model=p_cfg.model,
                     api_key=p_cfg.api_key or "sk-dummy",
                     api_base=p_cfg.api_base,
+                    thinking_supported=thinking_supported,
+                    thinking_enabled=thinking_enabled,
+                    thinking_enabled_extra_body=p_cfg.thinking.enabled_extra_body,
+                    thinking_disabled_extra_body=p_cfg.thinking.disabled_extra_body,
                 )
             elif p_cfg.type.lower() == "anthropic":
                 p = AnthropicProvider(
@@ -142,6 +152,10 @@ class SessionManager:
                     model=p_cfg.model,
                     api_key=p_cfg.api_key or "sk-dummy",
                 )
+                p.thinking_supported = thinking_supported
+                p.thinking_enabled = thinking_enabled
+                p.thinking_enabled_extra_body = p_cfg.thinking.enabled_extra_body
+                p.thinking_disabled_extra_body = p_cfg.thinking.disabled_extra_body
             else:
                 continue
             p._context_window_size = p_cfg.context_window_size
@@ -356,7 +370,27 @@ class SessionManager:
 
         if isinstance(metadata_dict, dict):
             restored_data = SessionData.model_validate(metadata_dict)
-            restored_data.model.available = session.data.model.available
+            restored_active = restored_data.model.active or {}
+            restored_provider_key = (
+                restored_active.get("provider_key")
+                or restored_active.get("provider_name")
+                or ""
+            )
+            if restored_provider_key:
+                try:
+                    provider = session.harness.router.set_provider(restored_provider_key)
+                    if restored_active.get("thinking_enabled") is not None:
+                        provider.thinking_enabled = bool(
+                            restored_active.get("thinking_enabled")
+                            and getattr(provider, "thinking_supported", False)
+                        )
+                except ValueError:
+                    logger.warning(
+                        "Stored provider '%s' is unavailable; using configured default",
+                        restored_provider_key,
+                    )
+            session._sync_model_state_from_router()
+            restored_data.model = session.data.model
             restored_data.tool.tools = session.data.tool.tools
             session.data = restored_data
             restored_policy = restored_data.safety.active_policy

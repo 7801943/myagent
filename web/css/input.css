@@ -174,6 +174,170 @@
     padding: 8px;
 }
 
+.model-display {
+    min-width: 118px;
+    max-width: 220px;
+    padding: 0 24px 0 10px;
+    overflow: visible;
+}
+
+.model-display.disabled {
+    opacity: 0.78;
+}
+
+.model-picker-button {
+    min-width: 0;
+    max-width: 180px;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 600;
+    padding: 4px 0;
+    outline: none;
+    cursor: pointer;
+    font-family: var(--font-sans);
+}
+
+.model-picker-button:disabled {
+    cursor: default;
+}
+
+#modelPickerLabel {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.model-picker-popup {
+    position: absolute;
+    left: 0;
+    bottom: calc(100% + 8px);
+    z-index: 120;
+    width: min(360px, 82vw);
+    padding: 6px;
+    border: 1px solid var(--bg-glass-border);
+    border-radius: 10px;
+    background: var(--bg-primary);
+    box-shadow: var(--shadow-lg);
+}
+
+.model-picker-popup[hidden] {
+    display: none;
+}
+
+.model-picker-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    min-width: 0;
+    padding: 8px 9px;
+    border-radius: 8px;
+    cursor: pointer;
+    color: var(--text-secondary);
+    transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.model-picker-item:hover,
+.model-picker-item:focus {
+    background: var(--bg-glass-hover);
+    color: var(--text-primary);
+    outline: none;
+}
+
+.model-picker-item.active {
+    background: var(--accent-soft);
+    color: var(--accent);
+}
+
+.model-picker-item-text {
+    flex: 1;
+    min-width: 0;
+}
+
+.model-picker-item-name,
+.model-picker-item-meta {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.model-picker-item-name {
+    font-size: 12px;
+    font-weight: 700;
+    color: currentColor;
+}
+
+.model-picker-item-meta {
+    margin-top: 2px;
+    font-size: 10px;
+    color: var(--text-tertiary);
+}
+
+.model-thinking-switch {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+    border: none;
+    background: transparent;
+    color: var(--text-tertiary);
+    font-family: var(--font-sans);
+    font-size: 10px;
+    font-weight: 700;
+    cursor: pointer;
+    padding: 0;
+}
+
+.model-thinking-switch:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+}
+
+.model-thinking-track {
+    position: relative;
+    width: 28px;
+    height: 16px;
+    border-radius: 999px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--bg-glass-border);
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.model-thinking-thumb {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--text-tertiary);
+    transition: transform var(--transition-fast), background var(--transition-fast);
+}
+
+.model-thinking-switch.on {
+    color: var(--accent);
+}
+
+.model-thinking-switch.on .model-thinking-track {
+    background: var(--accent-soft);
+    border-color: var(--accent);
+}
+
+.model-thinking-switch.on .model-thinking-thumb {
+    transform: translateX(12px);
+    background: var(--accent);
+}
+
+.model-picker-empty {
+    padding: 12px 10px;
+    color: var(--text-tertiary);
+    font-size: 12px;
+    text-align: center;
+}
+
 .dropdown-chevron {
     position: absolute;
     right: 8px;
@@ -235,12 +399,6 @@
     letter-spacing: -0.01em;
 }
 
-.model-display select:disabled {
-    cursor: default;
-    opacity: 1;
-    color: var(--text-secondary);
-}
-
 .model-display .dropdown-chevron {
-    display: none;
+    display: block;
 }

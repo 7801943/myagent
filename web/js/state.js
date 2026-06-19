@@ -16,6 +16,10 @@ export const state = {
         available_policies: [],
         mode: "",
     },
+    model: {
+        active: {},
+        available: [],
+    },
     // 认证状态
     isAuthenticated: false,
     authToken: '',

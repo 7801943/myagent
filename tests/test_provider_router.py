@@ -37,3 +37,34 @@ def test_provider_router_tries_duplicate_provider_names_independently():
     assert second.calls == 1
     assert any(event.type == "provider_failover" for event in events)
     assert any(event.type == "text_delta" and event.text == "second" for event in events)
+
+
+def test_provider_router_set_provider_streams_selected_provider_first():
+    first = FakeProvider("first", "first-model")
+    second = FakeProvider("second", "second-model")
+    router = ProviderRouter([first, second])
+
+    router.set_provider("second")
+
+    async def collect():
+        return [event async for event in router.stream([{"role": "user", "content": "hi"}])]
+
+    events = asyncio.run(collect())
+
+    assert first.calls == 0
+    assert second.calls == 1
+    assert router.current_provider is second
+    assert events[0].text == "second-model"
+
+
+def test_provider_router_duplicate_provider_keys_are_stable():
+    first = FakeProvider("same-name", "first")
+    second = FakeProvider("same-name", "second")
+    router = ProviderRouter([first, second])
+
+    assert router.provider_key(first) == "same-name"
+    assert router.provider_key(second) == "same-name#2"
+
+    router.set_provider("same-name#2")
+
+    assert router.current_provider is second

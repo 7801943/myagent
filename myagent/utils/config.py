@@ -47,6 +47,17 @@ def load_yaml_config(path: str | Path) -> dict:
 
 # ── Pydantic-Settings 结构化配置模型 ──
 
+class ThinkingConfig(BaseModel):
+    supported: bool | None = None
+    default_enabled: bool = False
+    enabled_extra_body: dict = Field(
+        default_factory=lambda: {"thinking": {"type": "enabled"}}
+    )
+    disabled_extra_body: dict = Field(
+        default_factory=lambda: {"thinking": {"type": "disabled"}}
+    )
+
+
 class ProviderConfig(BaseModel):
     name: str
     type: str                          # "openai" | "anthropic"
@@ -55,6 +66,7 @@ class ProviderConfig(BaseModel):
     api_key: str = ""
     api_base: str | None = None        # 自定义 endpoint
     context_window_size: int = 200000  # 该模型的上下文窗口大小
+    thinking: ThinkingConfig = Field(default_factory=ThinkingConfig)
 
 class FailoverConfig(BaseModel):
     strategy: str = "priority"         # priority | round_robin | latency

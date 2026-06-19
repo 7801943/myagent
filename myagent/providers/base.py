@@ -63,12 +63,27 @@ class AllProvidersFailedError(ProviderError):
 class BaseProvider(ABC):
     """LLM Provider 抽象基类。"""
 
-    def __init__(self, name: str, model: str, api_key: str, api_base: str | None = None):
+    def __init__(
+        self,
+        name: str,
+        model: str,
+        api_key: str,
+        api_base: str | None = None,
+        *,
+        thinking_supported: bool = False,
+        thinking_enabled: bool = False,
+        thinking_enabled_extra_body: dict | None = None,
+        thinking_disabled_extra_body: dict | None = None,
+    ):
         self.name = name
         self.model = model
         self.api_key = api_key
         self.api_base = api_base
         self.capabilities: ProviderCapabilities = ProviderCapabilities()
+        self.thinking_supported = thinking_supported
+        self.thinking_enabled = thinking_enabled if thinking_supported else False
+        self.thinking_enabled_extra_body = thinking_enabled_extra_body or {"thinking": {"type": "enabled"}}
+        self.thinking_disabled_extra_body = thinking_disabled_extra_body or {"thinking": {"type": "disabled"}}
 
     @abstractmethod
     async def stream(

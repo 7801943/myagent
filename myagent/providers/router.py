@@ -78,6 +78,9 @@ class ProviderRouter:
             suffix = seen_names[base_name]
             key = base_name if suffix == 1 else f"{base_name}#{suffix}"
             self._provider_keys[id(provider)] = key
+        self._selected_provider_key = (
+            self._provider_key(self._providers[0]) if self._providers else ""
+        )
         self._breaker = CircuitBreaker(
             failure_threshold=failure_threshold,
             recovery_seconds=recovery_seconds,
@@ -89,11 +92,40 @@ class ProviderRouter:
 
     @property
     def current_provider(self) -> BaseProvider | None:
-        """返回当前可用的主 Provider（列表中第一个未被熔断的）。"""
+        """返回当前选中的可用 Provider；若熔断则返回下一个可用 Provider。"""
+        selected = self.get_provider(self._selected_provider_key)
+        if selected and not self._breaker.is_open(self._provider_key(selected)):
+            return selected
         for p in self._providers:
             if not self._breaker.is_open(self._provider_key(p)):
                 return p
         return self._providers[0] if self._providers else None
+
+    @property
+    def selected_provider_key(self) -> str:
+        return self._selected_provider_key
+
+    def provider_key(self, provider: BaseProvider) -> str:
+        return self._provider_key(provider)
+
+    def get_provider(self, provider_key: str) -> BaseProvider | None:
+        for provider in self._providers:
+            if self._provider_key(provider) == provider_key:
+                return provider
+        return None
+
+    def set_provider(self, provider_key: str) -> BaseProvider:
+        provider = self.get_provider(provider_key)
+        if provider is None:
+            # 兼容旧 /model 命令曾使用 provider_name 的调用方式。
+            matches = [p for p in self._providers if p.name == provider_key]
+            if len(matches) == 1:
+                provider = matches[0]
+                provider_key = self._provider_key(provider)
+        if provider is None:
+            raise ValueError(f"Unknown provider: {provider_key}")
+        self._selected_provider_key = self._provider_key(provider)
+        return provider
 
     async def stream(
         self,
@@ -110,7 +142,7 @@ class ProviderRouter:
         errors: list[tuple[str, Exception]] = []
         tried_providers = set()
 
-        for provider in self._providers:
+        for provider in self._ordered_providers_for_stream():
             provider_key = self._provider_key(provider)
             if provider_key in tried_providers:
                 continue
@@ -155,11 +187,17 @@ class ProviderRouter:
         raise AllProvidersFailedError(errors)
 
     def _find_next_available(self, tried: set[str]) -> BaseProvider | None:
-        for p in self._providers:
+        for p in self._ordered_providers_for_stream():
             provider_key = self._provider_key(p)
             if provider_key not in tried and not self._breaker.is_open(provider_key):
                 return p
         return None
+
+    def _ordered_providers_for_stream(self) -> list[BaseProvider]:
+        selected = self.get_provider(self._selected_provider_key)
+        if not selected:
+            return list(self._providers)
+        return [selected] + [p for p in self._providers if p is not selected]
 
     def _provider_key(self, provider: BaseProvider) -> str:
         return self._provider_keys.get(id(provider), provider.name)

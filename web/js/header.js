@@ -6,6 +6,7 @@
 import { state, on } from './state.js';
 import { escapeHtml, STATE_MAP } from './utils.js';
 import { switchSession, deleteSession } from './session.js';
+import { send } from './connection.js';
 
 // ── DOM 元素 ──
 let sidebar;
@@ -15,7 +16,10 @@ let sessionListEl;
 let headerConnDot;
 let headerConnText;
 let headerModelName;
-let modelSelect;
+let modelPicker;
+let modelPickerButton;
+let modelPickerLabel;
+let modelPickerPopup;
 let statusIndicator;
 let fullscreenToggle;
 
@@ -27,13 +31,17 @@ export function initHeader() {
     headerConnDot = document.getElementById("headerConnDot");
     headerConnText = document.getElementById("headerConnText");
     headerModelName = document.getElementById("headerModelName");
-    modelSelect = document.getElementById("modelSelect");
+    modelPicker = document.getElementById("modelPicker");
+    modelPickerButton = document.getElementById("modelPickerButton");
+    modelPickerLabel = document.getElementById("modelPickerLabel");
+    modelPickerPopup = document.getElementById("modelPickerPopup");
     statusIndicator = document.getElementById("statusIndicator");
     fullscreenToggle = document.getElementById("fullscreenToggle");
 
     // Sidebar 初始化
     initSidebar();
     initFullscreenToggle();
+    initModelPicker();
 
     // 新建会话按钮
     const newChatHeaderBtn = document.getElementById("newChatHeaderBtn");
@@ -62,14 +70,23 @@ export function initHeader() {
     // 监听 WebSocket 打开/关闭事件
     on('ws:open', function () {
         updateHeaderConnStatus("connected", "已连接");
+        updateModelPickerDisabled();
     });
 
     on('ws:close', function () {
         updateHeaderConnStatus("disconnected", "未连接");
+        closeModelPicker();
+        updateModelPickerDisabled();
     });
 
     on('ws:error', function (data) {
         updateHeaderConnStatus("disconnected", data.message || "连接错误");
+        closeModelPicker();
+        updateModelPickerDisabled();
+    });
+
+    on('processing:changed', function () {
+        updateModelPickerDisabled();
     });
 }
 
@@ -154,11 +171,15 @@ function updateFullscreenButton() {
     fullscreenToggle.setAttribute("aria-label", isFullscreen ? "恢复窗口" : "全屏");
 }
 
-function updateModelDisplays(active) {
+function updateModelDisplays(modelState) {
+    const active = modelState.active || {};
+    const available = modelState.available || [];
     const modelId = active.model_id || "";
     const providerType = active.provider_type || "";
+    const providerName = active.provider_name || "";
     const label = modelId || "等待模型状态";
-    const title = providerType && modelId ? (providerType + " / " + modelId) : label;
+    const titleParts = [providerType, providerName, modelId].filter(Boolean);
+    const title = titleParts.length ? titleParts.join(" / ") : label;
 
     if (headerModelName) {
         headerModelName.textContent = modelId;
@@ -166,15 +187,140 @@ function updateModelDisplays(active) {
         headerModelName.classList.toggle("visible", !!modelId);
     }
 
-    if (modelSelect) {
-        modelSelect.innerHTML = "";
-        const option = document.createElement("option");
-        option.value = modelId;
-        option.textContent = label;
-        option.selected = true;
-        modelSelect.appendChild(option);
-        modelSelect.title = title;
+    if (modelPickerLabel) {
+        modelPickerLabel.textContent = label;
     }
+    if (modelPickerButton) {
+        modelPickerButton.title = title;
+        modelPickerButton.setAttribute("aria-label", "当前模型：" + label);
+    }
+    if (modelPicker) modelPicker.title = title;
+    renderModelPickerPopup(available, active);
+    updateModelPickerDisabled();
+}
+
+function initModelPicker() {
+    if (!modelPicker || !modelPickerButton || !modelPickerPopup) return;
+
+    modelPickerButton.addEventListener("click", function (event) {
+        event.stopPropagation();
+        if (isModelPickerDisabled()) return;
+        const isOpen = !modelPickerPopup.hidden;
+        if (isOpen) {
+            closeModelPicker();
+        } else {
+            openModelPicker();
+        }
+    });
+
+    document.addEventListener("click", function (event) {
+        if (modelPicker && !modelPicker.contains(event.target)) {
+            closeModelPicker();
+        }
+    });
+}
+
+function isModelPickerDisabled() {
+    return !state.isConnected || state.isProcessing || !(state.model.available || []).length;
+}
+
+function updateModelPickerDisabled() {
+    if (!modelPickerButton || !modelPicker) return;
+    const disabled = isModelPickerDisabled();
+    modelPickerButton.disabled = disabled;
+    modelPicker.classList.toggle("disabled", disabled);
+    if (disabled) closeModelPicker();
+}
+
+function openModelPicker() {
+    if (!modelPickerPopup) return;
+    renderModelPickerPopup(state.model.available || [], state.model.active || {});
+    modelPickerPopup.hidden = false;
+    if (modelPickerButton) {
+        modelPickerButton.setAttribute("aria-expanded", "true");
+    }
+}
+
+function closeModelPicker() {
+    if (!modelPickerPopup) return;
+    modelPickerPopup.hidden = true;
+    if (modelPickerButton) {
+        modelPickerButton.setAttribute("aria-expanded", "false");
+    }
+}
+
+function renderModelPickerPopup(available, active) {
+    if (!modelPickerPopup) return;
+    modelPickerPopup.innerHTML = "";
+
+    if (!available.length) {
+        const empty = document.createElement("div");
+        empty.className = "model-picker-empty";
+        empty.textContent = "暂无可选模型";
+        modelPickerPopup.appendChild(empty);
+        return;
+    }
+
+    available.forEach(function (model) {
+        const row = document.createElement("div");
+        const isActive = model.provider_key === active.provider_key;
+        row.className = "model-picker-item" + (isActive ? " active" : "");
+        row.setAttribute("role", "button");
+        row.tabIndex = 0;
+        row.title = [model.provider_name, model.model_id].filter(Boolean).join(" / ");
+
+        const text = document.createElement("div");
+        text.className = "model-picker-item-text";
+
+        const name = document.createElement("div");
+        name.className = "model-picker-item-name";
+        name.textContent = model.model_id || "未知模型";
+
+        const meta = document.createElement("div");
+        meta.className = "model-picker-item-meta";
+        meta.textContent = model.provider_name || model.provider_type || "";
+
+        text.appendChild(name);
+        text.appendChild(meta);
+
+        const thinking = document.createElement("button");
+        thinking.type = "button";
+        thinking.className = "model-thinking-switch" + (model.thinking_enabled ? " on" : "");
+        thinking.disabled = !model.thinking_supported || isModelPickerDisabled();
+        thinking.title = model.thinking_supported ? "切换 Thinking" : "该模型不支持 Thinking";
+        thinking.setAttribute("aria-label", "Thinking");
+        thinking.innerHTML = '<span class="model-thinking-label">Thinking</span><span class="model-thinking-track"><span class="model-thinking-thumb"></span></span>';
+
+        row.addEventListener("click", function () {
+            selectModel(model, model.thinking_enabled);
+        });
+        row.addEventListener("keydown", function (event) {
+            if (event.target !== row) return;
+            if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                selectModel(model, model.thinking_enabled);
+            }
+        });
+        thinking.addEventListener("click", function (event) {
+            event.stopPropagation();
+            if (!model.thinking_supported || isModelPickerDisabled()) return;
+            selectModel(model, !model.thinking_enabled);
+        });
+
+        row.appendChild(text);
+        row.appendChild(thinking);
+        modelPickerPopup.appendChild(row);
+    });
+}
+
+function selectModel(model, thinkingEnabled) {
+    if (!model || isModelPickerDisabled()) return;
+    closeModelPicker();
+    send({
+        type: "model_select",
+        provider_key: model.provider_key,
+        thinking_enabled: Boolean(thinkingEnabled),
+    });
 }
 
 function initSidebar() {
@@ -244,12 +390,14 @@ export function handleStateChange(agentState) {
         statusIndicator.className = "status-badge " + info.css;
         statusIndicator.textContent = info.text;
     }
+    updateModelPickerDisabled();
 }
 
 // ── 会话状态 ──
 
 export function handleConversationState(data) {
-    updateModelDisplays((data.model && data.model.active) || {});
+    state.model = data.model || { active: {}, available: [] };
+    updateModelDisplays(state.model);
     state.safetyPolicy = data.safety || {
         active_policy: "",
         available_policies: [],

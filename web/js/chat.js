@@ -146,6 +146,7 @@ export function sendMessage(text) {
     appendUserMessage(text);
 
     state.isProcessing = true;
+    emit('processing:changed', { isProcessing: true });
     setStatus("processing", "处理中...");
     showStopButton();
 
@@ -471,6 +472,7 @@ export function resetProcessingState() {
     _roundHasTools = false;
     resetToolState();
     state.isProcessing = false;
+    emit('processing:changed', { isProcessing: false });
     showSendButton();
 }
 

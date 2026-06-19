@@ -40,6 +40,13 @@ class SafetyPolicySetMessage(BaseModel):
     policy: str = Field(..., min_length=1, description="CLI 安全策略名称")
 
 
+class ModelSelectMessage(BaseModel):
+    """切换当前会话的模型和 Thinking 设置。"""
+    type: Literal["model_select"] = "model_select"
+    provider_key: str = Field(..., min_length=1, description="Provider 唯一键")
+    thinking_enabled: bool | None = Field(None, description="是否启用 Thinking")
+
+
 class SessionCreateMessage(BaseModel):
     """创建新会话。"""
     type: Literal["session_create"] = "session_create"
@@ -202,6 +209,7 @@ class ConversationStateMessage(ServerMessage):
     type: str = "conversation_state"
     user_id: str = ""
     username: str = ""
+    model: dict = {}
     active_model: dict = {}
     available_models: list[dict] = []
     token_usage: dict = {}
@@ -261,6 +269,7 @@ INCOMING_MESSAGE_TYPES: dict[str, type[BaseModel]] = {
     "cancel": CancelMessage,
     "hitl_response": HitlResponseMessage,
     "safety_policy_set": SafetyPolicySetMessage,
+    "model_select": ModelSelectMessage,
     "session_create": SessionCreateMessage,
     "session_switch": SessionSwitchMessage,
     "session_delete": SessionDeleteMessage,

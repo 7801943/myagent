@@ -14,8 +14,28 @@ logger = get_logger(__name__)
 class OpenAIProvider(BaseProvider):
     """基于 openai SDK 的流式 Provider。"""
 
-    def __init__(self, name: str, model: str, api_key: str, api_base: str | None = None):
-        super().__init__(name, model, api_key, api_base)
+    def __init__(
+        self,
+        name: str,
+        model: str,
+        api_key: str,
+        api_base: str | None = None,
+        *,
+        thinking_supported: bool = False,
+        thinking_enabled: bool = False,
+        thinking_enabled_extra_body: dict | None = None,
+        thinking_disabled_extra_body: dict | None = None,
+    ):
+        super().__init__(
+            name,
+            model,
+            api_key,
+            api_base,
+            thinking_supported=thinking_supported,
+            thinking_enabled=thinking_enabled,
+            thinking_enabled_extra_body=thinking_enabled_extra_body,
+            thinking_disabled_extra_body=thinking_disabled_extra_body,
+        )
         self.capabilities = ProviderCapabilities(supports_vision=True, supports_tool_calls=True)
         self._client = None
 
@@ -137,15 +157,7 @@ class OpenAIProvider(BaseProvider):
         """
         client = self._get_client()
         try:
-            create_kwargs: dict = {
-                "model": self.model,
-                "messages": messages,
-                "stream": True,
-                "stream_options": {"include_usage": True},  # ✅ 修复：请求返回 token 用量
-            }
-            if tools:
-                create_kwargs["tools"] = tools
-            create_kwargs.update(kwargs)
+            create_kwargs = self._build_create_kwargs(messages, tools, kwargs)
 
             stream = await client.chat.completions.create(**create_kwargs)
 
@@ -249,6 +261,34 @@ class OpenAIProvider(BaseProvider):
             if mapped is not e:
                 raise mapped from e
             raise
+
+    def _build_create_kwargs(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        kwargs: dict | None = None,
+    ) -> dict:
+        create_kwargs: dict = {
+            "model": self.model,
+            "messages": messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if tools:
+            create_kwargs["tools"] = tools
+        if kwargs:
+            create_kwargs.update(kwargs)
+        if self.thinking_supported:
+            thinking_body = (
+                self.thinking_enabled_extra_body
+                if self.thinking_enabled
+                else self.thinking_disabled_extra_body
+            )
+            if thinking_body:
+                extra_body = dict(create_kwargs.get("extra_body") or {})
+                extra_body.update(thinking_body)
+                create_kwargs["extra_body"] = extra_body
+        return create_kwargs
 
     @staticmethod
     def _map_error(e: Exception) -> Exception:
