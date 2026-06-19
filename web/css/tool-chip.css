@@ -53,6 +53,11 @@
     font-family: var(--font-sans);
 }
 
+/* 运行中：标题柔和闪动 */
+.tool-chip.running .tool-chip-name {
+    animation: toolNameFlash 1.1s ease-in-out infinite;
+}
+
 /* 参数摘要 — 同行灰色显示 */
 .tool-chip-summary {
     color: var(--text-tertiary);

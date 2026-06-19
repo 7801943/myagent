@@ -63,3 +63,16 @@
         background-position: 0 0;
     }
 }
+
+/* ── Tool chip 标题运行中柔和闪动 ── */
+@keyframes toolNameFlash {
+
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.45;
+    }
+}

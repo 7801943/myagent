@@ -347,6 +347,16 @@
                                         <polyline points="6 9 12 15 18 9" />
                                     </svg>
                                 </div>
+                                <div class="input-dropdown run-mode-display" id="runModePicker" title="当前运行模式">
+                                    <button id="runModeButton" class="run-mode-button" type="button" disabled>
+                                        <span id="runModeLabel">人工审批</span>
+                                    </button>
+                                    <div id="runModePopup" class="run-mode-popup" hidden></div>
+                                    <svg class="dropdown-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none"
+                                        stroke="currentColor" stroke-width="2.5">
+                                        <polyline points="6 9 12 15 18 9" />
+                                    </svg>
+                                </div>
                             </div>
                             <div class="input-card-right-toolbar">
                                 <button id="sendBtn" class="send-btn-circle" title="发送">
@@ -397,6 +407,28 @@
             <div class="modal-footer">
                 <button id="hitlReject" class="btn btn-danger">拒绝</button>
                 <button id="hitlApprove" class="btn btn-success">批准</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Run mode risk confirmation -->
+    <div id="runModeConfirmModal" class="modal-overlay" style="display: none;">
+        <div class="modal-card glass run-mode-confirm-card">
+            <div class="modal-header">
+                <span class="modal-icon">⚠️</span>
+                <h3>切换到全自动模式</h3>
+            </div>
+            <div class="modal-body">
+                <p class="run-mode-warning">
+                    全自动模式会跳过 CLI 人工审批。Agent 可能直接执行删除、写入、网络访问、安装依赖等高风险命令。
+                </p>
+                <p class="run-mode-warning">
+                    仅在你信任当前任务和工作区内容时启用。
+                </p>
+            </div>
+            <div class="modal-footer">
+                <button id="runModeCancel" class="btn btn-danger">取消</button>
+                <button id="runModeConfirm" class="btn btn-success">确认启用</button>
             </div>
         </div>
     </div>

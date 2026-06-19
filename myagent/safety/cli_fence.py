@@ -222,11 +222,12 @@ class CLIFence(BaseRule):
         commands: list[str] = []
         invocations: list[dict[str, Any]] = []
         expect_command = True
-        redirect_target = False
         wrapper_pending = False
         current_invocation: dict[str, Any] | None = None
 
-        for token in tokens:
+        index = 0
+        while index < len(tokens):
+            token = tokens[index]
             if token in cls._CONTROL_OPERATORS:
                 if token in {"|", "|&", "||", "&&", ";"}:
                     features.add("command_chain")
@@ -238,27 +239,45 @@ class CLIFence(BaseRule):
                     expect_command = True
                     wrapper_pending = False
                     current_invocation = None
+                index += 1
                 continue
 
-            if token in cls._REDIRECT_OPERATORS or (
-                token and set(token) <= {"<", ">"}
+            redirect_index = index
+            redirect_fd = ""
+            if (
+                token.isdigit()
+                and index + 1 < len(tokens)
+                and cls._is_redirect_operator(tokens[index + 1])
             ):
-                features.add("redirection")
-                redirect_target = True
-                continue
-            if redirect_target:
-                redirect_target = False
+                redirect_fd = token
+                redirect_index = index + 1
+
+            if cls._is_redirect_operator(tokens[redirect_index]):
+                redirect_operator = tokens[redirect_index]
+                target_index = redirect_index + 1
+                target = tokens[target_index] if target_index < len(tokens) else ""
+                if not cls._is_allowed_stderr_discard(
+                    redirect_fd,
+                    redirect_operator,
+                    target,
+                ):
+                    features.add("redirection")
+                index = target_index + 1 if target else redirect_index + 1
                 continue
 
             if not expect_command:
                 if current_invocation is not None:
                     current_invocation["args"].append(token)
+                index += 1
                 continue
             if token == "$":
+                index += 1
                 continue
             if cls._ASSIGNMENT_RE.match(token):
+                index += 1
                 continue
             if token.startswith("-") and wrapper_pending:
+                index += 1
                 continue
 
             command_name = Path(token).name
@@ -271,6 +290,7 @@ class CLIFence(BaseRule):
             else:
                 wrapper_pending = False
                 expect_command = False
+            index += 1
 
         return {
             "commands": commands,
@@ -278,6 +298,16 @@ class CLIFence(BaseRule):
             "features": features,
             "parse_error": "",
         }
+
+    @classmethod
+    def _is_redirect_operator(cls, token: str) -> bool:
+        return token in cls._REDIRECT_OPERATORS or (
+            token and set(token) <= {"<", ">"}
+        )
+
+    @staticmethod
+    def _is_allowed_stderr_discard(fd: str, operator: str, target: str) -> bool:
+        return fd == "2" and operator in {">", ">>"} and target == "/dev/null"
 
     @staticmethod
     def _compile_policies(

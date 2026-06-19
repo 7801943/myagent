@@ -63,6 +63,13 @@ async def test_full_access_allows_every_cli_command(command):
         "cat README.md; pwd",
         "(ls; pwd)",
         "FOO=bar rg TODO .",
+        'find /home/zhouxiang/工作文件/ -type f -name "*东余*" 2>/dev/null',
+        "find /home/zhouxiang/工作文件 -type d 2>/dev/null | head -50",
+        "find . -name '*.py' 2> /dev/null",
+        "find . -name '*.py' 2 > /dev/null",
+        "find . -name '*.py' 2>>/dev/null",
+        "find . -name '*.py' 2>> /dev/null",
+        "rg TODO . 2>/dev/null | head -50",
     ],
 )
 async def test_whitelist_allows_only_combinations_of_known_read_commands(command):
@@ -83,6 +90,9 @@ async def test_whitelist_allows_only_combinations_of_known_read_commands(command
         "tree -o tree.txt",
         "git diff --output=result.patch",
         "cat input.txt > output.txt",
+        'find . -name "*.py" > files.txt',
+        'find . -name "*.py" 1>/tmp/files.txt',
+        'find . -name "*.py" 2> errors.txt',
         "cat $(touch output.txt)",
         "ls &",
         "custom-tool --version",

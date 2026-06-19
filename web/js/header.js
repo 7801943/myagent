@@ -20,8 +20,30 @@ let modelPicker;
 let modelPickerButton;
 let modelPickerLabel;
 let modelPickerPopup;
+let runModePicker;
+let runModeButton;
+let runModeLabel;
+let runModePopup;
+let runModeConfirmModal;
+let runModeCancel;
+let runModeConfirm;
 let statusIndicator;
 let fullscreenToggle;
+
+const RUN_MODES = [
+    {
+        key: "manual",
+        policy: "whitelist",
+        label: "人工审批",
+        title: "人工审批：只读白名单命令直接执行，危险或未知命令需确认",
+    },
+    {
+        key: "auto",
+        policy: "full_access",
+        label: "全自动",
+        title: "全自动：跳过 CLI 人工审批",
+    },
+];
 
 export function initHeader() {
     sidebar = document.querySelector(".sidebar");
@@ -35,6 +57,13 @@ export function initHeader() {
     modelPickerButton = document.getElementById("modelPickerButton");
     modelPickerLabel = document.getElementById("modelPickerLabel");
     modelPickerPopup = document.getElementById("modelPickerPopup");
+    runModePicker = document.getElementById("runModePicker");
+    runModeButton = document.getElementById("runModeButton");
+    runModeLabel = document.getElementById("runModeLabel");
+    runModePopup = document.getElementById("runModePopup");
+    runModeConfirmModal = document.getElementById("runModeConfirmModal");
+    runModeCancel = document.getElementById("runModeCancel");
+    runModeConfirm = document.getElementById("runModeConfirm");
     statusIndicator = document.getElementById("statusIndicator");
     fullscreenToggle = document.getElementById("fullscreenToggle");
 
@@ -42,6 +71,7 @@ export function initHeader() {
     initSidebar();
     initFullscreenToggle();
     initModelPicker();
+    initRunModePicker();
 
     // 新建会话按钮
     const newChatHeaderBtn = document.getElementById("newChatHeaderBtn");
@@ -71,22 +101,28 @@ export function initHeader() {
     on('ws:open', function () {
         updateHeaderConnStatus("connected", "已连接");
         updateModelPickerDisabled();
+        updateRunModeDisabled();
     });
 
     on('ws:close', function () {
         updateHeaderConnStatus("disconnected", "未连接");
         closeModelPicker();
+        closeRunModePicker();
         updateModelPickerDisabled();
+        updateRunModeDisabled();
     });
 
     on('ws:error', function (data) {
         updateHeaderConnStatus("disconnected", data.message || "连接错误");
         closeModelPicker();
+        closeRunModePicker();
         updateModelPickerDisabled();
+        updateRunModeDisabled();
     });
 
     on('processing:changed', function () {
         updateModelPickerDisabled();
+        updateRunModeDisabled();
     });
 }
 
@@ -323,6 +359,169 @@ function selectModel(model, thinkingEnabled) {
     });
 }
 
+function initRunModePicker() {
+    if (!runModePicker || !runModeButton || !runModePopup) return;
+
+    runModeButton.addEventListener("click", function (event) {
+        event.stopPropagation();
+        if (isRunModeDisabled()) return;
+        const isOpen = !runModePopup.hidden;
+        if (isOpen) {
+            closeRunModePicker();
+        } else {
+            openRunModePicker();
+        }
+    });
+
+    document.addEventListener("click", function (event) {
+        if (runModePicker && !runModePicker.contains(event.target)) {
+            closeRunModePicker();
+        }
+    });
+
+    if (runModeCancel) {
+        runModeCancel.addEventListener("click", hideRunModeConfirm);
+    }
+    if (runModeConfirm) {
+        runModeConfirm.addEventListener("click", function () {
+            hideRunModeConfirm();
+            sendRunModePolicy("full_access");
+        });
+    }
+    if (runModeConfirmModal) {
+        runModeConfirmModal.addEventListener("click", function (event) {
+            if (event.target === runModeConfirmModal) {
+                hideRunModeConfirm();
+            }
+        });
+    }
+
+    updateRunModeDisplays(state.safetyPolicy);
+}
+
+function getRunModeByPolicy(policy) {
+    return RUN_MODES.find(function (mode) {
+        return mode.policy === policy;
+    }) || RUN_MODES[0];
+}
+
+function getPolicyAvailable(policy) {
+    const available = state.safetyPolicy.available_policies || [];
+    return !available.length || available.includes(policy);
+}
+
+function updateRunModeDisplays(safetyPolicy) {
+    const active = (safetyPolicy && safetyPolicy.active_policy) || "whitelist";
+    const mode = getRunModeByPolicy(active);
+    const title = mode.title;
+
+    if (runModeLabel) {
+        runModeLabel.textContent = mode.label;
+    }
+    if (runModeButton) {
+        runModeButton.title = title;
+        runModeButton.setAttribute("aria-label", "当前运行模式：" + mode.label);
+    }
+    if (runModePicker) {
+        runModePicker.title = title;
+        runModePicker.classList.toggle("auto", mode.key === "auto");
+    }
+
+    renderRunModePopup(active);
+    updateRunModeDisabled();
+}
+
+function isRunModeDisabled() {
+    return !state.isConnected || state.isProcessing || !getPolicyAvailable("whitelist") || !getPolicyAvailable("full_access");
+}
+
+function updateRunModeDisabled() {
+    if (!runModeButton || !runModePicker) return;
+    const disabled = isRunModeDisabled();
+    runModeButton.disabled = disabled;
+    runModePicker.classList.toggle("disabled", disabled);
+    if (disabled) closeRunModePicker();
+}
+
+function openRunModePicker() {
+    if (!runModePopup) return;
+    renderRunModePopup((state.safetyPolicy || {}).active_policy || "whitelist");
+    runModePopup.hidden = false;
+    if (runModeButton) {
+        runModeButton.setAttribute("aria-expanded", "true");
+    }
+}
+
+function closeRunModePicker() {
+    if (!runModePopup) return;
+    runModePopup.hidden = true;
+    if (runModeButton) {
+        runModeButton.setAttribute("aria-expanded", "false");
+    }
+}
+
+function renderRunModePopup(activePolicy) {
+    if (!runModePopup) return;
+    runModePopup.innerHTML = "";
+
+    RUN_MODES.forEach(function (mode) {
+        const item = document.createElement("button");
+        const isActive = mode.policy === activePolicy;
+        const available = getPolicyAvailable(mode.policy);
+        item.type = "button";
+        item.className = "run-mode-item" + (isActive ? " active" : "");
+        item.disabled = !available || isRunModeDisabled();
+        item.title = mode.title;
+        item.setAttribute("aria-label", mode.label);
+
+        const name = document.createElement("span");
+        name.className = "run-mode-item-name";
+        name.textContent = mode.label;
+
+        const meta = document.createElement("span");
+        meta.className = "run-mode-item-meta";
+        meta.textContent = mode.key === "auto" ? "跳过审批" : "按需确认";
+
+        item.appendChild(name);
+        item.appendChild(meta);
+        item.addEventListener("click", function (event) {
+            event.stopPropagation();
+            selectRunMode(mode);
+        });
+        runModePopup.appendChild(item);
+    });
+}
+
+function selectRunMode(mode) {
+    if (!mode || isRunModeDisabled() || !getPolicyAvailable(mode.policy)) return;
+    const currentPolicy = (state.safetyPolicy || {}).active_policy || "whitelist";
+    closeRunModePicker();
+    if (mode.policy === currentPolicy) return;
+    if (mode.policy === "full_access") {
+        showRunModeConfirm();
+        return;
+    }
+    sendRunModePolicy(mode.policy);
+}
+
+function sendRunModePolicy(policy) {
+    if (!state.isConnected || state.isProcessing) return;
+    send({
+        type: "safety_policy_set",
+        policy: policy,
+    });
+}
+
+function showRunModeConfirm() {
+    if (!runModeConfirmModal) return;
+    runModeConfirmModal.style.display = "flex";
+}
+
+function hideRunModeConfirm() {
+    if (!runModeConfirmModal) return;
+    runModeConfirmModal.style.display = "none";
+}
+
 function initSidebar() {
     if (!sidebar) return;
     const saved = localStorage.getItem("myagent-sidebar");
@@ -391,6 +590,7 @@ export function handleStateChange(agentState) {
         statusIndicator.textContent = info.text;
     }
     updateModelPickerDisabled();
+    updateRunModeDisabled();
 }
 
 // ── 会话状态 ──
@@ -403,6 +603,7 @@ export function handleConversationState(data) {
         available_policies: [],
         mode: "",
     };
+    updateRunModeDisplays(state.safetyPolicy);
 
     // 更新上下文进度条（通过 context-bar.js）
     if (data.context && data.context.token_usage) {

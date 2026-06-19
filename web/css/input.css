@@ -331,6 +331,131 @@
     background: var(--accent);
 }
 
+.run-mode-display {
+    min-width: 88px;
+    max-width: 132px;
+    padding: 0 24px 0 10px;
+    overflow: visible;
+}
+
+.run-mode-display.auto {
+    border-color: var(--danger);
+}
+
+.run-mode-display.disabled {
+    opacity: 0.78;
+}
+
+.run-mode-button {
+    min-width: 0;
+    max-width: 96px;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 700;
+    padding: 4px 0;
+    outline: none;
+    cursor: pointer;
+    font-family: var(--font-sans);
+}
+
+.run-mode-display.auto .run-mode-button {
+    color: var(--danger);
+}
+
+.run-mode-button:disabled {
+    cursor: default;
+}
+
+#runModeLabel {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.run-mode-popup {
+    position: absolute;
+    left: 0;
+    bottom: calc(100% + 8px);
+    z-index: 120;
+    width: 184px;
+    padding: 6px;
+    border: 1px solid var(--bg-glass-border);
+    border-radius: 10px;
+    background: var(--bg-primary);
+    box-shadow: var(--shadow-lg);
+}
+
+.run-mode-popup[hidden] {
+    display: none;
+}
+
+.run-mode-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    width: 100%;
+    min-width: 0;
+    padding: 8px 9px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-family: var(--font-sans);
+    text-align: left;
+    transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.run-mode-item:hover,
+.run-mode-item:focus {
+    background: var(--bg-glass-hover);
+    color: var(--text-primary);
+    outline: none;
+}
+
+.run-mode-item.active {
+    background: var(--accent-soft);
+    color: var(--accent);
+}
+
+.run-mode-item:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+}
+
+.run-mode-item-name,
+.run-mode-item-meta {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.run-mode-item-name {
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.run-mode-item-meta {
+    flex-shrink: 0;
+    font-size: 10px;
+    color: var(--text-tertiary);
+}
+
+.run-mode-confirm-card {
+    max-width: 520px;
+}
+
+.run-mode-warning {
+    color: var(--text-secondary);
+    font-size: 14px;
+    line-height: 1.7;
+    margin: 0 0 10px;
+}
+
 .model-picker-empty {
     padding: 12px 10px;
     color: var(--text-tertiary);

@@ -59,7 +59,7 @@ function createChipEl(toolName, args, callId, resultText) {
     const argsStr = args ? JSON.stringify(args, null, 2) : "{}";
 
     const chipEl = document.createElement("div");
-    chipEl.className = "tool-chip";
+    chipEl.className = "tool-chip running";
     chipEl.dataset.callId = callId;
     chipEl.dataset.toolIndex = toolCount;
 
@@ -112,6 +112,8 @@ export function appendToolEnd(toolName, result, latencyMs, callId) {
     const chipEl = currentToolCallMap[callId];
     if (!chipEl) return;
 
+    chipEl.classList.remove("running");
+
     const dot = chipEl.querySelector(".tool-chip-dot");
     if (dot) dot.classList.remove("running");
 
@@ -134,6 +136,8 @@ export function appendToolEnd(toolName, result, latencyMs, callId) {
 export function appendToolError(toolName, error, callId) {
     const chipEl = currentToolCallMap[callId];
     if (!chipEl) return;
+
+    chipEl.classList.remove("running");
 
     const dot = chipEl.querySelector(".tool-chip-dot");
     if (dot) {
@@ -168,6 +172,7 @@ export function appendSafetyBlocked(assistantEl, rule, reason, action, callId, t
             el.innerHTML = html;
             inner.appendChild(el);
         }
+        chipEl.classList.remove("running");
         chipEl.classList.add("expanded");
         const dot = chipEl.querySelector(".tool-chip-dot");
         if (dot) {
@@ -209,6 +214,9 @@ export function showHitlApproval(assistantEl, toolName, reason, args, callId, ti
     }
 
     if (chipEl) {
+        // 等待审批 ≠ 执行中：停止标题闪动
+        chipEl.classList.remove("running");
+
         // 更新已有 chip 的 HITL 状态
         const statusEl = chipEl.querySelector(".tool-chip-status");
         if (statusEl) {
