@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from myagent.core.workspace import WorkspaceManager, WorkspaceState
     from myagent.context.state import StateStore
     from myagent.prompt.renderer import PromptRenderer
+    from myagent.prompt.skills import SkillRegistry
 
 logger = get_logger(__name__)
 
@@ -52,6 +53,7 @@ class Session:
         workspace_root: str | None = None,
         hitl_enabled: bool = True,
         approval_timeout: float = 300.0,
+        skill_registry: "SkillRegistry | None" = None,
         name: str | None = "新会话",
     ):
         self.id: str = session_id or uuid4().hex[:16]
@@ -103,6 +105,7 @@ class Session:
 
         # PromptRenderer（由 SessionManager 注入）
         self._prompt_renderer: "PromptRenderer | None" = None
+        self._skill_registry = skill_registry
 
         # WorkspaceManager
         self.workspace: "WorkspaceManager | None" = None

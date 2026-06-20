@@ -48,3 +48,7 @@ build/
 旧方案/
 历史方案/
 *.md
+!prompts/
+!prompts/skills/
+!prompts/skills/**/
+!prompts/skills/**/skill.md

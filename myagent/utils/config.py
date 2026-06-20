@@ -118,6 +118,11 @@ class ToolsConfig(BaseModel):
     default_timeout: float = 30.0
     batch_timeout: float = 60.0
 
+class SkillConfig(BaseModel):
+    """Skill 系统配置。"""
+    enabled: bool = True
+    active: list[str] = Field(default_factory=list)
+
 class AgentConfig(BaseSettings):
     """
     Agent 全局配置，支持 YAML 文件加载和环境变量覆盖。
@@ -159,5 +164,8 @@ class AgentConfig(BaseSettings):
 
     # ── 工具执行 ──
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+
+    # ── Skills 系统 ──
+    skills: SkillConfig = Field(default_factory=SkillConfig)
 
     model_config = {"env_prefix": "MYAGENT_", "extra": "ignore"}

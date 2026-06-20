@@ -31,6 +31,7 @@ from myagent.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from myagent.context.state import StateStore
+    from myagent.prompt.skills import SkillRegistry
 
 logger = get_logger(__name__)
 
@@ -221,17 +222,42 @@ class SessionManager:
             sensitive_fields=secrets_cfg.sensitive_fields or None,
         )
 
-    def _build_tool_manager(self) -> ToolManager:
+    def _resolve_skill_username(self, user: UserContext) -> str:
+        raw = (user.username or user.user_id or "default").strip()
+        safe = raw.replace("/", "_").replace("\\", "_")
+        return safe if safe and safe not in {".", ".."} else "default"
+
+    def _build_skill_registry(self, user: UserContext) -> "SkillRegistry":
+        """根据当前用户目录构建 SkillRegistry。"""
+        from myagent.prompt.skills import SkillRegistry
+
+        username = self._resolve_skill_username(user)
+        registry = SkillRegistry(username=username)
+        skill_cfg = self._config.skills
+        if not skill_cfg.enabled:
+            logger.info("Skill system disabled")
+            return registry
+
+        skill_root = self._config_dir / "prompts" / "skills" / username
+        registry.load_from_user_dir(skill_root, active_names=set(skill_cfg.active))
+        return registry
+
+    def _build_tool_manager(self, skill_registry: "SkillRegistry | None" = None) -> ToolManager:
         hr_cfg = self._config.hot_reload
         tools_dir = (hr_cfg.watch_dir if hr_cfg and hr_cfg.enabled else "myagent/tools/tools_store")
         runner_cfg = self._config.sandbox.model_dump()
         # [RISK-FIX] builtin tools 已在 ToolManager.__init__ 中自动注册
-        manager = ToolManager(tools_dir=tools_dir, runner_config=runner_cfg)
+        manager = ToolManager(
+            tools_dir=tools_dir,
+            runner_config=runner_cfg,
+            skill_registry=skill_registry,
+        )
         return manager
 
     def _create_harness(
         self,
         no_safety: bool = False,
+        skill_registry: "SkillRegistry | None" = None,
     ) -> AgentHarness:
         """
         创建独立的 per-session AgentHarness 实例。
@@ -240,7 +266,7 @@ class SessionManager:
         router = self._build_router()
         safety_parts = self._build_safety_components(no_safety=no_safety)
         secret_manager = self._build_secret_manager()
-        tool_manager = self._build_tool_manager()
+        tool_manager = self._build_tool_manager(skill_registry=skill_registry)
         events = EventBus()
 
         from myagent.core.llm import LLMClient
@@ -274,7 +300,11 @@ class SessionManager:
         no_safety: bool = False,
         workspace_root: str | None = None,
     ) -> Session:
-        harness = self._create_harness(no_safety=no_safety)
+        skill_registry = self._build_skill_registry(user)
+        harness = self._create_harness(
+            no_safety=no_safety,
+            skill_registry=skill_registry,
+        )
         effective_prompt = system_prompt or self._system_prompt
 
         if not workspace_root:
@@ -299,6 +329,7 @@ class SessionManager:
             workspace_root=workspace_root,
             hitl_enabled=self._config.hitl.enabled,
             approval_timeout=self._config.hitl.approval_timeout,
+            skill_registry=skill_registry,
         )
         self._sessions[session.id] = session
 
@@ -344,7 +375,8 @@ class SessionManager:
         if not self._state_store:
             raise RuntimeError("No StateStore configured")
 
-        harness = self._create_harness()
+        skill_registry = self._build_skill_registry(user)
+        harness = self._create_harness(skill_registry=skill_registry)
 
         agent_run_state, metadata_dict = await self._state_store.load_state(session_id)
 
@@ -363,6 +395,7 @@ class SessionManager:
             tool_result_max_chars=effective_max_chars,
             hitl_enabled=self._config.hitl.enabled,
             approval_timeout=self._config.hitl.approval_timeout,
+            skill_registry=skill_registry,
         )
 
         if approval_handler:

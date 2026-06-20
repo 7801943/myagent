@@ -80,5 +80,29 @@ class PromptTemplate(BaseModel):
                         "{% if client_state.tools %}前端工具选择状态: {{ client_state.tools }}{% endif %}"
                     ),
                 ),
+                Section(
+                    name="skills",
+                    priority=SectionPriority.MEDIUM,
+                    enabled_when="{{ available_skills | length > 0 or active_skills | length > 0 }}",
+                    template=(
+                        "<skills>\n"
+                        "{% if available_skills %}\n"
+                        "你可以使用以下专项能力（Skill）处理特定任务。\n"
+                        "当用户请求匹配某个 Skill 时，请调用 use_skill 工具加载详细指令。\n"
+                        "可用 Skill 目录:\n"
+                        "{% for skill in available_skills %}\n"
+                        "- {{ skill.name }}: {{ skill.description }}\n"
+                        "{% endfor %}\n"
+                        "{% endif %}\n"
+                        "{% if active_skills %}\n"
+                        "已激活的 Skill 指令:\n"
+                        "{% for skill in active_skills %}\n"
+                        "=== {{ skill.name }} ===\n"
+                        "{{ skill.instructions }}\n"
+                        "{% endfor %}\n"
+                        "{% endif %}\n"
+                        "</skills>"
+                    ),
+                ),
             ],
         )

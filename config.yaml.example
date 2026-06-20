@@ -67,6 +67,14 @@ agent:
     default_timeout: 30.0
     batch_timeout: 60.0                            # 工具批量执行超时（秒）
 
+  # ── Skills 系统 ──
+  skills:
+    enabled: true
+    # 启用的 skill 名称列表；留空则启用 prompts/skills/<用户名>/ 下的所有 skill
+    active: []
+      # - "office-automation"
+      # - "web-search"
+
   # ── 审计日志 ──
   audit:
     enabled: true

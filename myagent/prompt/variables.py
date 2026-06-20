@@ -87,7 +87,8 @@ class PromptVariables:
     safety_policy: str = ""
 
     # ── Skills ──
-    skills: list[dict] = field(default_factory=list)
+    available_skills: list[dict] = field(default_factory=list)
+    active_skills: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         """转换为 Jinja2 渲染所需的 dict。"""
@@ -192,6 +193,13 @@ class VariableCollector:
             "remaining": tu.remaining,
         }
 
+        # ── Skills ──
+        available_skills: list[dict] = []
+        active_skills: list[dict] = []
+        registry = getattr(session, "_skill_registry", None)
+        if registry and registry.registered_names:
+            available_skills = registry.list_available()
+
         return PromptVariables(
             user_info=user_info,
             current_datetime=current_datetime,
@@ -205,5 +213,6 @@ class VariableCollector:
             token_usage=token_usage,
             platform_info=_get_platform_info(),
             safety_policy=_get_safety_summary(session),
-            skills=[],  # 预留
+            available_skills=available_skills,
+            active_skills=active_skills,
         )

@@ -106,12 +106,17 @@ class ToolManager:
         await manager.stop()
     """
 
-    def __init__(self, tools_dir: str = "myagent/tools/tools_store",
-                 runner_config: dict | None = None):
+    def __init__(
+        self,
+        tools_dir: str = "myagent/tools/tools_store",
+        runner_config: dict | None = None,
+        skill_registry=None,
+    ):
         self._tools_dir = Path(tools_dir)
         self._tools: dict[str, _ToolRecord] = {}
         self._mcp_clients: dict[str, MCPClient] = {}
         self._runner_config = runner_config or {}
+        self._skill_registry = skill_registry
         self._proxy: JsonRpcProxy | None = None
 
         self._watch_task: asyncio.Task | None = None
@@ -237,6 +242,8 @@ class ToolManager:
         try:
             if record.source == "mcp" and record.mcp_client:
                 result = await self._execute_mcp(record, args)
+            elif record.name == "use_skill":
+                result = await self._execute_use_skill(args)
             elif self._proxy is None:
                 return ToolResult(
                     content="ToolManager not started: proxy unavailable",
@@ -309,6 +316,38 @@ class ToolManager:
             content=result_dict["content"],
             is_error=result_dict.get("is_error", False),
             metadata=result_dict.get("metadata", {}),
+        )
+
+    async def _execute_use_skill(self, args: dict) -> ToolResult:
+        """Inline use_skill execution in the main process."""
+        if not self._skill_registry:
+            return ToolResult(content="Skill 系统未启用", is_error=True)
+
+        skill_name = str(args.get("skill_name", "")).strip()
+        if not skill_name:
+            return ToolResult(content="缺少参数: skill_name", is_error=True)
+
+        skill = self._skill_registry.get(skill_name)
+        if not skill:
+            available = ", ".join(self._skill_registry.registered_names) or "(无)"
+            return ToolResult(
+                content=f"Skill '{skill_name}' 不存在。可用: {available}",
+                is_error=True,
+            )
+
+        instructions = skill.get_instructions()
+        if not instructions.strip():
+            instructions = "(该 Skill 未提供详细指令)"
+        root_dir = getattr(skill, "root_dir", "")
+        root_text = f"Skill 目录: {root_dir}\n\n" if root_dir else ""
+
+        return ToolResult(
+            content=f"已加载 Skill: {skill_name}\n{root_text}{instructions}",
+            is_error=False,
+            metadata={
+                "skill_name": skill_name,
+                "skill_dir": str(root_dir) if root_dir else "",
+            },
         )
 
     async def execute_batch(self,
@@ -504,6 +543,27 @@ class ToolManager:
         )
         self._tools["cli_execute"] = cli_record
 
+        if self._skill_registry and self._skill_registry.registered_names:
+            use_skill_record = _ToolRecord(
+                name="use_skill",
+                description=(
+                    "加载指定 Skill 的详细使用指令。当用户请求匹配某个 Skill 时调用。"
+                ),
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "skill_name": {
+                            "type": "string",
+                            "description": "Skill 名称（从系统提示词的可用 Skill 目录中获取）",
+                        },
+                    },
+                    "required": ["skill_name"],
+                },
+                meta=ToolMeta(category="skill", permission="standard", timeout=5.0),
+                source="builtin",
+            )
+            self._tools["use_skill"] = use_skill_record
+
         from myagent.tools.builtin.file_diff import file_diff
         from myagent.tools.builtin.file_edit import file_edit, file_edit_table
         from myagent.tools.builtin.file_read import file_read
@@ -519,8 +579,8 @@ class ToolManager:
         self._register_file_tool(str(builtin_dir / "file_diff.py"), file_diff)
 
         logger.info(
-            "Registered builtin tools: cli_execute, file_read, file_query, file_write, "
-            "file_edit, file_edit_table, file_diff")
+            "Registered builtin tools: cli_execute, use_skill(if enabled), file_read, file_query, "
+            "file_write, file_edit, file_edit_table, file_diff")
 
     # ── MCP ──
 

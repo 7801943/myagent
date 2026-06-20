@@ -1,0 +1,65 @@
+---
+name: office-automation
+description: 处理 Word、Excel、CSV 等办公文档的读取、编辑、格式化、抽取和生成
+allowed-tools:
+  - file_read
+  - file_query
+  - file_edit
+  - file_edit_table
+  - cli_execute
+---
+
+# Office 文档自动化指南
+
+## 适用场景
+
+- 读取、创建或编辑 Word 文档（.docx / .doc）
+- 读取、创建或编辑 Excel 工作簿（.xlsx / .xls）
+- 处理 CSV、表格抽取、报表生成、模板填充和格式化
+
+## 工具优先级
+
+- 读取文件内容时，优先使用 file_read 或 file_query。
+- 对已有 DOCX/XLSX 做精确修改时，优先使用 file_edit 或 file_edit_table。
+- 需要生成复杂文档、批量处理或格式控制时，再使用 cli_execute 执行 Python 脚本。
+
+## Word 操作建议
+
+- 使用 python-docx 创建或编辑 .docx。
+- 保留原文件时先写入新文件，再向用户说明输出路径。
+- 修改已有内容前先读取文件，确认目标文本、表格位置和格式需求。
+
+示例：
+
+```python
+from docx import Document
+
+doc = Document()
+doc.add_heading("标题", level=1)
+doc.add_paragraph("正文内容")
+doc.save("output.docx")
+```
+
+## Excel 操作建议
+
+- 使用 openpyxl 处理 .xlsx，使用 csv 标准库处理 .csv。
+- 修改单元格前先确认 sheet 名称、表头和数据范围。
+- 对含公式或格式的工作簿，尽量只改目标单元格，避免重写整表。
+
+示例：
+
+```python
+import openpyxl
+
+wb = openpyxl.load_workbook("input.xlsx")
+ws = wb.active
+for row in ws.iter_rows(values_only=True):
+    print(row)
+wb.save("output.xlsx")
+```
+
+## 输出习惯
+
+- 明确说明读取或生成的文件路径。
+- 对表格数据给出简洁摘要，必要时列出关键行列。
+- 如果用户要求批注、标色、替换文本或编辑表格，优先使用已有文件工具完成。
