@@ -4,10 +4,8 @@
 .chat-container {
     flex: 1;
     overflow-y: auto;
-    padding: 20px 24px 40px;
+    padding: 20px 24px 40px 29px; /* 左侧29px补偿右侧5px滚动条，实现绝对居中 */
     scroll-behavior: smooth;
-    /* 滚动条占位双侧对称预留：避免右侧滚动条把居中内容挤偏，导致左右留白不对称 */
-    scrollbar-gutter: stable both-edges;
 }
 
 .message-list {
@@ -82,6 +80,7 @@
     display: flex;
     gap: 12px;
     animation: fadeInUp 0.3s ease;
+    width: 100%;
     max-width: 100%;
 }
 
