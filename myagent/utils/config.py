@@ -122,6 +122,7 @@ class SkillConfig(BaseModel):
     """Skill 系统配置。"""
     enabled: bool = True
     active: list[str] = Field(default_factory=list)
+    common_dir: str = "prompts/skills/common"
 
 class AgentConfig(BaseSettings):
     """

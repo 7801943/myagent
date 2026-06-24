@@ -165,6 +165,40 @@ class SkillRegistry:
         if missing:
             logger.warning("Configured skills not found for %s: %s", self.username, sorted(missing))
 
+    def load_from_common_dir(
+        self,
+        common_dir: str | Path,
+        active_names: set[str] | list[str] | None = None,
+        visible_names: set[str] | list[str] | None = None,
+    ) -> None:
+        """Load shared Skills and apply per-user visibility filtering."""
+        root = Path(common_dir)
+        if not root.exists():
+            logger.info("Common Skill directory not found: %s", root)
+            return
+        if not root.is_dir():
+            logger.warning("Common Skill root is not a directory: %s", root)
+            return
+
+        active = set(active_names or [])
+        visible = set(visible_names or [])
+        for skill_dir in sorted(item for item in root.iterdir() if item.is_dir()):
+            if active and skill_dir.name not in active:
+                continue
+            skill = load_skill_from_dir(skill_dir, self.username)
+            if skill is None:
+                continue
+            if active and skill.name not in active:
+                continue
+            if visible and skill.name not in visible:
+                continue
+            self.register(skill)
+            logger.info("Skill registered: %s (%s)", skill.name, skill.skill_file)
+
+        missing_active = active - set(self._skills.keys())
+        if missing_active:
+            logger.warning("Configured common skills not found for %s: %s", self.username, sorted(missing_active))
+
     async def activate(self, variables: dict) -> list[SkillContext]:
         """No declarative activation by default for file-backed Skills."""
         return []

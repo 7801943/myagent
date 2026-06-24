@@ -24,6 +24,8 @@ export const state = {
     isAuthenticated: false,
     authToken: '',
     authUsername: '',
+    authGroup: 'user',
+    authUser: null,
 };
 
 // ── 常量 ──

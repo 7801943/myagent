@@ -32,6 +32,7 @@ class LoginResponse(BaseModel):
     ok: bool
     token: str | None = None
     username: str | None = None
+    group: str | None = None
     error: str | None = None
 
 
@@ -43,7 +44,12 @@ class LogoutResponse(BaseModel):
 class UserInfoResponse(BaseModel):
     """用户信息响应。"""
     username: str
+    group: str = "user"
+    disabled: bool = False
     active_ips: list[str]
+    visible_tools: list[str] = []
+    visible_skills: list[str] = []
+    workspace: dict = {}
 
 
 # ── 路由 ──
@@ -67,6 +73,7 @@ async def login(req: LoginRequest, request: Request):
         ok=True,
         token=token_info.token,
         username=token_info.username,
+        group=token_info.group,
     )
 
 

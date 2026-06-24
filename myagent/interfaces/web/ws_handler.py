@@ -47,8 +47,6 @@ from fastapi import WebSocket, WebSocketDisconnect
 from myagent.core.session import Session, SessionManager
 from myagent.core.session.client_bridge import ClientHandle
 from myagent.core.models import UserContext
-from myagent.context.state import StateStore
-from myagent.interfaces.web.dependencies import get_auth_service
 from myagent.interfaces.web.ws_models import INCOMING_MESSAGE_TYPES
 from myagent.utils.logging import get_logger
 
@@ -75,11 +73,9 @@ class WebSocketHandler:
         self,
         websocket: WebSocket,
         session_manager: SessionManager,
-        state_store: StateStore,
     ):
         self._ws = websocket
         self._session_manager = session_manager
-        self._state_store = state_store
         # 当前活跃的 Session（可能与其他 WS 连接共享）
         self._session: Session | None = None
         self._session_id: str = ""
@@ -171,15 +167,8 @@ class WebSocketHandler:
             self._client_handle.detach()
             self._client_handle = None
 
-        # 注销该连接的 token，清理 IP 绑定（如果没有其他 token 使用同一 IP）
-        token_info = getattr(self._ws.state, "user", None)
-        if token_info and hasattr(token_info, "token"):
-            try:
-                auth_service = get_auth_service()
-                await auth_service.logout(token_info.token)
-                logger.info(f"WebSocket disconnect: cleaned up token for user '{token_info.username}'")
-            except Exception as e:
-                logger.warning(f"Failed to cleanup token on WebSocket disconnect: {e}")
+        # WebSocket 断开只移除本连接，不主动登出 HTTP token。
+        # token 生命周期由 /api/auth/logout 和 TTL 管理，避免刷新页面或网络抖动导致登录态丢失。
 
     # ═══════════════════════════════════════════════════════
     #  消息路由
@@ -334,11 +323,12 @@ class WebSocketHandler:
 
     async def _handle_session_list(self) -> None:
         """处理会话列表请求。"""
-        sessions = await self._session_manager.list_sessions()
+        user = self._authenticate_user()
+        sessions = await self._session_manager.list_sessions(user.username or user.user_id)
 
         for s in sessions:
             try:
-                messages = await self._session_manager.get_session_messages(s["session_id"])
+                messages = await self._session_manager.get_session_messages(s["session_id"], user=user)
                 first_user = next((m for m in messages if m.role == "user"), None)
                 content = ""
                 if first_user and hasattr(first_user, 'content') and first_user.content:
@@ -438,7 +428,8 @@ class WebSocketHandler:
             await self._send_json({"type": "error", "message": "缺少 session_id"})
             return
 
-        await self._session_manager.delete_session(target_id)
+        user = self._authenticate_user()
+        await self._session_manager.delete_session(target_id, user=user)
 
         await self._send_json({"type": "session_deleted", "session_id": target_id})
 
@@ -464,7 +455,16 @@ class WebSocketHandler:
         """
         token_info = getattr(self._ws.state, "user", None)
         if token_info:
-            return UserContext(user_id=token_info.username, username=token_info.username)
+            return UserContext(
+                user_id=token_info.username,
+                username=token_info.username,
+                preferences={
+                    "group": getattr(token_info, "group", "user"),
+                    "visible_tools": getattr(token_info, "visible_tools", ["*"]),
+                    "visible_skills": getattr(token_info, "visible_skills", ["*"]),
+                    "workspace": getattr(token_info, "workspace", {}),
+                },
+            )
         # 兜底：不应该走到这里（app.py 已拦截无 token 连接）
         return UserContext(user_id="ws_default", username="WebSocket User")
 

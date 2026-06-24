@@ -51,6 +51,7 @@ class Session:
         context_window_size: int = 200000,
         tool_result_max_chars: int = 200000,
         workspace_root: str | None = None,
+        workspace_resolver=None,
         hitl_enabled: bool = True,
         approval_timeout: float = 300.0,
         skill_registry: "SkillRegistry | None" = None,
@@ -109,9 +110,13 @@ class Session:
 
         # WorkspaceManager
         self.workspace: "WorkspaceManager | None" = None
-        if workspace_root:
+        self.workspace_resolver = workspace_resolver
+        if workspace_root or workspace_resolver:
             from myagent.core.workspace import WorkspaceManager
-            self.workspace = WorkspaceManager(workspace_root)
+            self.workspace = WorkspaceManager(
+                workspace_root or getattr(workspace_resolver, "virtual_root", ""),
+                resolver=workspace_resolver,
+            )
             self.workspace.set_on_change(self._on_workspace_change)
 
         if system_prompt:
@@ -222,14 +227,14 @@ class Session:
 
         # 采集工具列表
         tools: list[dict] = []
-        tm = self._harness.tool_manager
-        if tm:
-            for record in tm.list_schemas() or []:
+        ti = self._harness.tool_interface
+        if ti:
+            for record in ti.list_schemas() or []:
                 tools.append({
-                    "name": record.name,
-                    "description": record.description,
-                    "parameters_schema": getattr(record, "parameters_schema", {}),
-                    "source": record.source,
+                    "name": record.get("name", ""),
+                    "description": record.get("description", ""),
+                    "parameters_schema": record.get("parameters_schema", {}),
+                    "source": record.get("source", ""),
                 })
         self.data.tool.tools = tools
 
@@ -341,18 +346,19 @@ class Session:
         from myagent.prompt.variables import _summarize_parameters
 
         tools: list[dict] = []
-        tm = self._harness.tool_manager
-        if tm:
-            for record in tm.list_schemas() or []:
+        ti = self._harness.tool_interface
+        if ti:
+            for record in ti.list_schemas() or []:
+                params_schema = record.get("parameters_schema", {})
                 tools.append({
-                    "name": record.name,
-                    "description": record.description,
-                    "parameters_schema": getattr(record, "parameters_schema", {}),
+                    "name": record.get("name", ""),
+                    "description": record.get("description", ""),
+                    "parameters_schema": params_schema,
                     "parameters_summary": _summarize_parameters(
-                        getattr(record, "parameters_schema", {})
+                        params_schema
                     ),
-                    "source": record.source,
-                    "category": getattr(record.meta, "category", "") if hasattr(record, "meta") and record.meta else "",
+                    "source": record.get("source", ""),
+                    "category": record.get("category", ""),
                 })
         self.data.tool.tools = tools
 

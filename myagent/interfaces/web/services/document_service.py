@@ -96,20 +96,35 @@ class DocumentService:
         mode: str = "edit",
         workspace_root: str | None = None,
         session_id: str = "",
+        group: str = "user",
+        resolver=None,
     ) -> dict[str, Any]:
         """构造前端 `new DocsAPI.DocEditor(...)` 所需配置。"""
         if not self.enabled:
             raise HTTPException(status_code=404, detail="文档预览/编辑未启用")
 
-        path = self.resolve_workspace_path(relative_path, workspace_root)
+        path, scope = self.resolve_document_path(relative_path, workspace_root, resolver, operation="read", actor="user")
         ext = path.suffix.lower()
         doc_type = self._document_type(ext)
         if doc_type == "pdf":
             mode = "view"
         elif mode not in {"edit", "view"}:
             mode = "edit"
+        if mode == "edit" and resolver is not None:
+            try:
+                resolved_for_write = resolver.resolve(relative_path, operation="write", actor="onlyoffice", must_exist=True)
+                scope = resolved_for_write.area
+            except Exception:
+                mode = "view"
 
-        token = self._create_access_token(relative_path, username, mode, session_id=session_id)
+        token = self._create_access_token(
+            relative_path,
+            username,
+            mode,
+            session_id=session_id,
+            group=group,
+            scope=scope,
+        )
         file_url = self._internal_api_url("/api/documents/download", relative_path, token)
         callback_url = self._internal_api_url("/api/documents/callback", relative_path, token)
         document_key = self._document_key(path, relative_path)
@@ -171,10 +186,11 @@ class DocumentService:
         relative_path: str,
         token: str,
         workspace_root: str | None = None,
+        resolver=None,
     ) -> FileResponse:
         """供 OnlyOffice DocumentServer 通过 document.url 下载原文件。"""
         token_payload = self.verify_access_token(token, relative_path)
-        path = self.resolve_workspace_path(relative_path, workspace_root)
+        path, _scope = self.resolve_document_path(relative_path, workspace_root, resolver, operation="read", actor="user")
         logger.info(
             "OnlyOffice download accepted: path=%s user=%s size=%s token_exp=%s",
             relative_path,
@@ -190,6 +206,7 @@ class DocumentService:
         token: str,
         payload: dict[str, Any],
         workspace_root: str | None = None,
+        resolver=None,
     ) -> dict[str, int]:
         """处理 OnlyOffice 保存回调。status=2/6 时下载新文件并原子覆盖。"""
         token_payload = self.verify_access_token(token, relative_path)
@@ -205,13 +222,22 @@ class DocumentService:
         if status not in {2, 6}:
             logger.info("OnlyOffice callback ignored: path=%s status=%s", relative_path, status)
             return {"error": 0}
+        if token_payload.get("mode") != "edit":
+            logger.warning("OnlyOffice callback rejected for non-edit token: path=%s", relative_path)
+            return {"error": 1}
 
         download_url = payload.get("url")
         if not download_url:
             logger.warning("OnlyOffice callback missing download url: path=%s status=%s", relative_path, status)
             return {"error": 1}
 
-        path = self.resolve_workspace_path(relative_path, workspace_root)
+        path, _scope = self.resolve_document_path(
+            relative_path,
+            workspace_root,
+            resolver,
+            operation="write",
+            actor="onlyoffice",
+        )
         tmp_path = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
 
         # OnlyOffice 回调里的 url 是一次性下载地址，需要服务端立即拉取。
@@ -264,6 +290,34 @@ class DocumentService:
             raise HTTPException(status_code=415, detail="OnlyOffice 不支持该文件类型")
         return path
 
+    def resolve_document_path(
+        self,
+        relative_path: str,
+        workspace_root: str | None = None,
+        resolver=None,
+        operation: str = "read",
+        actor: str = "user",
+    ) -> tuple[Path, str]:
+        if resolver is not None:
+            try:
+                resolved = resolver.resolve(
+                    relative_path,
+                    operation=operation,
+                    actor=actor,
+                    must_exist=True,
+                )
+            except FileNotFoundError as exc:
+                raise HTTPException(status_code=404, detail="文件不存在") from exc
+            except PermissionError as exc:
+                raise HTTPException(status_code=403, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            path = resolved.real_path
+            if path.suffix.lower() not in self.config.supported_extensions:
+                raise HTTPException(status_code=415, detail="OnlyOffice 不支持该文件类型")
+            return path, resolved.area
+        return self.resolve_workspace_path(relative_path, workspace_root), "workspace"
+
     def _internal_api_url(self, route: str, relative_path: str, token: str) -> str:
         from urllib.parse import quote
 
@@ -278,11 +332,15 @@ class DocumentService:
         username: str,
         mode: str,
         session_id: str = "",
+        group: str = "user",
+        scope: str = "workspace",
     ) -> str:
         now = int(time.time())
         payload = {
             "path": relative_path,
             "username": username,
+            "group": group,
+            "scope": scope,
             "mode": mode,
             "session_id": session_id,
             "iat": now,

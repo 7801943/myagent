@@ -177,6 +177,10 @@ class TokenInfo:
     username: str
     ip: str
     created_at: float  # time.time()
+    group: str = "user"
+    visible_tools: list[str] = field(default_factory=lambda: ["*"])
+    visible_skills: list[str] = field(default_factory=lambda: ["*"])
+    workspace: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -185,6 +189,11 @@ class UserData:
     username: str
     password_hash: str
     active_ips: list[str] = field(default_factory=list)
+    group: str = "user"
+    disabled: bool = False
+    visible_tools: list[str] = field(default_factory=lambda: ["*"])
+    visible_skills: list[str] = field(default_factory=lambda: ["*"])
+    workspace: dict[str, Any] = field(default_factory=dict)
 
 
 # ── AuthService ──
@@ -260,10 +269,16 @@ class AuthService:
             username = user_data.get("username", "")
             if not username:
                 continue
+            group = str(user_data.get("group") or ("admin" if username == DEFAULT_USERNAME else "user"))
             self._users[username] = UserData(
                 username=username,
                 password_hash=user_data.get("password_hash", ""),
                 active_ips=user_data.get("active_ips", []),
+                group=group,
+                disabled=bool(user_data.get("disabled", False)),
+                visible_tools=self._normalize_visibility(user_data.get("visible_tools")),
+                visible_skills=self._normalize_visibility(user_data.get("visible_skills")),
+                workspace=user_data.get("workspace") if isinstance(user_data.get("workspace"), dict) else {},
             )
 
         # 启动时清空 active_ips：token 不会跨重启恢复，旧的 IP 绑定是无效的
@@ -285,11 +300,17 @@ class AuthService:
         """将用户数据持久化到 JSON 文件。"""
         async with self._file_lock:
             data = {
+                "schema_version": 2,
                 "users": [
                     {
                         "username": u.username,
                         "password_hash": u.password_hash,
+                        "group": u.group,
+                        "disabled": u.disabled,
                         "active_ips": list(u.active_ips),
+                        "visible_tools": list(u.visible_tools),
+                        "visible_skills": list(u.visible_skills),
+                        "workspace": dict(u.workspace),
                     }
                     for u in self._users.values()
                 ]
@@ -313,11 +334,17 @@ class AuthService:
     def _save_users_sync(self) -> None:
         """同步版本的用户数据持久化（用于启动阶段）。"""
         data = {
+            "schema_version": 2,
             "users": [
                 {
                     "username": u.username,
                     "password_hash": u.password_hash,
+                    "group": u.group,
+                    "disabled": u.disabled,
                     "active_ips": list(u.active_ips),
+                    "visible_tools": list(u.visible_tools),
+                    "visible_skills": list(u.visible_skills),
+                    "workspace": dict(u.workspace),
                 }
                 for u in self._users.values()
             ]
@@ -341,17 +368,28 @@ class AuthService:
                 username=DEFAULT_USERNAME,
                 password_hash=default_hash,
                 active_ips=[],
+                group="admin",
+                disabled=False,
+                visible_tools=["*"],
+                visible_skills=["*"],
+                workspace={},
             )
         }
 
         # 同步写入文件
         self._users_file.parent.mkdir(parents=True, exist_ok=True)
         data = {
+            "schema_version": 2,
             "users": [
                 {
                     "username": DEFAULT_USERNAME,
                     "password_hash": default_hash,
+                    "group": "admin",
+                    "disabled": False,
                     "active_ips": [],
+                    "visible_tools": ["*"],
+                    "visible_skills": ["*"],
+                    "workspace": {},
                 }
             ]
         }
@@ -411,6 +449,8 @@ class AuthService:
         user = self._users.get(username)
         if not user:
             return None, "用户名或密码错误"
+        if user.disabled:
+            return None, "用户已被禁用"
 
         # 2. 校验密码
         if not verify_password(password, user.password_hash):
@@ -431,6 +471,10 @@ class AuthService:
             username=username,
             ip=client_ip,
             created_at=time.time(),
+            group=user.group,
+            visible_tools=list(user.visible_tools),
+            visible_skills=list(user.visible_skills),
+            workspace=dict(user.workspace),
         )
         self._tokens[token_str] = token_info
 
@@ -495,9 +539,34 @@ class AuthService:
             return None
         return {
             "username": user.username,
+            "group": user.group,
+            "disabled": user.disabled,
             "active_ips": list(user.active_ips),
+            "visible_tools": list(user.visible_tools),
+            "visible_skills": list(user.visible_skills),
+            "workspace": dict(user.workspace),
         }
 
     def get_active_tokens_count(self, username: str) -> int:
         """获取某用户当前的活跃 token 数量。"""
         return sum(1 for info in self._tokens.values() if info.username == username)
+
+    def get_user_profile(self, username: str) -> UserData | None:
+        """获取完整用户配置。"""
+        return self._users.get(username)
+
+    def is_admin(self, username: str) -> bool:
+        user = self._users.get(username)
+        return bool(user and user.group == "admin")
+
+    @staticmethod
+    def _normalize_visibility(value: Any) -> list[str]:
+        if value is None:
+            return ["*"]
+        if isinstance(value, str):
+            items = [item.strip() for item in value.split(",") if item.strip()]
+            return items or ["*"]
+        if isinstance(value, list):
+            items = [str(item).strip() for item in value if str(item).strip()]
+            return items or ["*"]
+        return ["*"]

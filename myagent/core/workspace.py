@@ -56,6 +56,13 @@ class FileInfo:
     modified_at: str = ""  # ISO 格式最后修改时间
     is_user_opened: bool = False  # 用户在前端打开过此文件
     is_llm_read: bool = False     # LLM 后端读取过此文件
+    area: str = ""                # private | public
+    can_read: bool = True
+    can_upload: bool = True
+    can_rename: bool = True
+    can_delete: bool = True
+    can_agent_read: bool = True
+    can_agent_write: bool = True
 
     def to_dict(self) -> dict:
         return {
@@ -63,6 +70,13 @@ class FileInfo:
             "size": self.size, "modified_at": self.modified_at,
             "is_user_opened": self.is_user_opened,
             "is_llm_read": self.is_llm_read,
+            "area": self.area,
+            "can_read": self.can_read,
+            "can_upload": self.can_upload,
+            "can_rename": self.can_rename,
+            "can_delete": self.can_delete,
+            "can_agent_read": self.can_agent_read,
+            "can_agent_write": self.can_agent_write,
         }
 
     @classmethod
@@ -137,9 +151,10 @@ class WorkspaceManager:
       - 可导出快照（snapshot）用于持久化/传输/LLM 上下文注入
     """
 
-    def __init__(self, root_path: str = ""):
+    def __init__(self, root_path: str = "", resolver: Any | None = None):
         self._state = WorkspaceState(root_path=root_path)
         self._on_change: Callable[[WorkspaceState, str], Awaitable[None]] | None = None
+        self._resolver = resolver
 
     # ── 回调设置 ──
 
@@ -160,6 +175,10 @@ class WorkspaceManager:
     def snapshot(self) -> WorkspaceState:
         """返回深拷贝快照（安全，调用方修改不影响内部状态）。"""
         return copy.deepcopy(self._state)
+
+    @property
+    def resolver(self) -> Any | None:
+        return self._resolver
 
     def get_active_file_path(self) -> str | None:
         """获取当前活跃文件的相对路径。"""
@@ -236,7 +255,11 @@ class WorkspaceManager:
         if root_path:
             root_path = str(Path(root_path).expanduser().resolve())
         self._state = WorkspaceState(root_path=root_path)
-        if root_path:
+        if self._resolver:
+            self._state.root_path = self._resolver.virtual_root
+            files = await self._resolver.scan_dir(None)
+            self._state.files = files
+        elif root_path:
             files = await scan_dir_files(root_path)
             self._state.files = files
         await self._notify(source)
@@ -315,7 +338,10 @@ class WorkspaceManager:
             return
 
         # 扫描子目录
-        new_entries = await scan_dir_files(self._state.root_path, sub_path=sub_path or None)
+        if self._resolver:
+            new_entries = await self._resolver.scan_dir(sub_path or None)
+        else:
+            new_entries = await scan_dir_files(self._state.root_path, sub_path=sub_path or None)
 
         # 移除该目录的旧直接子条目，替换为新的
         self._remove_direct_children(sub_path)
@@ -362,11 +388,17 @@ class WorkspaceManager:
         flag_map = {f.path: (f.is_user_opened, f.is_llm_read) for f in self._state.files}
 
         # 重新扫描根目录
-        all_files = await scan_dir_files(self._state.root_path)
+        if self._resolver:
+            all_files = await self._resolver.scan_dir(None)
+        else:
+            all_files = await scan_dir_files(self._state.root_path)
 
         # 重新扫描所有已展开的子目录
         for dir_path in list(self._state.expanded_dirs):
-            sub_entries = await scan_dir_files(self._state.root_path, sub_path=dir_path)
+            if self._resolver:
+                sub_entries = await self._resolver.scan_dir(dir_path)
+            else:
+                sub_entries = await scan_dir_files(self._state.root_path, sub_path=dir_path)
             all_files.extend(sub_entries)
 
         # 恢复 flag 状态

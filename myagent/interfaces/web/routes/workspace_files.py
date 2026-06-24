@@ -73,12 +73,11 @@ class PathValidation:
 
 
 @router.post("/preflight")
-async def preflight_upload(payload: PreflightRequest):
+async def preflight_upload(payload: PreflightRequest, request: Request):
     """上传前校验路径、压缩扩展名与同名冲突。"""
-    session = _session_for_request(payload.session_id)
-    root = _workspace_root(session)
-    target_dir = _validate_relative_path(payload.target_dir, allow_empty=True)
-    _validate_target_directory(root, target_dir)
+    session = _session_for_request(request, payload.session_id)
+    target_dir = _normalize_workspace_target_dir(payload.target_dir)
+    _validate_target_directory(session, target_dir)
 
     conflicts: list[dict] = []
     rejected: list[dict] = []
@@ -97,7 +96,7 @@ async def preflight_upload(payload: PreflightRequest):
             rejected.append({"path": raw_path, "reason": "上传列表中存在重复目标路径"})
             continue
         seen_targets.add(target_rel)
-        target_path = _resolve_under_root(root, target_rel)
+        target_path = _resolve_workspace_path(session, target_rel, operation="upload")
         if target_path.exists():
             if target_path.is_dir():
                 rejected.append({"path": raw_path, "target_path": target_rel, "reason": "目标路径是目录"})
@@ -125,10 +124,9 @@ async def upload_files(request: Request):
     files = [item for item in form.getlist("files[]") if isinstance(item, UploadFile)]
     paths = [str(item) for item in form.getlist("paths[]")]
 
-    session = _session_for_request(session_id)
-    root = _workspace_root(session)
-    clean_target_dir = _validate_relative_path(target_dir, allow_empty=True)
-    _validate_target_directory(root, clean_target_dir)
+    session = _session_for_request(request, session_id)
+    clean_target_dir = _normalize_workspace_target_dir(target_dir)
+    _validate_target_directory(session, clean_target_dir)
 
     if len(files) != len(paths):
         raise HTTPException(status_code=400, detail="files 与 paths 数量不一致")
@@ -159,7 +157,7 @@ async def upload_files(request: Request):
             continue
         seen_targets.add(target_rel)
 
-        target_path = _resolve_under_root(root, target_rel)
+        target_path = _resolve_workspace_path(session, target_rel, operation="upload")
         if target_path.exists():
             if target_path.is_dir():
                 rejected.append({"path": raw_path, "target_path": target_rel, "reason": "目标路径是目录"})
@@ -191,19 +189,18 @@ async def upload_files(request: Request):
 
 
 @router.post("/rename")
-async def rename_workspace_path(payload: RenameRequest):
+async def rename_workspace_path(payload: RenameRequest, request: Request):
     """重命名 workspace 内的文件或目录，不支持跨目录移动。"""
-    session = _session_for_request(payload.session_id)
-    root = _workspace_root(session)
+    session = _session_for_request(request, payload.session_id)
     rel_path = _validate_relative_path(payload.path, allow_empty=False)
     new_name = _validate_entry_name(payload.new_name)
 
-    source_path = _resolve_under_root(root, rel_path)
+    source_path = _resolve_workspace_path(session, rel_path, operation="rename", must_exist=True)
     if not source_path.exists():
         raise HTTPException(status_code=404, detail="路径不存在")
 
     target_rel = _join_workspace_relative(posixpath.dirname(rel_path), new_name)
-    target_path = _resolve_under_root(root, target_rel)
+    target_path = _resolve_workspace_path(session, target_rel, operation="rename")
     if target_path.exists():
         raise HTTPException(status_code=409, detail="目标名称已存在")
     if _has_forbidden_archive_suffix(target_rel):
@@ -225,14 +222,14 @@ async def rename_workspace_path(payload: RenameRequest):
 
 @router.get("/download")
 async def download_workspace_path(
+    request: Request,
     session_id: str = Query(..., description="会话 ID"),
     path: str = Query(..., description="工作区相对路径"),
 ):
     """下载 workspace 内的文件；目录会打包为 zip。"""
-    session = _session_for_request(session_id)
-    root = _workspace_root(session)
+    session = _session_for_request(request, session_id)
     rel_path = _validate_relative_path(path, allow_empty=False)
-    target_path = _resolve_under_root(root, rel_path)
+    target_path = _resolve_workspace_path(session, rel_path, operation="read", must_exist=True)
     if not target_path.exists():
         raise HTTPException(status_code=404, detail="路径不存在")
 
@@ -261,10 +258,9 @@ async def download_workspace_path(
 
 
 @router.post("/delete")
-async def delete_workspace_paths(payload: DeleteRequest):
+async def delete_workspace_paths(payload: DeleteRequest, request: Request):
     """删除 workspace 内的文件或目录。"""
-    session = _session_for_request(payload.session_id)
-    root = _workspace_root(session)
+    session = _session_for_request(request, payload.session_id)
 
     deleted: list[dict] = []
     rejected: list[dict] = []
@@ -277,7 +273,7 @@ async def delete_workspace_paths(payload: DeleteRequest):
             rejected.append({"path": raw_path, "reason": str(exc.detail)})
             continue
 
-        target_path = _resolve_under_root(root, rel_path)
+        target_path = _resolve_workspace_path(session, rel_path, operation="delete", must_exist=True)
         if not target_path.exists():
             rejected.append({"path": raw_path, "reason": "路径不存在"})
             continue
@@ -307,11 +303,43 @@ async def delete_workspace_paths(payload: DeleteRequest):
     return {"ok": not rejected, "deleted": deleted, "rejected": rejected}
 
 
-def _session_for_request(session_id: str):
-    session = get_session_manager().get_session(session_id)
+def _session_for_request(request: Request, session_id: str):
+    token_info = getattr(request.state, "user", None)
+    username = getattr(token_info, "username", "")
+    if not username:
+        raise HTTPException(status_code=401, detail="未认证")
+    session = get_session_manager().get_session(session_id, user=username)
     if not session or not session.workspace:
         raise HTTPException(status_code=404, detail="会话工作空间不存在")
+    if session.user.username != username:
+        raise HTTPException(status_code=403, detail="无权访问该会话")
     return session
+
+
+def _normalize_workspace_target_dir(target_dir: str) -> str:
+    clean = _validate_relative_path(target_dir, allow_empty=True)
+    return clean or "private"
+
+
+def _resolve_workspace_path(session, relative_path: str, *, operation: str, must_exist: bool = False) -> Path:
+    resolver = getattr(session.workspace, "resolver", None) if session.workspace else None
+    if resolver:
+        try:
+            resolved = resolver.resolve(
+                relative_path,
+                operation=operation,
+                actor=resolver.actor_for_user(),
+                must_exist=must_exist,
+            )
+            return resolved.real_path
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="路径不存在") from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    root = _workspace_root(session)
+    return _resolve_under_root(root, relative_path)
 
 
 def _workspace_root(session) -> Path:
@@ -368,10 +396,10 @@ def _join_workspace_relative(target_dir: str, rel_path: str) -> str:
     return f"{target_dir}/{rel_path}" if target_dir else rel_path
 
 
-def _validate_target_directory(root: Path, target_dir: str) -> None:
+def _validate_target_directory(session, target_dir: str) -> None:
     if not target_dir:
         return
-    path = _resolve_under_root(root, target_dir)
+    path = _resolve_workspace_path(session, target_dir, operation="upload")
     if path.exists() and not path.is_dir():
         raise HTTPException(status_code=400, detail="上传目标路径不是目录")
 

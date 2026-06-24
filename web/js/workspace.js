@@ -839,14 +839,10 @@ async function downloadWorkspaceEntry(file) {
 
 function aiReadWorkspaceFile(file) {
     if (!file || !file.path || file.is_dir) return;
-    const rootPath = latestWorkspaceState && latestWorkspaceState.root_path
-        ? String(latestWorkspaceState.root_path).replace(/\/+$/g, '')
-        : '';
-    const absolutePath = rootPath ? `${rootPath}/${file.path}` : file.path;
     const text = [
         '请使用 file_read 工具读取以下 workspace 文件，并总结主要内容，指出与当前任务相关的关键信息。',
         `相对路径：${file.path}`,
-        `绝对路径：${absolutePath}`,
+        '请直接使用上述 private/ 或 public/ 虚拟路径，不要改写为系统绝对路径。',
     ].join('\n');
 
     const input = document.getElementById('userInput');
@@ -1015,7 +1011,7 @@ function showWorkspaceContextMenu(file, x, y) {
         }));
         workspaceContextMenu.appendChild(createContextMenuItem('上传到此目录', function () {
             openWorkspaceUploadPicker(false, file.path);
-        }));
+        }, file.can_upload === false));
     } else {
         workspaceContextMenu.appendChild(createContextMenuItem('ai读取', function () {
             aiReadWorkspaceFile(file);
@@ -1026,7 +1022,7 @@ function showWorkspaceContextMenu(file, x, y) {
     }
     workspaceContextMenu.appendChild(createContextMenuItem('重命名', function () {
         renameWorkspaceEntry(file);
-    }));
+    }, file.can_rename === false));
     workspaceContextMenu.appendChild(createContextMenuItem('下载', function () {
         downloadWorkspaceEntry(file);
     }));
@@ -1035,7 +1031,7 @@ function showWorkspaceContextMenu(file, x, y) {
     }));
     workspaceContextMenu.appendChild(createContextMenuItem('删除', function () {
         deleteWorkspaceEntry(file);
-    }));
+    }, file.can_delete === false));
 
     document.body.appendChild(workspaceContextMenu);
     keepContextMenuInViewport(workspaceContextMenu);

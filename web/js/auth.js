@@ -6,6 +6,7 @@ import { state, emit } from './state.js';
 
 const TOKEN_KEY = 'myagent_token';
 const USERNAME_KEY = 'myagent_username';
+const GROUP_KEY = 'myagent_group';
 
 // ── Token 管理 ──
 
@@ -13,19 +14,24 @@ export function getToken() {
     return localStorage.getItem(TOKEN_KEY) || '';
 }
 
-export function setToken(token, username) {
+export function setToken(token, username, group) {
     localStorage.setItem(TOKEN_KEY, token);
     localStorage.setItem(USERNAME_KEY, username);
+    localStorage.setItem(GROUP_KEY, group || 'user');
     state.authToken = token;
     state.authUsername = username;
+    state.authGroup = group || 'user';
     state.isAuthenticated = true;
 }
 
 export function clearAuth() {
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(USERNAME_KEY);
+    localStorage.removeItem(GROUP_KEY);
     state.authToken = '';
     state.authUsername = '';
+    state.authGroup = 'user';
+    state.authUser = null;
     state.isAuthenticated = false;
 }
 
@@ -37,15 +43,21 @@ export function getUsername() {
     return localStorage.getItem(USERNAME_KEY) || '';
 }
 
+export function getGroup() {
+    return localStorage.getItem(GROUP_KEY) || 'user';
+}
+
 // ── 初始化 ──
 
 export function initAuth() {
     // 恢复登录状态
     const token = getToken();
     const username = getUsername();
+    const group = getGroup();
     if (token) {
         state.authToken = token;
         state.authUsername = username;
+        state.authGroup = group;
         state.isAuthenticated = true;
     }
 
@@ -110,7 +122,7 @@ async function handleLogin(e) {
         const data = await response.json();
 
         if (data.ok) {
-            setToken(data.token, data.username);
+            setToken(data.token, data.username, data.group);
             showMainApp();
             emit('auth:ready');
         } else {
@@ -154,6 +166,10 @@ async function validateToken() {
             headers: { 'Authorization': 'Bearer ' + token },
         });
         if (response.ok) {
+            const data = await response.json();
+            state.authUser = data;
+            state.authGroup = data.group || state.authGroup || 'user';
+            localStorage.setItem(GROUP_KEY, state.authGroup);
             return true;
         } else {
             clearAuth();

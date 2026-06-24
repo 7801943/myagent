@@ -70,7 +70,9 @@ agent:
   # ── Skills 系统 ──
   skills:
     enabled: true
-    # 启用的 skill 名称列表；留空则启用 prompts/skills/<用户名>/ 下的所有 skill
+    # 公共 Skill 目录；每个用户再通过 data/users.json 的 visible_skills 控制可见性
+    common_dir: "prompts/skills/common"
+    # 启用的 skill 名称列表；留空则启用 common_dir 下的所有可见 skill
     active: []
       # - "office-automation"
       # - "web-search"
@@ -132,6 +134,21 @@ agent:
   state:
     backend: "jsonl"          # jsonl | sqlite
     path: "./state/sessions.jsonl"
+
+# ── 多用户状态与工作区 ──
+multi_user:
+  enabled: true
+
+state:
+  # 每个用户一个 SQLite 状态库：data/state/users/<username>/myagent_state.db
+  per_user_dir: "data/state/users"
+
+workspace:
+  base_dir: "workspaces"
+  private_dir_template: "workspaces/users/{username}"
+  public_dir: "workspaces/public"
+  public_upload_enabled: true
+  public_rename_delete_group: "admin"
 
 # ── 认证系统 ──
 auth:

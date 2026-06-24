@@ -7,7 +7,8 @@ Phase 2 变更：
 未来扩展：
   - [AUTH] 所有端点需要鉴权中间件，按用户隔离会话
 """
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
+from myagent.core.models import UserContext
 
 from myagent.interfaces.web.dependencies import get_session_manager
 
@@ -15,15 +16,16 @@ router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
 
 @router.get("")
-async def list_sessions():
+async def list_sessions(request: Request):
     """列出所有会话。"""
     session_manager = get_session_manager()
-    sessions = await session_manager.list_sessions()
+    user = _user_context(request)
+    sessions = await session_manager.list_sessions(user.username or user.user_id)
 
     # 为每个会话获取标题和消息数
     for s in sessions:
         try:
-            messages = await session_manager.get_session_messages(s["session_id"])
+            messages = await session_manager.get_session_messages(s["session_id"], user=user)
             first_user = next((m for m in messages if m.role == "user"), None)
             content = _extract_text_content(first_user) if first_user else ""
             s["title"] = content[:50] if content else "新对话"
@@ -36,11 +38,26 @@ async def list_sessions():
 
 
 @router.delete("/{session_id}")
-async def delete_session(session_id: str):
+async def delete_session(session_id: str, request: Request):
     """删除指定会话。"""
     session_manager = get_session_manager()
-    await session_manager.delete_session(session_id)
+    await session_manager.delete_session(session_id, user=_user_context(request))
     return {"deleted": True, "session_id": session_id}
+
+
+def _user_context(request: Request) -> UserContext:
+    token_info = getattr(request.state, "user", None)
+    username = getattr(token_info, "username", "") or "web_default"
+    return UserContext(
+        user_id=username,
+        username=username,
+        preferences={
+            "group": getattr(token_info, "group", "user"),
+            "visible_tools": getattr(token_info, "visible_tools", ["*"]),
+            "visible_skills": getattr(token_info, "visible_skills", ["*"]),
+            "workspace": getattr(token_info, "workspace", {}),
+        },
+    )
 
 
 def _extract_text_content(msg) -> str:

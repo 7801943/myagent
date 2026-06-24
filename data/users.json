@@ -1,11 +1,47 @@
 {
+  "schema_version": 2,
   "users": [
     {
       "username": "admin",
       "password_hash": "pbkdf2_sha256$100000$dd9bec2ce06703ebd1386a718ead3937$3c52fc076217d00e7f3fde07d2e911fdd908b3814ab4d0c098d95610e31f08cf",
-      "active_ips": [
-        "192.168.0.84"
-      ]
+      "group": "admin",
+      "disabled": false,
+      "active_ips": [],
+      "visible_tools": [
+        "*"
+      ],
+      "visible_skills": [
+        "*"
+      ],
+      "workspace": {}
+    },
+    {
+      "username": "zhouxiang",
+      "password_hash": "pbkdf2_sha256$100000$5470fb589d8a6178a1069c1b71a1c8b0$7b825838f72c7e4cee1ec5bb9504b9877ef3d948b41dc080c47a2822d7e0551a",
+      "group": "user",
+      "disabled": false,
+      "active_ips": [],
+      "visible_tools": [
+        "*"
+      ],
+      "visible_skills": [
+        "*"
+      ],
+      "workspace": {}
+    },
+    {
+      "username": "test",
+      "password_hash": "pbkdf2_sha256$100000$d5d195349b15ec9a84c402e88f789975$df42678781b9cc044dc7112c403af8ad814b3d83df36bf89eaab188273d9509d",
+      "group": "user",
+      "disabled": false,
+      "active_ips": [],
+      "visible_tools": [
+        "*"
+      ],
+      "visible_skills": [
+        "*"
+      ],
+      "workspace": {}
     }
   ]
 }

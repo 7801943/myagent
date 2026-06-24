@@ -69,11 +69,17 @@ class ToolInterface:
         policy_engine: PolicyEngine | None = None,
         rules: list[BaseRule] | None = None,
         secret_manager=None,
+        user=None,
+        workspace_resolver=None,
     ):
         self._tool_manager = tool_manager
         self._policy_engine = policy_engine
         self._rules: list[BaseRule] = sorted(rules or [], key=lambda r: r.priority)
         self._secret_manager = secret_manager
+        self._user = user
+        self._workspace_resolver = workspace_resolver
+        visible = getattr(user, "preferences", {}).get("visible_tools") if user else None
+        self._visible_tools = None if visible in (None, ["*"], "*") else {str(item) for item in visible}
         self._cli_fence = next(
             (rule for rule in self._rules if isinstance(rule, CLIFence)),
             None,
@@ -170,6 +176,20 @@ class ToolInterface:
         执行单个工具。
         执行链路：安全检查 → 密钥注入 → ToolManager.execute（含幂等缓存）
         """
+        if not self._is_tool_visible(name):
+            return ToolResult(
+                content=f"工具 '{name}' 对当前用户不可见，已拒绝执行。",
+                is_error=True,
+                metadata={"denied_by": "tool_visibility", "tool_call_id": tool_call_id},
+            )
+
+        policy_result = self._apply_workspace_policy(name, args)
+        if policy_result is not None:
+            if isinstance(policy_result, ToolResult):
+                policy_result.metadata.setdefault("tool_call_id", tool_call_id)
+                return policy_result
+            args = policy_result
+
         # 1. 安全检查
         if not skip_safety and self.has_safety:
             guard_result = await self.check_tool_call(name, args)
@@ -206,6 +226,55 @@ class ToolInterface:
 
         # 3. 委托 ToolManager 执行（含幂等缓存）
         return await self._tool_manager.execute(name, tool_call_id=tool_call_id, **args)
+
+    def _is_tool_visible(self, name: str) -> bool:
+        return self._visible_tools is None or name in self._visible_tools
+
+    def _apply_workspace_policy(self, name: str, args: dict) -> dict | ToolResult | None:
+        resolver = self._workspace_resolver
+        if resolver is None:
+            return None
+
+        next_args = dict(args or {})
+        read_tools = {"file_read", "file_query"}
+        write_tools = {"file_write", "file_edit", "file_edit_table"}
+
+        try:
+            if name in read_tools and next_args.get("path"):
+                resolved = resolver.normalize_for_tool(str(next_args["path"]), operation="read")
+                next_args["path"] = str(resolved.real_path)
+                return next_args
+
+            if name == "file_diff":
+                for key in ("path_a", "path_b"):
+                    if next_args.get(key):
+                        resolved = resolver.normalize_for_tool(str(next_args[key]), operation="read")
+                        next_args[key] = str(resolved.real_path)
+                return next_args
+
+            if name in write_tools and next_args.get("path"):
+                resolved = resolver.normalize_for_tool(str(next_args["path"]), operation="write")
+                next_args["path"] = str(resolved.real_path)
+                return next_args
+
+            if name == "cli_execute":
+                command = str(next_args.get("command") or "")
+                cwd = str(next_args.get("cwd") or "")
+                if cwd:
+                    resolved_cwd = resolver.normalize_for_tool(cwd, operation="read")
+                    if resolved_cwd.area == "public":
+                        return ToolResult(content="安全策略拒绝：agent 不允许在 public/ 公共目录中执行 CLI。", is_error=True)
+                    next_args["cwd"] = str(resolved_cwd.real_path)
+                else:
+                    next_args["cwd"] = str(resolver.private_root)
+                public_root = str(resolver.public_root)
+                if "public/" in command or public_root in command:
+                    return ToolResult(content="安全策略拒绝：agent 不允许通过 CLI 访问或修改 public/ 公共目录。", is_error=True)
+                return next_args
+        except Exception as exc:
+            return ToolResult(content=f"工作区权限拒绝工具 '{name}': {exc}", is_error=True)
+
+        return None
 
     # ── 批量并行执行 ──
 
@@ -344,8 +413,10 @@ class ToolInterface:
                 "description": r.description,
                 "parameters_schema": r.parameters_schema,
                 "source": r.source,
+                "category": getattr(r.meta, "category", "") if getattr(r, "meta", None) else "",
             }
             for r in records
+            if self._is_tool_visible(r.name)
         ]
 
     # ── 生命周期委托 ──

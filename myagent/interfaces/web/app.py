@@ -30,7 +30,6 @@ from myagent.interfaces.web.dependencies import (
     startup,
     shutdown,
     get_session_manager,
-    get_state_store,
     get_auth_service,
 )
 from myagent.interfaces.web.ws_handler import WebSocketHandler
@@ -247,8 +246,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         ws.state.user = token_info
 
         session_manager = get_session_manager()
-        store = get_state_store()
-        handler = WebSocketHandler(ws, session_manager, store)
+        handler = WebSocketHandler(ws, session_manager)
         await handler.run()
 
     # ── 静态文件挂载（必须放在最后，否则会拦截所有路由）──

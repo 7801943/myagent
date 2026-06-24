@@ -31,6 +31,7 @@ from myagent.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from myagent.context.state import StateStore
+    from myagent.context.user_state import UserStateStoreRegistry
     from myagent.prompt.skills import SkillRegistry
 
 logger = get_logger(__name__)
@@ -47,11 +48,13 @@ class SessionManager:
         *,
         config_path: str = "config.yaml",
         state_store: "StateStore | None" = None,
+        state_store_registry: "UserStateStoreRegistry | None" = None,
         session_ttl_seconds: int = 3600,
     ):
         self._config_path = config_path
         self._state_store = state_store
-        self._sessions: dict[str, Session] = {}
+        self._state_store_registry = state_store_registry
+        self._sessions: dict[tuple[str, str], Session] = {}
         # per-session Harness：每次 create_session / restore_session 都新建独立实例
 
         self._session_ttl = session_ttl_seconds
@@ -68,6 +71,22 @@ class SessionManager:
 
         # 预加载系统提示词
         self._system_prompt: str = self._load_system_prompt()
+
+    def _user_key(self, user: UserContext | str | None) -> str:
+        if isinstance(user, UserContext):
+            raw = user.username or user.user_id
+        else:
+            raw = user or "default"
+        safe = self._resolve_skill_username(UserContext(user_id=str(raw), username=str(raw)))
+        return safe
+
+    def _session_key(self, user: UserContext | str | None, session_id: str) -> tuple[str, str]:
+        return (self._user_key(user), session_id)
+
+    async def _state_store_for_user(self, user: UserContext):
+        if self._state_store_registry:
+            return await self._state_store_registry.get_store(self._user_key(user))
+        return self._state_store
 
     @property
     def context_window_size(self) -> int:
@@ -109,21 +128,22 @@ class SessionManager:
     async def _evict_expired(self) -> None:
         now = datetime.now(timezone.utc)
         to_evict = []
-        for sid, session in self._sessions.items():
+        for key, session in self._sessions.items():
             if (now - session.last_active_at).total_seconds() > self._session_ttl:
-                to_evict.append(sid)
-        for sid in to_evict:
-            session = self._sessions.pop(sid)
+                to_evict.append(key)
+        for key in to_evict:
+            session = self._sessions.pop(key)
             session.unregister_events()
             # [BUG-FIX] 停止 ToolManager，释放 JsonRpcProxy 连接 + 热加载 Task
             await self._cleanup_session_resources(session)
             if not session.has_user_message():
-                if self._state_store:
-                    await self._state_store.clear_session(sid)
-                logger.info(f"Empty session discarded (TTL): {sid}")
+                store = await self._state_store_for_user(session.user)
+                if store:
+                    await store.clear_session(session.id)
+                logger.info(f"Empty session discarded (TTL): {session.id}")
             else:
                 await session.save()
-                logger.info(f"Session evicted (TTL): {sid}")
+                logger.info(f"Session evicted (TTL): {session.id}")
 
     # ── 组件构建（替代 AgentFactory） ──
 
@@ -228,7 +248,7 @@ class SessionManager:
         return safe if safe and safe not in {".", ".."} else "default"
 
     def _build_skill_registry(self, user: UserContext) -> "SkillRegistry":
-        """根据当前用户目录构建 SkillRegistry。"""
+        """根据公共 Skill 目录和当前用户可见性构建 SkillRegistry。"""
         from myagent.prompt.skills import SkillRegistry
 
         username = self._resolve_skill_username(user)
@@ -238,8 +258,17 @@ class SessionManager:
             logger.info("Skill system disabled")
             return registry
 
-        skill_root = self._config_dir / "prompts" / "skills" / username
-        registry.load_from_user_dir(skill_root, active_names=set(skill_cfg.active))
+        visible = user.preferences.get("visible_skills")
+        visible_names = None if visible in (None, ["*"], "*") else set(visible)
+        common_dir = getattr(skill_cfg, "common_dir", "") or "prompts/skills/common"
+        skill_root = Path(common_dir)
+        if not skill_root.is_absolute():
+            skill_root = self._config_dir / skill_root
+        registry.load_from_common_dir(
+            skill_root,
+            active_names=set(skill_cfg.active),
+            visible_names=visible_names,
+        )
         return registry
 
     def _build_tool_manager(self, skill_registry: "SkillRegistry | None" = None) -> ToolManager:
@@ -254,10 +283,43 @@ class SessionManager:
         )
         return manager
 
+    def _build_workspace_resolver(self, user: UserContext):
+        """Build the private/public workspace resolver for a user."""
+        from myagent.core.workspace_resolver import WorkspaceResolver, safe_workspace_username
+
+        username = self._user_key(user)
+        group = str(user.preferences.get("group") or ("admin" if username == "admin" else "user"))
+        raw_workspace = self._raw.get("workspace", {})
+        if not raw_workspace and isinstance(self._raw.get("agent"), dict):
+            raw_workspace = self._raw.get("agent", {}).get("workspace", {})
+        base_dir = Path(raw_workspace.get("base_dir") or "workspaces")
+        if not base_dir.is_absolute():
+            base_dir = self._config_dir / base_dir
+        private_template = raw_workspace.get("private_dir_template") or str(base_dir / "users" / "{username}")
+        public_dir = Path(raw_workspace.get("public_dir") or (base_dir / "public"))
+        safe_user = safe_workspace_username(username)
+
+        user_workspace = user.preferences.get("workspace") if isinstance(user.preferences, dict) else {}
+        private_override = user_workspace.get("private_dir") if isinstance(user_workspace, dict) else None
+        private_dir = Path(private_override or private_template.format(username=safe_user))
+        if not private_dir.is_absolute():
+            private_dir = self._config_dir / private_dir
+        if not public_dir.is_absolute():
+            public_dir = self._config_dir / public_dir
+
+        return WorkspaceResolver(
+            username=safe_user,
+            group=group,
+            private_root=private_dir,
+            public_root=public_dir,
+        )
+
     def _create_harness(
         self,
         no_safety: bool = False,
         skill_registry: "SkillRegistry | None" = None,
+        user: UserContext | None = None,
+        workspace_resolver=None,
     ) -> AgentHarness:
         """
         创建独立的 per-session AgentHarness 实例。
@@ -278,6 +340,8 @@ class SessionManager:
             policy_engine=safety_parts[0] if safety_parts else None,
             rules=safety_parts[1] if safety_parts else None,
             secret_manager=secret_manager,
+            user=user,
+            workspace_resolver=workspace_resolver,
         )
         harness = AgentHarness(
             llm_client=llm_client,
@@ -301,12 +365,18 @@ class SessionManager:
         workspace_root: str | None = None,
     ) -> Session:
         skill_registry = self._build_skill_registry(user)
+        workspace_resolver = self._build_workspace_resolver(user)
         harness = self._create_harness(
             no_safety=no_safety,
             skill_registry=skill_registry,
+            user=user,
+            workspace_resolver=workspace_resolver,
         )
         effective_prompt = system_prompt or self._system_prompt
+        state_store = await self._state_store_for_user(user)
 
+        if not workspace_root and workspace_resolver:
+            workspace_root = workspace_resolver.virtual_root
         if not workspace_root:
             root_dir = self._config.root_dir
             if root_dir:
@@ -321,17 +391,18 @@ class SessionManager:
             session_id=session_id,
             harness=harness,
             user=user,
-            state_store=self._state_store,
+            state_store=state_store,
             system_prompt=effective_prompt,
             max_tokens_budget=effective_budget,
             context_window_size=effective_window,
             tool_result_max_chars=effective_max_chars,
             workspace_root=workspace_root,
+            workspace_resolver=workspace_resolver,
             hitl_enabled=self._config.hitl.enabled,
             approval_timeout=self._config.hitl.approval_timeout,
             skill_registry=skill_registry,
         )
-        self._sessions[session.id] = session
+        self._sessions[self._session_key(user, session.id)] = session
 
         # 如果提供了外部审批 handler（如 CLI），覆盖默认的 ClientBridge handler
         if approval_handler:
@@ -360,8 +431,13 @@ class SessionManager:
         logger.info(f"Session created: {session.id} for user: {user.user_id}")
         return session
 
-    def get_session(self, session_id: str) -> Session | None:
-        return self._sessions.get(session_id)
+    def get_session(self, session_id: str, user: UserContext | str | None = None) -> Session | None:
+        if user is not None:
+            return self._sessions.get(self._session_key(user, session_id))
+        for (_username, sid), session in self._sessions.items():
+            if sid == session_id:
+                return session
+        return None
 
     async def restore_session(
         self,
@@ -372,13 +448,19 @@ class SessionManager:
         context_window_size: int | None = None,
         tool_result_max_chars: int | None = None,
     ) -> Session:
-        if not self._state_store:
+        state_store = await self._state_store_for_user(user)
+        if not state_store:
             raise RuntimeError("No StateStore configured")
 
         skill_registry = self._build_skill_registry(user)
-        harness = self._create_harness(skill_registry=skill_registry)
+        workspace_resolver = self._build_workspace_resolver(user)
+        harness = self._create_harness(
+            skill_registry=skill_registry,
+            user=user,
+            workspace_resolver=workspace_resolver,
+        )
 
-        agent_run_state, metadata_dict = await self._state_store.load_state(session_id)
+        agent_run_state, metadata_dict = await state_store.load_state(session_id)
 
         # 从配置文件解析默认值（config.yaml → ContextConfig）
         effective_budget = max_tokens_budget if max_tokens_budget is not None else self._config.context.max_tokens_budget
@@ -389,10 +471,12 @@ class SessionManager:
             session_id=session_id,
             harness=harness,
             user=user,
-            state_store=self._state_store,
+            state_store=state_store,
             max_tokens_budget=effective_budget,
             context_window_size=effective_window,
             tool_result_max_chars=effective_max_chars,
+            workspace_root=getattr(workspace_resolver, "virtual_root", None),
+            workspace_resolver=workspace_resolver,
             hitl_enabled=self._config.hitl.enabled,
             approval_timeout=self._config.hitl.approval_timeout,
             skill_registry=skill_registry,
@@ -441,11 +525,11 @@ class SessionManager:
         else:
             session.agent_run_state = agent_run_state
 
-        messages = await self._state_store.load_messages(session_id)
+        messages = await state_store.load_messages(session_id)
         if messages:
             session._context.restore_from(messages)
 
-        workspace_json = await self._state_store.load_workspace(session_id)
+        workspace_json = await state_store.load_workspace(session_id)
         if workspace_json:
             try:
                 from myagent.core.workspace import WorkspaceManager, WorkspaceState
@@ -453,7 +537,10 @@ class SessionManager:
                 ws_state = WorkspaceState.from_dict(ws_data)
                 # [BUG-FIX] 传入 root_path 初始化，确保 WorkspaceManager.root_path 立即可用
                 # （restore_from 虽也会设置，但构造时初始化更安全，避免中间状态窗口）
-                session.workspace = WorkspaceManager(root_path=ws_state.root_path)
+                session.workspace = WorkspaceManager(
+                    root_path=ws_state.root_path,
+                    resolver=workspace_resolver,
+                )
                 session.workspace.restore_from(ws_state)
                 session.workspace.set_on_change(session._on_workspace_change)
             except Exception as e:
@@ -478,7 +565,7 @@ class SessionManager:
         except Exception as e:
             logger.warning(f"ToolManager start failed for restored session (non-fatal): {e}")
 
-        self._sessions[session.id] = session
+        self._sessions[self._session_key(user, session.id)] = session
         logger.info(f"Session restored: {session_id}")
         return session
 
@@ -491,10 +578,11 @@ class SessionManager:
     ) -> Session:
         cfg = config_override or {}
 
-        if session_id and session_id in self._sessions:
-            return self._sessions[session_id]
+        key = self._session_key(user, session_id) if session_id else None
+        if key and key in self._sessions:
+            return self._sessions[key]
 
-        if session_id and self._state_store:
+        if session_id and await self._state_store_for_user(user):
             try:
                 session = await self.restore_session(
                     session_id=session_id,
@@ -514,14 +602,18 @@ class SessionManager:
         )
         return session
 
-    async def delete_session(self, session_id: str) -> None:
-        session = self._sessions.pop(session_id, None)
+    async def delete_session(self, session_id: str, user: UserContext | str | None = None) -> None:
+        key = self._session_key(user, session_id) if user is not None else None
+        session = self._sessions.pop(key, None) if key else self.get_session(session_id)
+        if session and key is None:
+            self._sessions.pop(self._session_key(session.user, session.id), None)
         if session:
             session.unregister_events()
             # [BUG-FIX] 停止 ToolManager，释放资源
             await self._cleanup_session_resources(session)
-        if self._state_store:
-            await self._state_store.clear_session(session_id)
+        store = await self._state_store_for_user(session.user if session else UserContext(user_id=str(user or "default"), username=str(user or "default")))
+        if store:
+            await store.clear_session(session_id)
         logger.info(f"Session deleted: {session_id}")
 
     async def _cleanup_session_resources(self, session: Session) -> None:
@@ -547,11 +639,17 @@ class SessionManager:
         return None
 
     async def list_sessions(self, user_id: str | None = None) -> list[dict]:
+        if self._state_store_registry and user_id:
+            store = await self._state_store_registry.get_store(self._user_key(user_id))
+            sessions = await store.list_all_sessions()
+            return sessions
         if self._state_store:
             sessions = await self._state_store.list_all_sessions()
             return sessions
         result = []
-        for sid, session in self._sessions.items():
+        for (_username, sid), session in self._sessions.items():
+            if user_id and self._user_key(user_id) != self._user_key(session.user):
+                continue
             result.append({
                 "session_id": sid,
                 "agent_state": session.data.context.agent_run_state,
@@ -560,13 +658,28 @@ class SessionManager:
             })
         return result
 
-    async def get_session_messages(self, session_id: str) -> list:
-        session = self._sessions.get(session_id)
+    async def get_session_messages(self, session_id: str, user: UserContext | str | None = None) -> list:
+        session = self.get_session(session_id, user=user)
         if session:
             return session._context.messages
+        if self._state_store_registry and user is not None:
+            store = await self._state_store_registry.get_store(self._user_key(user))
+            return await store.load_messages(session_id)
         if self._state_store:
             return await self._state_store.load_messages(session_id)
         return []
+
+    async def notify_public_workspace_changed(self, changed_paths: list[str]) -> None:
+        """Notify all active sessions that public workspace files changed."""
+        public_paths = [
+            path for path in changed_paths
+            if path == "public" or str(path).startswith("public/")
+        ]
+        if not public_paths:
+            return
+        for session in list(self._sessions.values()):
+            if session.workspace:
+                await session.workspace.update("user", "files_changed", {"changed_paths": public_paths})
 
     # ── SSPT: Prompt 模板 ──
 
