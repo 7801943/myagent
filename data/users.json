@@ -13,21 +13,29 @@
       "visible_skills": [
         "*"
       ],
-      "workspace": {}
+      "workspace": {
+        "private_dir": null
+      }
     },
     {
       "username": "zhouxiang",
       "password_hash": "pbkdf2_sha256$100000$5470fb589d8a6178a1069c1b71a1c8b0$7b825838f72c7e4cee1ec5bb9504b9877ef3d948b41dc080c47a2822d7e0551a",
       "group": "user",
       "disabled": false,
-      "active_ips": [],
+      "active_ips": [
+        "192.168.0.84"
+      ],
       "visible_tools": [
-        "*"
+        "*",
+        "!internet_search",
+        "!query_weather"
       ],
       "visible_skills": [
         "*"
       ],
-      "workspace": {}
+      "workspace": {
+        "private_dir": "/home/zhouxiang/用户文件/zhouxiang"
+      }
     },
     {
       "username": "test",
@@ -36,12 +44,16 @@
       "disabled": false,
       "active_ips": [],
       "visible_tools": [
-        "*"
+        "*",
+        "!internet_search",
+        "!query_weather"
       ],
       "visible_skills": [
         "*"
       ],
-      "workspace": {}
+      "workspace": {
+        "private_dir": "/home/zhouxiang/用户文件/test"
+      }
     }
   ]
 }

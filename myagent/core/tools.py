@@ -17,6 +17,7 @@
 Harness 通过此接口与工具系统交互，不直接依赖 myagent/tools/manager.py。
 """
 from dataclasses import dataclass
+import re
 from typing import Any, Callable, Awaitable
 
 from myagent.tools.manager import ToolManager
@@ -27,6 +28,8 @@ from myagent.safety.cli_fence import CLIFence
 from myagent.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+_ADMIN_ONLY_NETWORK_TOOLS = {"internet_search", "query_weather"}
 
 
 # ── 工具执行结果（含审批状态） ──
@@ -78,8 +81,16 @@ class ToolInterface:
         self._secret_manager = secret_manager
         self._user = user
         self._workspace_resolver = workspace_resolver
-        visible = getattr(user, "preferences", {}).get("visible_tools") if user else None
-        self._visible_tools = None if visible in (None, ["*"], "*") else {str(item) for item in visible}
+        preferences = getattr(user, "preferences", {}) if user else {}
+        visible = preferences.get("visible_tools") if isinstance(preferences, dict) else None
+        group = str(preferences.get("group") or "user") if isinstance(preferences, dict) else "user"
+        (
+            self._visible_include_all,
+            self._visible_tools,
+            self._hidden_tools,
+        ) = self._parse_tool_visibility(visible)
+        if group != "admin":
+            self._hidden_tools.update(_ADMIN_ONLY_NETWORK_TOOLS)
         self._cli_fence = next(
             (rule for rule in self._rules if isinstance(rule, CLIFence)),
             None,
@@ -228,7 +239,32 @@ class ToolInterface:
         return await self._tool_manager.execute(name, tool_call_id=tool_call_id, **args)
 
     def _is_tool_visible(self, name: str) -> bool:
-        return self._visible_tools is None or name in self._visible_tools
+        if name in self._hidden_tools:
+            return False
+        return self._visible_include_all or name in self._visible_tools
+
+    @staticmethod
+    def _parse_tool_visibility(value: Any) -> tuple[bool, set[str], set[str]]:
+        """Parse visible_tools entries.
+
+        Supports ["*"] for all tools and "!tool_name" entries for explicit
+        exclusions, so users can keep broad access while hiding selected tools.
+        """
+        if value is None:
+            items = ["*"]
+        elif isinstance(value, str):
+            items = [item.strip() for item in value.split(",") if item.strip()]
+        elif isinstance(value, list):
+            items = [str(item).strip() for item in value if str(item).strip()]
+        else:
+            items = ["*"]
+        if not items:
+            items = ["*"]
+
+        include_all = "*" in items
+        visible = {item for item in items if item != "*" and not item.startswith("!")}
+        hidden = {item[1:] for item in items if item.startswith("!") and item[1:]}
+        return include_all, visible, hidden
 
     def _apply_workspace_policy(self, name: str, args: dict) -> dict | ToolResult | None:
         resolver = self._workspace_resolver
@@ -260,21 +296,65 @@ class ToolInterface:
             if name == "cli_execute":
                 command = str(next_args.get("command") or "")
                 cwd = str(next_args.get("cwd") or "")
+                cwd_area = None
                 if cwd:
                     resolved_cwd = resolver.normalize_for_tool(cwd, operation="read")
-                    if resolved_cwd.area == "public":
-                        return ToolResult(content="安全策略拒绝：agent 不允许在 public/ 公共目录中执行 CLI。", is_error=True)
                     next_args["cwd"] = str(resolved_cwd.real_path)
+                    cwd_area = resolved_cwd.area
                 else:
-                    next_args["cwd"] = str(resolver.private_root)
+                    next_args["cwd"] = str(resolver.real_cwd_for_agent())
                 public_root = str(resolver.public_root)
-                if "public/" in command or public_root in command:
-                    return ToolResult(content="安全策略拒绝：agent 不允许通过 CLI 访问或修改 public/ 公共目录。", is_error=True)
+                command = self._rewrite_workspace_virtual_paths(command, resolver)
+                next_args["command"] = command
+                touches_public = (
+                    public_root in command
+                    or cwd_area == "public"
+                )
+                if touches_public and self._cli_may_mutate_public(command):
+                    return ToolResult(content="安全策略拒绝：agent 不允许通过 CLI 修改公共目录。", is_error=True)
                 return next_args
         except Exception as exc:
             return ToolResult(content=f"工作区权限拒绝工具 '{name}': {exc}", is_error=True)
 
         return None
+
+    @staticmethod
+    def _rewrite_workspace_virtual_paths(command: str, resolver) -> str:
+        """Let CLI commands accept visible workspace paths without executing URI literals."""
+        replacements = {
+            resolver.virtual_root: str(resolver.real_cwd_for_agent()).rstrip("/"),
+            resolver.private_virtual_root: str(resolver.private_root).rstrip("/"),
+            resolver.public_virtual_root: str(resolver.public_root).rstrip("/"),
+            "private": str(resolver.private_root).rstrip("/"),
+            "public": str(resolver.public_root).rstrip("/"),
+        }
+        for label, real_root in sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True):
+            command = re.sub(
+                rf"(?<![\w/.-]){re.escape(label)}(?=(?:/|$|[\s;&|)<>]))",
+                real_root,
+                command,
+            )
+        return command
+
+    @staticmethod
+    def _cli_may_mutate_public(command: str) -> bool:
+        """Conservative public-dir mutation detector for CLI commands."""
+        mutating_commands = (
+            "rm", "rmdir", "mv", "cp", "mkdir", "touch", "chmod", "chown", "chgrp",
+            "ln", "truncate", "dd", "tee", "install", "sed", "python", "python3",
+            "bash", "sh", "zsh", "fish", "perl", "ruby", "node", "tar", "zip",
+            "unzip", "rsync",
+        )
+        command_pattern = r"(^|[;&|()]\s*|\s)(" + "|".join(re.escape(c) for c in mutating_commands) + r")(\s|$)"
+        if re.search(command_pattern, command):
+            return True
+        if re.search(r"\bfind\b.*\s-(delete|exec|execdir|ok|okdir|fls|fprint|fprint0|fprintf)(\s|$)", command):
+            return True
+        if re.search(r"(^|[\s;|&])(?:1?>|>>)", command):
+            return True
+        if re.search(r"\bgit\b.*\s(add|apply|checkout|clean|commit|fetch|merge|mv|pull|push|rebase|reset|restore|rm|stash|switch|worktree)(\s|$)", command):
+            return True
+        return False
 
     # ── 批量并行执行 ──
 
@@ -405,6 +485,11 @@ class ToolInterface:
         if not self._tool_manager:
             return []
         records = self._tool_manager.list_schemas()
+        if hasattr(records, "__await__"):
+            close = getattr(records, "close", None)
+            if callable(close):
+                close()
+            return []
         if not records:
             return []
         return [

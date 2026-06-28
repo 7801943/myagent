@@ -842,7 +842,7 @@ function aiReadWorkspaceFile(file) {
     const text = [
         '请使用 file_read 工具读取以下 workspace 文件，并总结主要内容，指出与当前任务相关的关键信息。',
         `相对路径：${file.path}`,
-        '请直接使用上述 private/ 或 public/ 虚拟路径，不要改写为系统绝对路径。',
+        '请直接使用上述工作区相对路径，不要改写为系统绝对路径。',
     ].join('\n');
 
     const input = document.getElementById('userInput');

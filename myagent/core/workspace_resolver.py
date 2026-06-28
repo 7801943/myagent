@@ -1,4 +1,4 @@
-"""Virtual private/public workspace path resolver."""
+"""Workspace path resolver with private/public permission areas."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ def safe_workspace_username(raw: str) -> str:
 
 
 class WorkspaceResolver:
-    """Maps virtual workspace paths to per-user private and shared public roots."""
+    """Maps user-visible workspace paths to per-user private and shared public roots."""
 
     def __init__(
         self,
@@ -49,10 +49,23 @@ class WorkspaceResolver:
         self.public_root = Path(public_root).expanduser().resolve()
         self.private_root.mkdir(parents=True, exist_ok=True)
         self.public_root.mkdir(parents=True, exist_ok=True)
+        self.private_label, self.public_label = self._build_root_labels()
 
     @property
     def virtual_root(self) -> str:
         return f"workspace://{safe_workspace_username(self.username)}"
+
+    @property
+    def private_virtual_root(self) -> str:
+        return self.private_label
+
+    @property
+    def public_virtual_root(self) -> str:
+        return self.public_label
+
+    @property
+    def root_virtual_paths(self) -> tuple[str, str]:
+        return (self.private_virtual_root, self.public_virtual_root)
 
     def resolve(
         self,
@@ -103,9 +116,9 @@ class WorkspaceResolver:
         except Exception:
             return None
         if path == self.private_root:
-            return "private"
+            return self.private_virtual_root
         if path == self.public_root:
-            return "public"
+            return self.public_virtual_root
         if self.private_root in path.parents:
             return self._join_virtual("private", path.relative_to(self.private_root).as_posix())
         if self.public_root in path.parents:
@@ -114,41 +127,50 @@ class WorkspaceResolver:
 
     def is_under_public(self, path: str | Path) -> bool:
         virtual = self.to_virtual_path(path)
-        return bool(virtual == "public" or (virtual and virtual.startswith("public/")))
+        return self.virtual_path_area(virtual) == "public" if virtual else False
 
     def is_under_private(self, path: str | Path) -> bool:
         virtual = self.to_virtual_path(path)
-        return bool(virtual == "private" or (virtual and virtual.startswith("private/")))
+        return self.virtual_path_area(virtual) == "private" if virtual else False
+
+    def virtual_path_area(self, path: str | None) -> WorkspaceArea | None:
+        try:
+            area, _inner = self._split_virtual_path(path or "")
+            return area
+        except ValueError:
+            return None
 
     async def scan_dir(self, virtual_dir: str | None = None) -> list[FileInfo]:
         virtual_dir = self._normalize_virtual_path(virtual_dir or "")
         if not virtual_dir:
             return [
-                self._dir_info("private", "private"),
-                self._dir_info("public", "public"),
+                self._dir_info(self.private_virtual_root, "private"),
+                self._dir_info(self.public_virtual_root, "public"),
             ]
         area, inner = self._split_virtual_path(virtual_dir)
         root = self.private_root if area == "private" else self.public_root
         entries = _scan_level_sync(root, inner or None)
-        prefix = area if not inner else f"{area}/{inner}"
         result: list[FileInfo] = []
         for entry in entries:
-            virtual_path = f"{prefix}/{entry.path}" if entry.path else prefix
-            entry.path = virtual_path
+            entry.path = self._join_virtual(area, entry.path)
             self._apply_permissions(entry, area)
             result.append(entry)
         return result
+
+    def real_cwd_for_agent(self) -> Path:
+        """Return the concrete cwd CLI tools should use for this workspace."""
+        return self.private_root
 
     def normalize_for_tool(self, path: str, *, operation: WorkspaceOperation) -> ResolvedWorkspacePath:
         raw = str(path or "").replace("\\", "/")
         virtual = self.to_virtual_path(raw)
         if virtual is None:
-            if raw.startswith("public/") or raw == "public" or raw.startswith("private/") or raw == "private":
+            if self.virtual_path_area(raw):
                 virtual = raw
             elif Path(raw).is_absolute():
                 raise PermissionError("工具路径不在当前工作区内")
             else:
-                virtual = f"private/{raw.strip('/')}"
+                virtual = self._join_virtual("private", raw.strip("/"))
         return self.resolve(
             virtual,
             operation=operation,
@@ -174,17 +196,43 @@ class WorkspaceResolver:
     def _split_virtual_path(self, path: str) -> tuple[WorkspaceArea, str]:
         normalized = self._normalize_virtual_path(path)
         if not normalized:
-            raise ValueError("路径必须以 private/ 或 public/ 开头")
+            raise ValueError(self._path_error())
+        for area, label in (("private", self.private_virtual_root), ("public", self.public_virtual_root)):
+            if normalized == label or normalized.startswith(label + "/"):
+                return area, normalized.removeprefix(label).strip("/")
+        # Backward compatibility for persisted snapshots and old prompts.
         if normalized == "private" or normalized.startswith("private/"):
             return "private", normalized.removeprefix("private").strip("/")
         if normalized == "public" or normalized.startswith("public/"):
             return "public", normalized.removeprefix("public").strip("/")
-        raise ValueError("路径必须以 private/ 或 public/ 开头")
+        raise ValueError(self._path_error())
+
+    def _join_virtual(self, area: WorkspaceArea, inner: str) -> str:
+        label = self.private_virtual_root if area == "private" else self.public_virtual_root
+        inner = str(inner or "").strip("/")
+        return f"{label}/{inner}" if inner else label
+
+    def _path_error(self) -> str:
+        return f"路径必须以 {self.private_virtual_root}/ 或 {self.public_virtual_root}/ 开头"
+
+    def _build_root_labels(self) -> tuple[str, str]:
+        private_label = self._safe_label(self.private_root.name or "private")
+        public_label = self._safe_label(self.public_root.name or "public")
+        if private_label == public_label:
+            private_label = self._safe_label(self.private_root.parent.name + "_" + private_label)
+        if private_label == public_label:
+            private_label = f"{private_label}_private"
+        return private_label, public_label
 
     @staticmethod
-    def _join_virtual(area: WorkspaceArea, inner: str) -> str:
-        inner = str(inner or "").strip("/")
-        return f"{area}/{inner}" if inner else area
+    def _safe_label(label: str) -> str:
+        cleaned = str(label or "").replace("\\", "/").strip("/")
+        cleaned = cleaned.replace("/", "_")
+        if cleaned in {"", ".", ".."}:
+            return "workspace"
+        if cleaned in {"private", "public"}:
+            return f"{cleaned}_dir"
+        return cleaned
 
     @staticmethod
     def _normalize_virtual_path(path: str | None) -> str:
@@ -197,4 +245,3 @@ class WorkspaceResolver:
         if normalized == "." or normalized == ".." or normalized.startswith("../"):
             return ""
         return normalized.strip("/")
-

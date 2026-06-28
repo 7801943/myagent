@@ -105,7 +105,7 @@ async def file_query(
     从大型文件中查询与 query 相关的信息，并返回答案总结与引用原文。
 
     Args:
-        path: 文件路径。推荐传入绝对路径；如果用户给的是相对路径，调用前请先用当前 workspace root 拼接成绝对路径。本工具不会按 workspace root 自动解析相对路径
+        path: 文件路径。可传绝对路径、workspace 可见路径或相对路径；在会话工作区中会由工具层解析到允许的真实路径
         query: 需要在文件中回答的问题或检索目标
         mode: 返回模式，可选 "answer" 或 "evidence"。"answer" 返回答案总结和引用；"evidence" 只返回引用原文
         sheet_name: XLSX 工作表名称。未指定时检索全部工作表
@@ -148,7 +148,7 @@ async def _file_query_impl(
     从文件中检索与 query 相关的信息，并返回答案总结与引用原文。
 
     Args:
-        path: 文件路径。推荐传入绝对路径；如果用户给的是相对路径，调用前请先用当前 workspace root 拼接成绝对路径。本工具不会按 workspace root 自动解析相对路径
+        path: 文件路径。可传绝对路径、workspace 可见路径或相对路径；在会话工作区中会由工具层解析到允许的真实路径
         query: 需要在文件中回答的问题或检索目标
         mode: 返回模式，可选 "answer" 或 "evidence"。"answer" 返回答案总结和引用；"evidence" 只返回引用原文
         sheet_name: XLSX 工作表名称。未指定时检索全部工作表

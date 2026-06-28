@@ -314,6 +314,137 @@ class SessionManager:
             public_root=public_dir,
         )
 
+    def _normalize_restored_workspace_state(self, ws_state, workspace_resolver):
+        """Convert legacy workspace snapshots to the current visible workspace paths."""
+        if not workspace_resolver:
+            return ws_state
+        root_path = str(getattr(ws_state, "root_path", "") or "")
+        if root_path.startswith("workspace://"):
+            ws_state.root_path = workspace_resolver.virtual_root
+            self._canonicalize_workspace_paths(ws_state, workspace_resolver)
+            return self._ensure_virtual_workspace_roots(ws_state, workspace_resolver)
+
+        legacy_area = None
+        try:
+            legacy_root = Path(root_path).expanduser().resolve()
+            if legacy_root == workspace_resolver.public_root:
+                legacy_area = "public"
+            elif legacy_root == workspace_resolver.private_root:
+                legacy_area = "private"
+        except Exception:
+            legacy_area = None
+
+        ws_state.root_path = workspace_resolver.virtual_root
+        if not legacy_area:
+            # Unknown legacy root: discard stale tree and let resolver rescan.
+            ws_state.files = []
+            ws_state.open_files = []
+            ws_state.active_file_index = None
+            ws_state.expanded_dirs = []
+            return ws_state
+
+        def _prefix(path: str) -> str:
+            raw = str(path or "").strip("/")
+            try:
+                area, inner = workspace_resolver._split_virtual_path(raw)
+                return workspace_resolver._join_virtual(area, inner)
+            except ValueError:
+                pass
+            return workspace_resolver._join_virtual(legacy_area, raw)
+
+        for file_info in ws_state.files:
+            file_info.path = _prefix(file_info.path)
+            area = workspace_resolver.virtual_path_area(file_info.path) or legacy_area
+            workspace_resolver._apply_permissions(file_info, area)
+        for tab in ws_state.open_files:
+            tab.path = _prefix(tab.path)
+        ws_state.expanded_dirs = [_prefix(path) for path in ws_state.expanded_dirs]
+        return self._ensure_virtual_workspace_roots(ws_state, workspace_resolver)
+
+    def _canonicalize_workspace_paths(self, ws_state, workspace_resolver):
+        """Rewrite legacy private/public paths to the current visible directory names."""
+        def _canonical(path: str) -> str:
+            raw = str(path or "").strip("/")
+            try:
+                area, inner = workspace_resolver._split_virtual_path(raw)
+                return workspace_resolver._join_virtual(area, inner)
+            except ValueError:
+                return raw
+
+        for file_info in ws_state.files:
+            file_info.path = _canonical(file_info.path)
+        for tab in ws_state.open_files:
+            tab.path = _canonical(tab.path)
+        ws_state.expanded_dirs = [_canonical(path) for path in ws_state.expanded_dirs]
+        return ws_state
+
+    def _ensure_virtual_workspace_roots(self, ws_state, workspace_resolver):
+        """Ensure restored workspace snapshots have visible configured roots."""
+        for file_info in ws_state.files:
+            area = workspace_resolver.virtual_path_area(file_info.path)
+            if area:
+                workspace_resolver._apply_permissions(file_info, area)
+
+        existing = {str(file_info.path or "") for file_info in ws_state.files}
+        roots = []
+        for root_path, area in (
+            (workspace_resolver.private_virtual_root, "private"),
+            (workspace_resolver.public_virtual_root, "public"),
+        ):
+            if root_path not in existing:
+                roots.append(workspace_resolver._dir_info(root_path, area))
+        if roots:
+            ws_state.files = roots + ws_state.files
+
+        known_dirs = {str(file_info.path or "") for file_info in ws_state.files if file_info.is_dir}
+        expanded_dirs = []
+        for root_path in workspace_resolver.root_virtual_paths:
+            if root_path in known_dirs:
+                expanded_dirs.append(root_path)
+        for path in ws_state.expanded_dirs:
+            if path and path in known_dirs and path not in expanded_dirs:
+                expanded_dirs.append(path)
+        ws_state.expanded_dirs = expanded_dirs
+        return ws_state
+
+    async def _initial_workspace_state(self, workspace_resolver):
+        """Build the default workspace tree with configured first-level entries."""
+        from myagent.core.workspace import WorkspaceState
+
+        state = WorkspaceState(root_path=workspace_resolver.virtual_root)
+        files = await workspace_resolver.scan_dir(None)
+        expanded_dirs: list[str] = []
+        for root_dir in workspace_resolver.root_virtual_paths:
+            try:
+                files.extend(await workspace_resolver.scan_dir(root_dir))
+                expanded_dirs.append(root_dir)
+            except Exception as exc:
+                logger.warning("Failed to scan workspace root '%s': %s", root_dir, exc)
+        state.files = files
+        state.expanded_dirs = expanded_dirs
+        return state
+
+    async def _hydrate_workspace_roots(self, ws_state, workspace_resolver):
+        """Merge current configured root entries into a restored workspace snapshot."""
+        if not ws_state.files:
+            return await self._initial_workspace_state(workspace_resolver)
+
+        existing = {str(file_info.path or "") for file_info in ws_state.files}
+        additions = []
+        for virtual_dir in (None, *workspace_resolver.root_virtual_paths):
+            try:
+                entries = await workspace_resolver.scan_dir(virtual_dir)
+            except Exception as exc:
+                logger.warning("Failed to hydrate workspace dir '%s': %s", virtual_dir or "/", exc)
+                continue
+            for entry in entries:
+                if entry.path not in existing:
+                    additions.append(entry)
+                    existing.add(entry.path)
+        if additions:
+            ws_state.files.extend(additions)
+        return self._ensure_virtual_workspace_roots(ws_state, workspace_resolver)
+
     def _create_harness(
         self,
         no_safety: bool = False,
@@ -535,6 +666,9 @@ class SessionManager:
                 from myagent.core.workspace import WorkspaceManager, WorkspaceState
                 ws_data = json.loads(workspace_json)
                 ws_state = WorkspaceState.from_dict(ws_data)
+                ws_state = self._normalize_restored_workspace_state(ws_state, workspace_resolver)
+                if workspace_resolver:
+                    ws_state = await self._hydrate_workspace_roots(ws_state, workspace_resolver)
                 # [BUG-FIX] 传入 root_path 初始化，确保 WorkspaceManager.root_path 立即可用
                 # （restore_from 虽也会设置，但构造时初始化更安全，避免中间状态窗口）
                 session.workspace = WorkspaceManager(
@@ -671,14 +805,15 @@ class SessionManager:
 
     async def notify_public_workspace_changed(self, changed_paths: list[str]) -> None:
         """Notify all active sessions that public workspace files changed."""
-        public_paths = [
-            path for path in changed_paths
-            if path == "public" or str(path).startswith("public/")
-        ]
-        if not public_paths:
-            return
         for session in list(self._sessions.values()):
-            if session.workspace:
+            resolver = getattr(session.workspace, "resolver", None) if session.workspace else None
+            if not resolver:
+                continue
+            public_paths = [
+                path for path in changed_paths
+                if resolver.virtual_path_area(path) == "public"
+            ]
+            if public_paths:
                 await session.workspace.update("user", "files_changed", {"changed_paths": public_paths})
 
     # ── SSPT: Prompt 模板 ──

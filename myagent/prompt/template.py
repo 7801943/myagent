@@ -66,7 +66,10 @@ class PromptTemplate(BaseModel):
                     priority=SectionPriority.MEDIUM,
                     enabled_when="{{ workspace_root | length > 0 }}",
                     template=(
-                        "当前工作目录: {{ workspace_root }}\n"
+                        "{% if workspace_cwd %}CLI 默认工作目录: {{ workspace_cwd }}\n{% endif %}"
+                        "{% if workspace_public_dir %}公用目录: {{ workspace_public_dir }}"
+                        "{% if workspace_public_path %}（前端可见路径: {{ workspace_public_path }}/）{% endif %}\n{% endif %}"
+                        "使用 cli_execute 时不要在 command 中使用前端虚拟 URI；如需指定目录，优先传 cwd。\n"
                         "{% if active_file %}活跃文件: {{ active_file }}{% endif %}\n"
                         "{{ workspace_files }}"
                     ),

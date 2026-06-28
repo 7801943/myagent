@@ -76,7 +76,7 @@ class PathValidation:
 async def preflight_upload(payload: PreflightRequest, request: Request):
     """上传前校验路径、压缩扩展名与同名冲突。"""
     session = _session_for_request(request, payload.session_id)
-    target_dir = _normalize_workspace_target_dir(payload.target_dir)
+    target_dir = _normalize_workspace_target_dir(payload.target_dir, session)
     _validate_target_directory(session, target_dir)
 
     conflicts: list[dict] = []
@@ -125,7 +125,7 @@ async def upload_files(request: Request):
     paths = [str(item) for item in form.getlist("paths[]")]
 
     session = _session_for_request(request, session_id)
-    clean_target_dir = _normalize_workspace_target_dir(target_dir)
+    clean_target_dir = _normalize_workspace_target_dir(target_dir, session)
     _validate_target_directory(session, clean_target_dir)
 
     if len(files) != len(paths):
@@ -316,9 +316,12 @@ def _session_for_request(request: Request, session_id: str):
     return session
 
 
-def _normalize_workspace_target_dir(target_dir: str) -> str:
+def _normalize_workspace_target_dir(target_dir: str, session=None) -> str:
     clean = _validate_relative_path(target_dir, allow_empty=True)
-    return clean or "private"
+    if clean:
+        return clean
+    resolver = getattr(session.workspace, "resolver", None) if session and session.workspace else None
+    return resolver.private_virtual_root if resolver else ""
 
 
 def _resolve_workspace_path(session, relative_path: str, *, operation: str, must_exist: bool = False) -> Path:

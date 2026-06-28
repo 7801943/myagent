@@ -100,7 +100,7 @@ async def document_callback(
     workspace_root = session.workspace.root_path if session and session.workspace else None
     result = await service.handle_callback(path, token, payload, workspace_root=workspace_root, resolver=resolver)
     if result.get("error") == 0 and session and session.workspace and int(payload.get("status") or 0) in {2, 6}:
-        if path == "public" or path.startswith("public/"):
+        if resolver and resolver.virtual_path_area(path) == "public":
             await get_session_manager().notify_public_workspace_changed([path])
         else:
             await session.workspace.update("user", "files_changed", {"changed_paths": [path]})

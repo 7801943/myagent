@@ -191,7 +191,7 @@ class WorkspaceManager:
         """生成文件列表的文本摘要，用于注入 LLM 上下文。"""
         if not self._state.files and not self._state.root_path:
             return ""
-        lines = [f"[工作空间] {self._state.root_path}"]
+        lines = ["[工作空间] 以下路径为前端可见路径，文件工具可直接使用"]
         file_count = sum(1 for f in self._state.files if not f.is_dir)
         dir_count = sum(1 for f in self._state.files if f.is_dir)
         lines.append(f"  共 {dir_count} 个目录, {file_count} 个文件")
@@ -258,7 +258,15 @@ class WorkspaceManager:
         if self._resolver:
             self._state.root_path = self._resolver.virtual_root
             files = await self._resolver.scan_dir(None)
+            expanded_dirs: list[str] = []
+            for root_dir in self._resolver.root_virtual_paths:
+                try:
+                    files.extend(await self._resolver.scan_dir(root_dir))
+                    expanded_dirs.append(root_dir)
+                except Exception:
+                    pass
             self._state.files = files
+            self._state.expanded_dirs = expanded_dirs
         elif root_path:
             files = await scan_dir_files(root_path)
             self._state.files = files

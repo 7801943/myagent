@@ -21,6 +21,8 @@ cli_policies:
       - cat
       - head
       - tail
+      - sort
+      - echo
       - wc
       - diff
       - cmp

@@ -1070,7 +1070,7 @@ async def file_edit_table(
     结构化编辑 XLSX 表格文件。
 
     Args:
-        path: 文件路径，仅支持 .xlsx。推荐传入绝对路径；如果用户给的是相对路径，调用前请先用当前 workspace root 拼接成绝对路径。本工具不会按 workspace root 自动解析相对路径
+        path: 文件路径，仅支持 .xlsx。可传绝对路径、workspace 可见路径或相对路径；在会话工作区中会由工具层解析到允许的真实路径
         operation: 编辑动作。可选 set_range/update_cells/clear_range/format_range/append_rows/update_rows_by_key/upsert_rows/delete_rows/insert_rows
         sheet_name: 工作表名。单 Sheet 自动选择；table_name 可唯一定位时也可省略
         payload: operation 对应的结构化参数
@@ -1351,7 +1351,7 @@ async def file_edit(
     精确编辑已有文件（纯文本 / DOCX）。
 
     Args:
-        path: 文件路径，支持文本/DOCX。推荐传入绝对路径；如果用户给的是相对路径，调用前请先用当前 workspace root 拼接成绝对路径。本工具不会按 workspace root 自动解析相对路径
+        path: 文件路径，支持文本/DOCX。可传绝对路径、workspace 可见路径或相对路径；在会话工作区中会由工具层解析到允许的真实路径
         target_content: 要被替换的原始文本（精确匹配，必填）
         replacement_content: 替换后的新文本（必填）
         start_line: 纯文本文件搜索范围起始行（1-based）
@@ -1417,4 +1417,3 @@ async def file_edit(
             content=f"不支持的文件类型: {ext or '(无扩展名)'}。file_edit 支持纯文本、DOCX 格式。编辑 XLSX 请使用 file_edit_table。",
             is_error=True,
         )
-

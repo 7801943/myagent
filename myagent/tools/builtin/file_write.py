@@ -16,7 +16,7 @@ async def file_write(path: str, content: str,
     将内容写入指定路径的文件。
 
     Args:
-        path: 文件路径。推荐传入绝对路径；如果用户给的是相对路径，调用前请先用当前 workspace root 拼接成绝对路径。本工具不会按 workspace root 自动解析相对路径。不存在则创建，已存在则覆盖
+        path: 文件路径。可传绝对路径、workspace 可见路径或相对路径；在会话工作区中会由工具层解析到允许的真实路径。不存在则创建，已存在则覆盖
         content: 要写入的文本内容
         append: 是否追加到文件末尾。默认为 False（覆盖写入）
     """

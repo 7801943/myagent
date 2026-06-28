@@ -144,6 +144,22 @@ state:
   per_user_dir: "data/state/users"
 
 workspace:
+  # 多用户工作区前端直接显示配置目录名：
+  #   <private_dir 的目录名>/... -> 当前用户私有目录
+  #   <public_dir 的目录名>/...  -> 所有用户共享目录
+  #
+  # 例如 zhouxiang 用户 private_dir=/home/zhouxiang/用户文件/zhouxiang，
+  # public_dir=/home/zhouxiang/工作文件 时，前端显示：
+  #   zhouxiang/...
+  #   工作文件/...
+  #
+  # 用户私有目录默认由 private_dir_template 生成；如需单独覆盖某个用户，
+  # 在 data/users.json 中设置该用户的 workspace.private_dir。
+  #
+  # 示例：
+  #   admin    -> workspaces/users/admin
+  #   zhouxiang -> workspaces/users/zhouxiang
+  #   test     -> workspaces/users/test
   base_dir: "workspaces"
   private_dir_template: "workspaces/users/{username}"
   public_dir: "workspaces/public"

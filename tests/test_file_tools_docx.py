@@ -12,12 +12,12 @@ def run_tool(coro):
     return asyncio.run(coro)
 
 
-def test_file_tool_path_schema_recommends_workspace_absolute_paths():
+def test_file_tool_path_schema_allows_workspace_paths():
     for fn in (file_read, file_write, file_edit, file_edit_table):
         description = generate_schema(fn)["properties"]["path"]["description"]
         assert "绝对路径" in description
-        assert "workspace root" in description
-        assert "不会按 workspace root 自动解析相对路径" in description
+        assert "workspace 可见路径" in description
+        assert "工具层解析" in description
 
 
 def test_file_read_docx_outputs_paragraphs_and_tables_in_body_order(tmp_path):

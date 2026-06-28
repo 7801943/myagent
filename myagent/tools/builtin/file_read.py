@@ -46,7 +46,7 @@ async def file_read(
     读取文件内容，支持多种格式。始终显示行号。
 
     Args:
-        path: 文件路径。推荐传入绝对路径；如果用户给的是相对路径，调用前请先用当前 workspace root 拼接成绝对路径。本工具不会按 workspace root 自动解析相对路径
+        path: 文件路径。可传绝对路径、workspace 可见路径或相对路径；在会话工作区中会由工具层解析到允许的真实路径
         sheet_name: XLSX 工作表名称。仅当读取 XLSX 文件且有多个工作表时需要指定，未指定默认先返回所有表名
         start_line_or_page: 起始位置（从1开始，包含该行/页）。对文本/CSV/DOCX/XLSX 表示起始行号，对 PDF 表示起始页码。未指定则从第1行/页开始
         end_line_or_page: 结束位置（包含该行/页）。对文本/CSV/DOCX/XLSX 表示结束行号，对 PDF 表示结束页码。未指定则返回到文件末尾
@@ -148,5 +148,4 @@ async def file_read(
 
     except Exception as e:
         return ToolResult(content=f"读取文件异常: {type(e).__name__}: {e}", is_error=True)
-
 

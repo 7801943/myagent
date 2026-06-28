@@ -372,22 +372,24 @@ class Session:
             return
         tool_name = event.tool_name
         result = event.result
-        file_tools = {"file_write", "file_read", "file_edit", "file_edit_table", "cli_execute"}
+        file_tools = {"file_write", "file_read", "file_query", "file_diff", "file_edit", "file_edit_table", "cli_execute"}
         if tool_name in file_tools:
             await self.workspace.update("agent", "files_changed", {})
 
         # 读/写/编辑工具成功操作文件后，把对应文件设为 active tab。
         # 这让前端在 agent 操作完成后自动预览或刷新 OnlyOffice 编辑器。
-        if tool_name in {"file_read", "file_write", "file_edit", "file_edit_table"} and hasattr(result, 'metadata'):
+        if tool_name in {"file_read", "file_query", "file_write", "file_edit", "file_edit_table"} and hasattr(result, 'metadata'):
             if getattr(result, "is_error", False):
                 return
             file_path = result.metadata.get("path", "") if isinstance(result.metadata, dict) else ""
             if file_path:
                 import os
+                resolver = getattr(self.workspace, "resolver", None)
+                rel_path = resolver.to_virtual_path(file_path) if resolver else None
                 root = self.workspace.root_path
-                if file_path.startswith(root):
+                if not rel_path and file_path.startswith(root):
                     rel_path = os.path.relpath(file_path, root)
-                else:
+                if not rel_path:
                     rel_path = file_path
                 await self.workspace.update("agent", "open_file", {"path": rel_path})
 

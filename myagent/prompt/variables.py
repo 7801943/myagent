@@ -58,6 +58,9 @@ class PromptVariables:
 
     # ── 工作空间 ──
     workspace_root: str = ""
+    workspace_cwd: str = ""
+    workspace_public_dir: str = ""
+    workspace_public_path: str = ""
     workspace_files: str = ""
     open_files: list[dict] = field(default_factory=list)
     active_file: str = ""
@@ -158,11 +161,21 @@ class VariableCollector:
 
         # ── 工作空间 ──
         workspace_root = ""
+        workspace_cwd = ""
+        workspace_public_dir = ""
+        workspace_public_path = ""
         workspace_files = ""
         open_files = []
         active_file = ""
         if session.workspace:
             workspace_root = session.workspace.root_path
+            resolver = getattr(session.workspace, "resolver", None)
+            if resolver is not None:
+                workspace_cwd = str(resolver.real_cwd_for_agent())
+                workspace_public_dir = str(resolver.public_root)
+                workspace_public_path = resolver.public_virtual_root
+            else:
+                workspace_cwd = workspace_root
             workspace_files = session.workspace.get_file_list_text()
             open_files = [
                 {
@@ -204,6 +217,9 @@ class VariableCollector:
             user_info=user_info,
             current_datetime=current_datetime,
             workspace_root=workspace_root,
+            workspace_cwd=workspace_cwd,
+            workspace_public_dir=workspace_public_dir,
+            workspace_public_path=workspace_public_path,
             workspace_files=workspace_files,
             open_files=open_files,
             active_file=active_file,
