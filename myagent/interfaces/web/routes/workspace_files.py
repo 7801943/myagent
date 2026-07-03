@@ -30,6 +30,16 @@ _FORBIDDEN_ARCHIVE_SUFFIXES = {
     ".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst",
 }
 
+# OOXML 与 ODF 文档本质上是 zip 容器，文件头与普通 zip 同为 PK\x03\x04。
+# 这里按扩展名建立白名单，使 docx/xlsx/pptx/odt 等文档不会被魔数检测当成压缩包拦截。
+_ZIP_BASED_OFFICE_SUFFIXES = {
+    ".docx", ".docm", ".dotx", ".dotm",
+    ".xlsx", ".xlsm", ".xlsb", ".xltx", ".xltm",
+    ".pptx", ".pptm", ".potx", ".potm", ".ppsx", ".ppsm", ".sldx",
+    ".odt", ".ods", ".odp", ".odg", ".odf", ".ott", ".ots", ".otp", ".otg",
+    ".vsdx", ".vssx", ".vstx", ".vstm", ".vdx",
+}
+
 _ARCHIVE_MAGIC_LABELS: tuple[tuple[bytes, str], ...] = (
     (b"PK\x03\x04", "zip"),
     (b"PK\x05\x06", "zip"),
@@ -419,6 +429,11 @@ def _has_forbidden_archive_suffix(path: str) -> bool:
     return any(lower.endswith(suffix) for suffix in _FORBIDDEN_ARCHIVE_SUFFIXES)
 
 
+def _has_zip_based_office_suffix(path: str) -> bool:
+    lower = path.lower()
+    return any(lower.endswith(suffix) for suffix in _ZIP_BASED_OFFICE_SUFFIXES)
+
+
 def _archive_magic_label(header: bytes) -> str:
     for magic, label in _ARCHIVE_MAGIC_LABELS:
         if header.startswith(magic):
@@ -440,7 +455,9 @@ async def _save_upload_atomically(upload: UploadFile, target_path: Path) -> int:
 
     header = await upload.read(4096)
     magic_label = _archive_magic_label(header)
-    if magic_label:
+    # docx/xlsx/pptx 等 OOXML 及 ODF 文档本身就是 zip 容器，按扩展名白名单放行，
+    # 其余命中压缩包魔数（含改名的 .txt 等）一律拦截。
+    if magic_label and not (magic_label == "zip" and _has_zip_based_office_suffix(target_path.name)):
         raise HTTPException(status_code=415, detail=f"不允许上传压缩或归档文件: {magic_label}")
 
     fd, tmp_name = tempfile.mkstemp(prefix=f".{target_path.name}.", suffix=".tmp", dir=str(target_path.parent))

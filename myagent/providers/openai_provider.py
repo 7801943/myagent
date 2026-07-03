@@ -25,6 +25,8 @@ class OpenAIProvider(BaseProvider):
         thinking_enabled: bool = False,
         thinking_enabled_extra_body: dict | None = None,
         thinking_disabled_extra_body: dict | None = None,
+        thinking_default_level: str | None = None,
+        thinking_levels: list[dict] | None = None,
     ):
         super().__init__(
             name,
@@ -35,6 +37,8 @@ class OpenAIProvider(BaseProvider):
             thinking_enabled=thinking_enabled,
             thinking_enabled_extra_body=thinking_enabled_extra_body,
             thinking_disabled_extra_body=thinking_disabled_extra_body,
+            thinking_default_level=thinking_default_level,
+            thinking_levels=thinking_levels,
         )
         self.capabilities = ProviderCapabilities(supports_vision=True, supports_tool_calls=True)
         self._client = None
@@ -279,16 +283,40 @@ class OpenAIProvider(BaseProvider):
         if kwargs:
             create_kwargs.update(kwargs)
         if self.thinking_supported:
-            thinking_body = (
-                self.thinking_enabled_extra_body
-                if self.thinking_enabled
-                else self.thinking_disabled_extra_body
-            )
+            thinking_body: dict = {}
+            if self.thinking_enabled:
+                thinking_body = self._merge_dicts(thinking_body, self.thinking_enabled_extra_body)
+                level_body = self._thinking_level_extra_body()
+                thinking_body = self._merge_dicts(thinking_body, level_body)
+            else:
+                thinking_body = self.thinking_disabled_extra_body
             if thinking_body:
                 extra_body = dict(create_kwargs.get("extra_body") or {})
-                extra_body.update(thinking_body)
+                extra_body = self._merge_dicts(extra_body, thinking_body)
                 create_kwargs["extra_body"] = extra_body
         return create_kwargs
+
+    def _thinking_level_extra_body(self) -> dict:
+        if not self.thinking_level:
+            return {}
+        for level in self.thinking_levels:
+            if level.get("id") == self.thinking_level:
+                return level.get("extra_body") or {}
+        return {}
+
+    @staticmethod
+    def _merge_dicts(base: dict, override: dict | None) -> dict:
+        merged = dict(base or {})
+        for key, value in (override or {}).items():
+            if (
+                key in merged
+                and isinstance(merged[key], dict)
+                and isinstance(value, dict)
+            ):
+                merged[key] = OpenAIProvider._merge_dicts(merged[key], value)
+            else:
+                merged[key] = value
+        return merged
 
     @staticmethod
     def _map_error(e: Exception) -> Exception:

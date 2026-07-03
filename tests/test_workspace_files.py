@@ -8,6 +8,7 @@ from myagent.core.workspace import WorkspaceManager
 from myagent.interfaces.web.routes.workspace_files import (
     _archive_magic_label,
     _has_forbidden_archive_suffix,
+    _has_zip_based_office_suffix,
     _validate_relative_path,
 )
 
@@ -32,6 +33,22 @@ def test_archive_suffix_and_magic_are_rejected():
     assert _archive_magic_label(b"PK\x03\x04anything") == "zip"
     assert _archive_magic_label(b"7z\xbc\xaf\x27\x1canything") == "7z"
     assert _archive_magic_label((b"x" * 257) + b"ustar\x00") == "tar"
+
+
+def test_zip_based_office_documents_are_allowlisted():
+    """docx/xlsx/pptx/odt 等 OOXML 与 ODF 文档本质是 zip，需按扩展名放行。"""
+    assert _has_zip_based_office_suffix("docs/report.docx")
+    assert _has_zip_based_office_suffix("docs/report.DOCX")
+    assert _has_zip_based_office_suffix("sheets/data.xlsx")
+    assert _has_zip_based_office_suffix("decks/slide.pptx")
+    assert _has_zip_based_office_suffix("notes/letter.odt")
+    assert _has_zip_based_office_suffix("diagram.vsdx")
+    # 普通文件、被禁的 jar/zip 扩展名不应被白名单放行
+    assert not _has_zip_based_office_suffix("docs/a.txt")
+    assert not _has_zip_based_office_suffix("docs/a.zip")
+    assert not _has_zip_based_office_suffix("lib/a.jar")
+    # 魔数仍为 zip：白名单内放行，白名单外（如改名 .txt）依然拦截
+    assert _archive_magic_label(b"PK\x03\x04" + b"\x00" * 100) == "zip"
 
 
 @pytest.mark.asyncio

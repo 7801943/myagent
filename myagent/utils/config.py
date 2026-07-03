@@ -47,9 +47,17 @@ def load_yaml_config(path: str | Path) -> dict:
 
 # ── Pydantic-Settings 结构化配置模型 ──
 
+class ThinkingLevelConfig(BaseModel):
+    id: str
+    label: str = ""
+    extra_body: dict = Field(default_factory=dict)
+
+
 class ThinkingConfig(BaseModel):
     supported: bool | None = None
     default_enabled: bool = False
+    default_level: str | None = None
+    levels: list[ThinkingLevelConfig] = Field(default_factory=list)
     enabled_extra_body: dict = Field(
         default_factory=lambda: {"thinking": {"type": "enabled"}}
     )

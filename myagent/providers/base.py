@@ -74,6 +74,8 @@ class BaseProvider(ABC):
         thinking_enabled: bool = False,
         thinking_enabled_extra_body: dict | None = None,
         thinking_disabled_extra_body: dict | None = None,
+        thinking_default_level: str | None = None,
+        thinking_levels: list[dict] | None = None,
     ):
         self.name = name
         self.model = model
@@ -84,6 +86,18 @@ class BaseProvider(ABC):
         self.thinking_enabled = thinking_enabled if thinking_supported else False
         self.thinking_enabled_extra_body = thinking_enabled_extra_body or {"thinking": {"type": "enabled"}}
         self.thinking_disabled_extra_body = thinking_disabled_extra_body or {"thinking": {"type": "disabled"}}
+        self.thinking_levels = thinking_levels or []
+        configured_level_ids = [
+            str(level.get("id"))
+            for level in self.thinking_levels
+            if isinstance(level, dict) and level.get("id")
+        ]
+        self.thinking_default_level = (
+            thinking_default_level
+            if thinking_default_level in configured_level_ids
+            else (configured_level_ids[0] if configured_level_ids else None)
+        )
+        self.thinking_level = self.thinking_default_level
 
     @abstractmethod
     async def stream(

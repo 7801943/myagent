@@ -262,6 +262,16 @@ class Session:
                 "context_window_size": cws,
                 "thinking_supported": bool(getattr(p, "thinking_supported", False)),
                 "thinking_enabled": bool(getattr(p, "thinking_enabled", False)),
+                "thinking_level": getattr(p, "thinking_level", None),
+                "thinking_default_level": getattr(p, "thinking_default_level", None),
+                "thinking_levels": [
+                    {
+                        "id": level.get("id", ""),
+                        "label": level.get("label") or level.get("id", ""),
+                    }
+                    for level in getattr(p, "thinking_levels", [])
+                    if isinstance(level, dict) and level.get("id")
+                ],
                 "is_active": is_current,
             }
             available_models.append(info)
@@ -317,6 +327,7 @@ class Session:
         provider_key: str,
         *,
         thinking_enabled: bool | None = None,
+        thinking_level: str | None = None,
         allow_while_running: bool = False,
     ) -> dict:
         if self._chat_lock.locked() and not allow_while_running:
@@ -329,6 +340,17 @@ class Session:
             provider.thinking_enabled = bool(
                 thinking_enabled and getattr(provider, "thinking_supported", False)
             )
+        if thinking_level is not None:
+            if not getattr(provider, "thinking_supported", False):
+                raise ValueError("当前模型不支持 Thinking 档位")
+            level_ids = {
+                level.get("id")
+                for level in getattr(provider, "thinking_levels", [])
+                if isinstance(level, dict)
+            }
+            if thinking_level not in level_ids:
+                raise ValueError("当前模型不支持该 Thinking 档位")
+            provider.thinking_level = thinking_level
         self._sync_model_state_from_router()
         await self._persist_state(self.agent_run_state)
         await self.push_conversation_state()

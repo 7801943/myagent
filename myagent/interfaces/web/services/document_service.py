@@ -1,7 +1,7 @@
 """
 OnlyOffice 文档服务。
 
-负责把 MyAgent 工作空间内的文件转换成 OnlyOffice 可打开的 editor config，
+负责把 z工作台工作空间内的文件转换成 OnlyOffice 可打开的 editor config，
 并处理 DocumentServer 下载文件、保存回调等服务端请求。
 """
 from __future__ import annotations
@@ -55,7 +55,7 @@ class DocumentService:
     生成 OnlyOffice 配置并保护文档下载/保存。
 
     这里同时使用两类 token：
-      - MyAgent document token：保护 /download 与 /callback。
+      - z-workbench document token：保护 /download 与 /callback。
       - OnlyOffice JWT config.token：供 DocumentServer 验证 editor config。
     """
 
@@ -152,7 +152,7 @@ class DocumentService:
                 },
                 "user": {
                     "id": username or "myagent-user",
-                    "name": username or "MyAgent User",
+                    "name": username or "z-workbench User",
                 },
             },
             "height": "100%",

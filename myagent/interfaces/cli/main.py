@@ -34,7 +34,7 @@ logger = get_logger(__name__)
 @click.option("--log-level", default="INFO", help="日志级别")
 @click.pass_context
 def cli(ctx, config, log_level):
-    """MyAgent — 全自研 Python Agent 框架"""
+    """z-workbench（z工作台）— 智能助理集成工作台"""
     setup_logging(level=log_level)
     ctx.ensure_object(dict)
     ctx.obj["config_path"] = config
@@ -56,7 +56,7 @@ def chat(ctx, message, session_id, system_prompt, show_tools, image, no_safety):
 async def interactive_loop(session: Session) -> None:
     """启动交互式 CLI 循环。支持 @image <path> 语法附带图像。"""
     ui = CliUI()
-    ui.print("🤖 MyAgent CLI — 输入 'exit' 或 'quit' 退出")
+    ui.print("🤖 z-workbench CLI — 输入 'exit' 或 'quit' 退出")
     ui.print("   💡 附带图像: 在消息中使用 @image <文件路径>")
     ui.print("   💡 示例: 描述这张图片 @image photo.jpg @image diagram.png\n")
 

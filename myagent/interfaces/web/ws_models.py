@@ -45,6 +45,7 @@ class ModelSelectMessage(BaseModel):
     type: Literal["model_select"] = "model_select"
     provider_key: str = Field(..., min_length=1, description="Provider 唯一键")
     thinking_enabled: bool | None = Field(None, description="是否启用 Thinking")
+    thinking_level: str | None = Field(None, description="Thinking 强度档位")
 
 
 class SessionCreateMessage(BaseModel):

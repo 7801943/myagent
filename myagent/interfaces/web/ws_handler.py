@@ -317,6 +317,7 @@ class WebSocketHandler:
             await self._session.set_model_selection(
                 data.get("provider_key", ""),
                 thinking_enabled=data.get("thinking_enabled"),
+                thinking_level=data.get("thinking_level"),
             )
         except (RuntimeError, ValueError) as exc:
             await self._send_json({"type": "error", "message": str(exc)})

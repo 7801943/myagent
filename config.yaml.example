@@ -1,4 +1,4 @@
-# MyAgent 配置文件
+# z-workbench（z工作台）配置文件
 # API Key 等敏感信息请自行填入
 
 agent:
@@ -25,25 +25,79 @@ agent:
   providers:
     - name: "openai-primary"
       type: "openai"
-      model: "glm-5.1"
+      model: "glm-5.2"
       api_key: ""                        # TODO: 填入你的 API Key
       api_base: "https://open.bigmodel.cn/api/coding/paas/v4"
       priority: 1
       thinking:
         supported: true
-        default_enabled: false
+        default_enabled: true
+        default_level: "max"
         enabled_extra_body:
           thinking:
             type: "enabled"
         disabled_extra_body:
           thinking:
             type: "disabled"
+        levels:
+          - id: "high"
+            label: "High"
+            extra_body:
+              reasoning_effort: "high"
+          - id: "max"
+            label: "Max"
+            extra_body:
+              reasoning_effort: "max"
+
+    # DeepSeek V4（阿里云百炼 OpenAI 兼容 Chat Completions 示例）
+    # deepseek-v4-pro / deepseek-v4-flash 默认开启思考，可用 reasoning_effort 调整 high/max。
+    # - name: "deepseek-v4"
+    #   type: "openai"
+    #   model: "deepseek-v4-pro"
+    #   api_key: "${DASHSCOPE_API_KEY}"
+    #   api_base: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    #   priority: 2
+    #   thinking:
+    #     supported: true
+    #     default_enabled: true
+    #     default_level: "high"
+    #     enabled_extra_body:
+    #       enable_thinking: true
+    #     disabled_extra_body:
+    #       enable_thinking: false
+    #     levels:
+    #       - id: "high"
+    #         label: "High"
+    #         extra_body:
+    #           reasoning_effort: "high"
+    #       - id: "max"
+    #         label: "Max"
+    #         extra_body:
+    #           reasoning_effort: "max"
+
+    # Qwen3.7 Plus/Max（阿里云百炼 OpenAI 兼容 Chat Completions 示例）
+    # Qwen3.7 支持 enable_thinking 与 thinking_budget；Chat Completions 下没有 high/max reasoning_effort。
+    # - name: "qwen3.7-plus"
+    #   type: "openai"
+    #   model: "qwen3.7-plus"
+    #   api_key: "${DASHSCOPE_API_KEY}"
+    #   api_base: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    #   priority: 3
+    #   context_window_size: 1000000
+    #   thinking:
+    #     supported: true
+    #     default_enabled: true
+    #     enabled_extra_body:
+    #       enable_thinking: true
+    #       # thinking_budget: 32768
+    #     disabled_extra_body:
+    #       enable_thinking: false
 
     - name: "openai-backup"
       type: "openai"
       model: "gpt-4o-mini"
       api_key: "${OPENAI_API_KEY}"       # 从环境变量读取
-      priority: 2
+      priority: 10
 
     # - name: "anthropic"
     #   type: "anthropic"

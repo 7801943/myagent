@@ -182,20 +182,20 @@ async def lifespan(app: FastAPI):
     # Startup：初始化服务
     init_services(config_path=config_path)
     await startup()
-    logger.info("MyAgent FastAPI server started")
+    logger.info("z-workbench FastAPI server started")
 
     yield
 
     # Shutdown：清理资源
     await shutdown()
-    logger.info("MyAgent FastAPI server stopped")
+    logger.info("z-workbench FastAPI server stopped")
 
 
 def create_app(config_path: str = "config.yaml") -> FastAPI:
     """创建 FastAPI 应用实例。"""
     app = FastAPI(
-        title="MyAgent",
-        description="全自研生产级异步 Python Agent 框架",
+        title="z-workbench",
+        description="z工作台：智能助理集成工作台",
         version="0.1.0",
         lifespan=lifespan,
     )
@@ -265,7 +265,7 @@ app = create_app()
 
 def main():
     """CLI 入口：python -m myagent.interfaces.web.app"""
-    parser = argparse.ArgumentParser(description="MyAgent FastAPI Server")
+    parser = argparse.ArgumentParser(description="z-workbench FastAPI Server")
     parser.add_argument("--host", default="0.0.0.0", help="监听地址 (默认 0.0.0.0)")
     parser.add_argument("--port", type=int, default=8000, help="监听端口 (默认 8000)")
     parser.add_argument("--config", default="config.yaml", help="配置文件路径")

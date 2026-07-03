@@ -238,7 +238,8 @@ function updateModelDisplays(modelState) {
 function initModelPicker() {
     if (!modelPicker || !modelPickerButton || !modelPickerPopup) return;
 
-    modelPickerButton.addEventListener("click", function (event) {
+    modelPicker.addEventListener("click", function (event) {
+        if (modelPickerPopup.contains(event.target)) return;
         event.stopPropagation();
         if (isModelPickerDisabled()) return;
         const isOpen = !modelPickerPopup.hidden;
@@ -319,6 +320,9 @@ function renderModelPickerPopup(available, active) {
         text.appendChild(name);
         text.appendChild(meta);
 
+        const controls = document.createElement("div");
+        controls.className = "model-picker-controls";
+
         const thinking = document.createElement("button");
         thinking.type = "button";
         thinking.className = "model-thinking-switch" + (model.thinking_enabled ? " on" : "");
@@ -326,37 +330,72 @@ function renderModelPickerPopup(available, active) {
         thinking.title = model.thinking_supported ? "切换 Thinking" : "该模型不支持 Thinking";
         thinking.setAttribute("aria-label", "Thinking");
         thinking.innerHTML = '<span class="model-thinking-label">Thinking</span><span class="model-thinking-track"><span class="model-thinking-thumb"></span></span>';
+        controls.appendChild(thinking);
+
+        const levels = Array.isArray(model.thinking_levels) ? model.thinking_levels : [];
+        if (model.thinking_supported && levels.length) {
+            const levelGroup = document.createElement("div");
+            levelGroup.className = "model-thinking-levels" + (model.thinking_enabled ? "" : " off");
+            levelGroup.setAttribute("role", "group");
+            levelGroup.setAttribute("aria-label", "Thinking 强度");
+
+            levels.forEach(function (level) {
+                const levelId = level.id || "";
+                if (!levelId) return;
+                const levelButton = document.createElement("button");
+                levelButton.type = "button";
+                const isLevelActive = model.thinking_enabled && levelId === model.thinking_level;
+                levelButton.className = "model-thinking-level" + (isLevelActive ? " active" : "");
+                levelButton.disabled = isModelPickerDisabled();
+                levelButton.textContent = level.label || levelId;
+                levelButton.title = "切换 Thinking 强度：" + (level.label || levelId);
+                levelButton.addEventListener("click", function (event) {
+                    event.stopPropagation();
+                    if (isModelPickerDisabled() || isLevelActive) return;
+                    selectModel(model, true, levelId);
+                });
+                levelGroup.appendChild(levelButton);
+            });
+
+            if (levelGroup.children.length) {
+                controls.appendChild(levelGroup);
+            }
+        }
 
         row.addEventListener("click", function () {
-            selectModel(model, model.thinking_enabled);
+            selectModel(model, model.thinking_enabled, model.thinking_level);
         });
         row.addEventListener("keydown", function (event) {
             if (event.target !== row) return;
             if (event.key === "Enter" || event.key === " ") {
                 event.preventDefault();
-                selectModel(model, model.thinking_enabled);
+                selectModel(model, model.thinking_enabled, model.thinking_level);
             }
         });
         thinking.addEventListener("click", function (event) {
             event.stopPropagation();
             if (!model.thinking_supported || isModelPickerDisabled()) return;
-            selectModel(model, !model.thinking_enabled);
+            selectModel(model, !model.thinking_enabled, model.thinking_level || model.thinking_default_level);
         });
 
         row.appendChild(text);
-        row.appendChild(thinking);
+        row.appendChild(controls);
         modelPickerPopup.appendChild(row);
     });
 }
 
-function selectModel(model, thinkingEnabled) {
+function selectModel(model, thinkingEnabled, thinkingLevel) {
     if (!model || isModelPickerDisabled()) return;
     closeModelPicker();
-    send({
+    const payload = {
         type: "model_select",
         provider_key: model.provider_key,
         thinking_enabled: Boolean(thinkingEnabled),
-    });
+    };
+    if (thinkingLevel) {
+        payload.thinking_level = thinkingLevel;
+    }
+    send(payload);
 }
 
 function initRunModePicker() {

@@ -156,6 +156,11 @@ class SessionManager:
                 else p_cfg.model.lower().startswith("glm-5")
             )
             thinking_enabled = bool(thinking_supported and p_cfg.thinking.default_enabled)
+            thinking_levels = [
+                level.model_dump()
+                for level in p_cfg.thinking.levels
+                if level.id
+            ]
             if p_cfg.type.lower() == "openai":
                 p = OpenAIProvider(
                     name=p_cfg.name,
@@ -166,6 +171,8 @@ class SessionManager:
                     thinking_enabled=thinking_enabled,
                     thinking_enabled_extra_body=p_cfg.thinking.enabled_extra_body,
                     thinking_disabled_extra_body=p_cfg.thinking.disabled_extra_body,
+                    thinking_default_level=p_cfg.thinking.default_level,
+                    thinking_levels=thinking_levels,
                 )
             elif p_cfg.type.lower() == "anthropic":
                 p = AnthropicProvider(
@@ -177,6 +184,14 @@ class SessionManager:
                 p.thinking_enabled = thinking_enabled
                 p.thinking_enabled_extra_body = p_cfg.thinking.enabled_extra_body
                 p.thinking_disabled_extra_body = p_cfg.thinking.disabled_extra_body
+                p.thinking_levels = thinking_levels
+                level_ids = [level["id"] for level in thinking_levels]
+                p.thinking_default_level = (
+                    p_cfg.thinking.default_level
+                    if p_cfg.thinking.default_level in level_ids
+                    else (level_ids[0] if level_ids else None)
+                )
+                p.thinking_level = p.thinking_default_level
             else:
                 continue
             p._context_window_size = p_cfg.context_window_size
@@ -632,6 +647,20 @@ class SessionManager:
                             restored_active.get("thinking_enabled")
                             and getattr(provider, "thinking_supported", False)
                         )
+                    restored_level = restored_active.get("thinking_level")
+                    if restored_level is not None:
+                        level_ids = {
+                            level.get("id")
+                            for level in getattr(provider, "thinking_levels", [])
+                        }
+                        if restored_level in level_ids:
+                            provider.thinking_level = restored_level
+                        else:
+                            logger.warning(
+                                "Stored thinking level '%s' is unavailable for provider '%s'; using configured default",
+                                restored_level,
+                                restored_provider_key,
+                            )
                 except ValueError:
                     logger.warning(
                         "Stored provider '%s' is unavailable; using configured default",
