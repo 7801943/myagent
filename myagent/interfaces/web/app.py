@@ -34,6 +34,8 @@ from myagent.interfaces.web.dependencies import (
 )
 from myagent.interfaces.web.ws_handler import WebSocketHandler
 from myagent.interfaces.web.routes import health, sessions, auth, documents, workspace_files
+from myagent.interfaces.web.private_tunnel import PrivateTunnelConfig, PrivateTunnelServer
+from myagent.utils.config import load_yaml_config
 from myagent.utils.logging import get_logger, setup_logging
 
 logger = get_logger(__name__)
@@ -178,17 +180,46 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理：初始化和清理全局资源。"""
     config_path = getattr(app.state, "config_path", "config.yaml")
     setup_logging(level="INFO")
+    private_tunnels: list[PrivateTunnelServer] = []
 
-    # Startup：初始化服务
-    init_services(config_path=config_path)
-    await startup()
-    logger.info("z-workbench FastAPI server started")
+    try:
+        # Startup：初始化服务
+        init_services(config_path=config_path)
+        await startup()
+        full_config = load_yaml_config(config_path)
+        raw_private_transport = full_config.get("private_transport", {})
 
-    yield
+        private_tunnel_config = PrivateTunnelConfig.from_mapping(raw_private_transport)
+        if private_tunnel_config.enabled:
+            private_tunnel = PrivateTunnelServer(private_tunnel_config)
+            await private_tunnel.start()
+            private_tunnels.append(private_tunnel)
+            app.state.private_tunnel = private_tunnel
 
-    # Shutdown：清理资源
-    await shutdown()
-    logger.info("z-workbench FastAPI server stopped")
+        onlyoffice_tunnel_config = PrivateTunnelConfig.from_nested_mapping(
+            raw_private_transport,
+            "onlyoffice",
+            default_listen_port=9444,
+            default_upstream_host="127.0.0.1",
+            default_upstream_port=8081,
+        )
+        if onlyoffice_tunnel_config.enabled:
+            onlyoffice_tunnel = PrivateTunnelServer(onlyoffice_tunnel_config)
+            await onlyoffice_tunnel.start()
+            private_tunnels.append(onlyoffice_tunnel)
+            app.state.onlyoffice_private_tunnel = onlyoffice_tunnel
+
+        app.state.private_tunnels = private_tunnels
+        logger.info("z-workbench FastAPI server started")
+
+        yield
+
+    finally:
+        # Shutdown：清理资源
+        for private_tunnel in reversed(private_tunnels):
+            await private_tunnel.stop()
+        await shutdown()
+        logger.info("z-workbench FastAPI server stopped")
 
 
 def create_app(config_path: str = "config.yaml") -> FastAPI:

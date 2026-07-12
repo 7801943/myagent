@@ -98,6 +98,7 @@ class DocumentService:
         session_id: str = "",
         group: str = "user",
         resolver=None,
+        onlyoffice_url_override: str | None = None,
     ) -> dict[str, Any]:
         """构造前端 `new DocsAPI.DocEditor(...)` 所需配置。"""
         if not self.enabled:
@@ -177,7 +178,7 @@ class DocumentService:
             "config": config,
             "document_type": doc_type,
             "file_name": path.name,
-            "onlyoffice_url": self.config.onlyoffice_url,
+            "onlyoffice_url": onlyoffice_url_override or self.config.onlyoffice_url,
             "onlyoffice_jwt_header": self.config.onlyoffice_jwt_header,
         }
 
@@ -433,3 +434,29 @@ def _fingerprint(value: str) -> str:
     if not value:
         return "<empty>"
     return f"<sha256:{hashlib.sha256(value.encode('utf-8')).hexdigest()[:12]}>"
+
+
+def normalize_private_onlyoffice_origin(value: str | None) -> str | None:
+    """Accept only LocalProxy loopback HTTP origins for private OnlyOffice access."""
+    if not value:
+        return None
+
+    from urllib.parse import urlsplit
+
+    try:
+        parsed = urlsplit(value.strip())
+        if parsed.scheme != "http" or not parsed.netloc:
+            return None
+        if parsed.username or parsed.password:
+            return None
+        if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+            return None
+        # Accessing .port validates malformed port values.
+        _ = parsed.port
+    except ValueError:
+        return None
+
+    if parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        return None
+
+    return f"{parsed.scheme}://{parsed.netloc}"
