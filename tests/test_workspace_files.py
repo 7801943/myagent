@@ -1,16 +1,51 @@
-import io
-import zipfile
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
 
+from myagent.core.events import EventBus, ToolEnd
+from myagent.core.models import UserContext
+from myagent.core.session.session import Session
 from myagent.core.workspace import WorkspaceManager
+from myagent.core.workspace_resolver import WorkspaceResolver
 from myagent.interfaces.web.routes.workspace_files import (
     _archive_magic_label,
     _has_forbidden_archive_suffix,
     _has_zip_based_office_suffix,
     _validate_relative_path,
 )
+from myagent.tools.api import ToolResult
+
+
+class FakeToolInterface:
+    def list_schemas(self):
+        return []
+
+    def get_cli_policy_state(self):
+        return {
+            "active_policy": "whitelist",
+            "available_policies": ["whitelist"],
+            "mode": "whitelist",
+        }
+
+    def set_cli_policy(self, policy_name: str):
+        return self.get_cli_policy_state()
+
+
+def make_workspace_session(*, workspace_root=None, workspace_resolver=None) -> Session:
+    harness = SimpleNamespace(
+        events=EventBus(),
+        tool_interface=FakeToolInterface(),
+        router=SimpleNamespace(providers=[], selected_provider_key=""),
+        tool_manager=None,
+    )
+    return Session(
+        session_id="workspace-refresh-session",
+        harness=harness,
+        user=UserContext(user_id="user-1", username="admin"),
+        workspace_root=str(workspace_root) if workspace_root else None,
+        workspace_resolver=workspace_resolver,
+    )
 
 
 def test_workspace_upload_path_validation_rejects_unsafe_paths():
@@ -52,6 +87,29 @@ def test_zip_based_office_documents_are_allowlisted():
 
 
 @pytest.mark.asyncio
+async def test_workspace_file_list_text_includes_visible_directories_and_permissions(tmp_path):
+    private_root = tmp_path / "users" / "admin"
+    public_root = tmp_path / "public"
+    (private_root / "reports").mkdir(parents=True)
+    public_root.mkdir(parents=True)
+    resolver = WorkspaceResolver(
+        username="admin",
+        group="admin",
+        private_root=private_root,
+        public_root=public_root,
+    )
+    manager = WorkspaceManager(resolver.virtual_root, resolver=resolver)
+
+    await manager.update("user", "set_root", {})
+
+    text = manager.get_file_list_text()
+
+    assert "admin/" in text
+    assert "admin/reports/ [目录] [私有可写]" in text
+    assert f"{resolver.public_virtual_root}/ [目录] [公共只读]" in text
+
+
+@pytest.mark.asyncio
 async def test_files_changed_increments_changed_open_tab_revision(tmp_path):
     target = tmp_path / "report.txt"
     target.write_text("v1")
@@ -65,6 +123,57 @@ async def test_files_changed_increments_changed_open_tab_revision(tmp_path):
 
     assert manager.state.open_files[0].revision == 1
     assert manager.state.files[0].size == 2
+
+
+@pytest.mark.asyncio
+async def test_file_edit_tool_end_marks_changed_open_docx_for_onlyoffice_refresh(tmp_path):
+    private_root = tmp_path / "admin"
+    public_root = tmp_path / "public"
+    private_root.mkdir()
+    public_root.mkdir()
+    target = private_root / "report.docx"
+    target.write_bytes(b"v1")
+    resolver = WorkspaceResolver(
+        username="admin",
+        group="admin",
+        private_root=private_root,
+        public_root=public_root,
+    )
+    session = make_workspace_session(workspace_resolver=resolver)
+    await session.workspace.update("user", "set_root", {})
+    await session.workspace.update("user", "scan_dir", {"path": resolver.private_virtual_root})
+    await session.workspace.update("user", "open_file", {"path": f"{resolver.private_virtual_root}/report.docx"})
+
+    assert session.workspace.state.open_files[0].revision == 0
+
+    target.write_bytes(b"v2")
+    await session._on_tool_end(ToolEnd(
+        tool_name="file_edit",
+        result=ToolResult(content="ok", metadata={"path": str(target.resolve())}),
+    ))
+
+    assert [tab.path for tab in session.workspace.state.open_files] == [f"{resolver.private_virtual_root}/report.docx"]
+    assert session.workspace.state.open_files[0].revision == 1
+    assert session.workspace.state.active_file_index == 0
+    info = next(file for file in session.workspace.state.files if file.path == f"{resolver.private_virtual_root}/report.docx")
+    assert info.size == 2
+
+
+@pytest.mark.asyncio
+async def test_file_write_tool_end_opens_written_file_without_double_revision(tmp_path):
+    target = tmp_path / "new.docx"
+    target.write_bytes(b"v1")
+    session = make_workspace_session(workspace_root=tmp_path)
+    await session.workspace.update("user", "set_root", {"root_path": str(tmp_path)})
+
+    await session._on_tool_end(ToolEnd(
+        tool_name="file_write",
+        result=ToolResult(content="ok", metadata={"path": str(target.resolve())}),
+    ))
+
+    assert [tab.path for tab in session.workspace.state.open_files] == ["new.docx"]
+    assert session.workspace.state.open_files[0].revision == 0
+    assert session.workspace.state.active_file_index == 0
 
 
 @pytest.mark.asyncio

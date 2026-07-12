@@ -19,6 +19,9 @@ __pycache__/
 *.db-*
 *.sqlite3
 
+# 工作区用户文件
+workspaces/
+
 # 审计日志
 audit_logs/
 

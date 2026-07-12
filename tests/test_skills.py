@@ -77,6 +77,27 @@ def test_skill_registry_loads_only_requested_username(tmp_path):
     assert alice_registry.get("bob-only") is None
 
 
+def test_skill_registry_loads_common_then_user_specific_override(tmp_path):
+    write_skill(tmp_path, "common", "office-automation", body="common 指令", description="公共 Skill")
+    admin_skill_dir = write_skill(
+        tmp_path,
+        "admin",
+        "office-automation",
+        body="admin 指令",
+        description="管理员 Skill",
+    )
+
+    manager = make_manager(tmp_path)
+    registry = manager._build_skill_registry(UserContext(user_id="u1", username="admin"))
+
+    assert registry.registered_names == ["office-automation"]
+    skill = registry.get("office-automation")
+    assert skill is not None
+    assert skill.skill_file == admin_skill_dir / "skill.md"
+    assert skill.description == "管理员 Skill"
+    assert "admin 指令" in skill.get_instructions()
+
+
 def test_skill_registry_uses_user_id_then_default(tmp_path):
     write_skill(tmp_path, "user-1", "by-user-id")
     write_skill(tmp_path, "default", "by-default")

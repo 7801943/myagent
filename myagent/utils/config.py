@@ -131,6 +131,7 @@ class SkillConfig(BaseModel):
     enabled: bool = True
     active: list[str] = Field(default_factory=list)
     common_dir: str = "prompts/skills/common"
+    user_dir_template: str = "prompts/skills/{username}"
 
 class AgentConfig(BaseSettings):
     """

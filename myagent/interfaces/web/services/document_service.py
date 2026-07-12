@@ -16,6 +16,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from fastapi import HTTPException
@@ -40,7 +41,8 @@ class DocumentConfig:
     """OnlyOffice 集成配置。"""
 
     enabled: bool = False
-    onlyoffice_url: str = "http://localhost:8081"
+    onlyoffice_url: str = "/onlyoffice"
+    onlyoffice_internal_url: str = "http://localhost:8081"
     myagent_public_url: str = "http://localhost:8000"
     myagent_internal_url: str = "http://host.docker.internal:8000"
     access_token_ttl_seconds: int = 3600
@@ -61,9 +63,17 @@ class DocumentService:
 
     def __init__(self, root_dir: str, config: dict[str, Any] | None = None):
         raw = config or {}
+        onlyoffice_url = _normalize_url_base(str(raw.get("onlyoffice_url") or "/onlyoffice"))
         self.config = DocumentConfig(
             enabled=bool(raw.get("enabled", False)),
-            onlyoffice_url=str(raw.get("onlyoffice_url") or "http://localhost:8081").rstrip("/"),
+            onlyoffice_url=onlyoffice_url,
+            onlyoffice_internal_url=_normalize_url_base(
+                str(
+                    raw.get("onlyoffice_internal_url")
+                    or raw.get("onlyoffice_upstream_url")
+                    or _default_onlyoffice_internal_url(onlyoffice_url)
+                )
+            ),
             myagent_public_url=str(raw.get("myagent_public_url") or "http://localhost:8000").rstrip("/"),
             myagent_internal_url=str(raw.get("myagent_internal_url") or "http://host.docker.internal:8000").rstrip("/"),
             access_token_ttl_seconds=int(raw.get("access_token_ttl_seconds") or 3600),
@@ -77,10 +87,12 @@ class DocumentService:
         self.root_dir = Path(root_dir or ".").expanduser().resolve()
         self._access_secret = self.config.access_token_secret or self._derive_dev_secret()
         logger.info(
-            "DocumentService initialized: enabled=%s root=%s onlyoffice_url=%s internal_url=%s jwt_enabled=%s",
+            "DocumentService initialized: enabled=%s root=%s onlyoffice_url=%s onlyoffice_internal_url=%s "
+            "myagent_internal_url=%s jwt_enabled=%s",
             self.config.enabled,
             self.root_dir,
             self.config.onlyoffice_url,
+            self.config.onlyoffice_internal_url,
             self.config.myagent_internal_url,
             bool(self.config.onlyoffice_jwt_secret),
         )
@@ -242,13 +254,14 @@ class DocumentService:
 
         # OnlyOffice 回调里的 url 是一次性下载地址，需要服务端立即拉取。
         try:
+            resolved_download_url = self.rewrite_onlyoffice_download_url(str(download_url))
             logger.info(
                 "OnlyOffice callback downloading updated file: path=%s url=%s",
                 relative_path,
-                _safe_url(str(download_url)),
+                _safe_url(resolved_download_url),
             )
             async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
-                response = await client.get(str(download_url))
+                response = await client.get(resolved_download_url)
                 response.raise_for_status()
             logger.info(
                 "OnlyOffice callback downloaded updated file: path=%s status_code=%s bytes=%s",
@@ -273,6 +286,48 @@ class DocumentService:
                 return {"error": 1}
 
         return {"error": 0}
+
+    def rewrite_onlyoffice_download_url(self, download_url: str) -> str:
+        """
+        Resolve the one-time ONLYOFFICE callback download URL to an internal DocumentServer URL.
+
+        When the editor is loaded through the same-origin /onlyoffice proxy, DocumentServer may
+        emit callback payload URLs under the public proxy base. The server should download those
+        directly from the internal DocumentServer upstream and reject unrelated hosts.
+        """
+        raw_url = str(download_url or "").strip()
+        if not raw_url:
+            raise ValueError("empty OnlyOffice download URL")
+
+        internal_base = self.config.onlyoffice_internal_url
+        if _url_is_under_base(raw_url, internal_base):
+            return raw_url
+
+        for proxy_base in self._onlyoffice_proxy_bases():
+            if _url_is_under_base(raw_url, proxy_base):
+                suffix_path, query = _url_suffix_after_base(raw_url, proxy_base)
+                rewritten = _join_base_and_suffix(internal_base, suffix_path, query)
+                logger.info(
+                    "OnlyOffice callback download URL rewritten: from=%s to=%s",
+                    _safe_url(raw_url),
+                    _safe_url(rewritten),
+                )
+                return rewritten
+
+        logger.warning("OnlyOffice callback download URL rejected: url=%s", _safe_url(raw_url))
+        raise ValueError("OnlyOffice download URL is not trusted")
+
+    def _onlyoffice_proxy_bases(self) -> list[str]:
+        bases: list[str] = []
+        browser_url = self.config.onlyoffice_url
+        if _is_absolute_http_url(browser_url):
+            bases.append(browser_url)
+        else:
+            bases.append(_join_origin_and_path(self.config.myagent_public_url, browser_url))
+            bases.append(_join_origin_and_path(self.config.myagent_internal_url, browser_url))
+        # In reverse-proxy deployments myagent_public_url/internal_url may already include path
+        # information; keep the explicitly configured browser URL as the source of truth.
+        return _dedupe_strings(bases)
 
     def resolve_workspace_path(self, relative_path: str, workspace_root: str | None = None) -> Path:
         """解析并校验 workspace 相对路径，禁止越界和目录访问。"""
@@ -433,3 +488,82 @@ def _fingerprint(value: str) -> str:
     if not value:
         return "<empty>"
     return f"<sha256:{hashlib.sha256(value.encode('utf-8')).hexdigest()[:12]}>"
+
+
+def _normalize_url_base(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    parsed = urlsplit(text)
+    if not parsed.scheme and not text.startswith("/"):
+        text = "/" + text
+    return text.rstrip("/") or "/"
+
+
+def _default_onlyoffice_internal_url(onlyoffice_url: str) -> str:
+    parsed = urlsplit(onlyoffice_url)
+    if not parsed.scheme or not parsed.netloc:
+        return "http://localhost:8081"
+    if parsed.path.rstrip("/") == "/onlyoffice":
+        return "http://localhost:8081"
+    return onlyoffice_url
+
+
+def _is_absolute_http_url(value: str) -> bool:
+    parsed = urlsplit(value)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _join_origin_and_path(origin: str, path: str) -> str:
+    origin_parts = urlsplit(_normalize_url_base(origin))
+    path_parts = urlsplit(_normalize_url_base(path))
+    combined_path = ""
+    if origin_parts.path and origin_parts.path != "/":
+        combined_path += origin_parts.path.rstrip("/")
+    if path_parts.path and path_parts.path != "/":
+        combined_path += "/" + path_parts.path.strip("/")
+    if not combined_path:
+        combined_path = "/"
+    return urlunsplit((origin_parts.scheme, origin_parts.netloc, combined_path, "", ""))
+
+
+def _url_is_under_base(url: str, base: str) -> bool:
+    url_parts = urlsplit(url)
+    base_parts = urlsplit(base)
+    if url_parts.scheme.lower() != base_parts.scheme.lower() or url_parts.netloc.lower() != base_parts.netloc.lower():
+        return False
+    base_path = base_parts.path.rstrip("/")
+    if not base_path:
+        return True
+    url_path = url_parts.path.rstrip("/")
+    return url_path == base_path or url_parts.path.startswith(base_path + "/")
+
+
+def _url_suffix_after_base(url: str, base: str) -> tuple[str, str]:
+    url_parts = urlsplit(url)
+    base_parts = urlsplit(base)
+    base_path = base_parts.path.rstrip("/")
+    suffix = url_parts.path[len(base_path):] if base_path else url_parts.path
+    if not suffix:
+        suffix = "/"
+    if not suffix.startswith("/"):
+        suffix = "/" + suffix
+    return suffix, url_parts.query
+
+
+def _join_base_and_suffix(base: str, suffix_path: str, query: str = "") -> str:
+    base_parts = urlsplit(base.rstrip("/"))
+    base_path = base_parts.path.rstrip("/")
+    suffix = "/" + suffix_path.lstrip("/")
+    path = f"{base_path}{suffix}" if base_path else suffix
+    return urlunsplit((base_parts.scheme, base_parts.netloc, path, query, ""))
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result

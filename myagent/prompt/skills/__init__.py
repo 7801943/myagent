@@ -140,6 +140,8 @@ class SkillRegistry:
         self,
         user_dir: str | Path,
         active_names: set[str] | list[str] | None = None,
+        visible_names: set[str] | list[str] | None = None,
+        warn_missing: bool = True,
     ) -> None:
         root = Path(user_dir)
         if not root.exists():
@@ -150,6 +152,7 @@ class SkillRegistry:
             return
 
         active = set(active_names or [])
+        visible = set(visible_names or [])
         for skill_dir in sorted(item for item in root.iterdir() if item.is_dir()):
             if active and skill_dir.name not in active:
                 continue
@@ -158,11 +161,13 @@ class SkillRegistry:
                 continue
             if active and skill.name not in active:
                 continue
+            if visible and skill.name not in visible:
+                continue
             self.register(skill)
             logger.info("Skill registered: %s (%s)", skill.name, skill.skill_file)
 
         missing = active - set(self._skills.keys())
-        if missing:
+        if warn_missing and missing:
             logger.warning("Configured skills not found for %s: %s", self.username, sorted(missing))
 
     def load_from_common_dir(
@@ -170,6 +175,7 @@ class SkillRegistry:
         common_dir: str | Path,
         active_names: set[str] | list[str] | None = None,
         visible_names: set[str] | list[str] | None = None,
+        warn_missing: bool = True,
     ) -> None:
         """Load shared Skills and apply per-user visibility filtering."""
         root = Path(common_dir)
@@ -196,7 +202,7 @@ class SkillRegistry:
             logger.info("Skill registered: %s (%s)", skill.name, skill.skill_file)
 
         missing_active = active - set(self._skills.keys())
-        if missing_active:
+        if warn_missing and missing_active:
             logger.warning("Configured common skills not found for %s: %s", self.username, sorted(missing_active))
 
     async def activate(self, variables: dict) -> list[SkillContext]:

@@ -35,7 +35,8 @@ function resolveBrowserOnlyOfficeUrl(onlyofficeUrl) {
         if (!url.port) url.port = '8081';
     }
 
-    return url.origin;
+    const path = url.pathname.replace(/\/+$/, '');
+    return `${url.origin}${path === '/' ? '' : path}`;
 }
 
 function sanitizeUrl(url) {

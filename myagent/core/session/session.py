@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Callable, Awaitable
@@ -220,8 +221,6 @@ class Session:
 
     def _init_meta_from_harness(self) -> None:
         """从 AgentHarness 采集初始状态到 data（模型列表、工具列表等）。"""
-        router = self._harness.router
-
         # 采集模型信息
         self._sync_model_state_from_router()
 
@@ -394,26 +393,54 @@ class Session:
             return
         tool_name = event.tool_name
         result = event.result
-        file_tools = {"file_write", "file_read", "file_query", "file_diff", "file_edit", "file_edit_table", "cli_execute"}
-        if tool_name in file_tools:
-            await self.workspace.update("agent", "files_changed", {})
+        write_tools = {"file_write", "file_edit", "file_edit_table"}
+        open_tools = {"file_read", "file_query", "file_write", "file_edit", "file_edit_table"}
 
-        # 读/写/编辑工具成功操作文件后，把对应文件设为 active tab。
-        # 这让前端在 agent 操作完成后自动预览或刷新 OnlyOffice 编辑器。
-        if tool_name in {"file_read", "file_query", "file_write", "file_edit", "file_edit_table"} and hasattr(result, 'metadata'):
-            if getattr(result, "is_error", False):
-                return
-            file_path = result.metadata.get("path", "") if isinstance(result.metadata, dict) else ""
-            if file_path:
-                import os
-                resolver = getattr(self.workspace, "resolver", None)
-                rel_path = resolver.to_virtual_path(file_path) if resolver else None
-                root = self.workspace.root_path
-                if not rel_path and file_path.startswith(root):
-                    rel_path = os.path.relpath(file_path, root)
-                if not rel_path:
-                    rel_path = file_path
+        # CLI may mutate arbitrary files without structured metadata; refresh the tree, but
+        # cannot target an open tab for OnlyOffice reload.
+        if tool_name == "cli_execute":
+            await self.workspace.update("agent", "files_changed", {})
+            return
+
+        if tool_name not in open_tools or not hasattr(result, "metadata") or getattr(result, "is_error", False):
+            return
+
+        rel_path = self._workspace_relative_path_from_tool_result(result)
+        if not rel_path:
+            return
+
+        if tool_name in write_tools:
+            await self.workspace.update("agent", "files_changed", {"changed_paths": [rel_path]})
+            opened_index = self._open_file_index(rel_path)
+            if opened_index is not None:
+                await self.workspace.update("agent", "set_active_file", {"index": opened_index})
+            else:
                 await self.workspace.update("agent", "open_file", {"path": rel_path})
+            return
+
+        # 读/查询工具成功操作文件后，把对应文件设为 active tab。
+        await self.workspace.update("agent", "open_file", {"path": rel_path})
+
+    def _workspace_relative_path_from_tool_result(self, result) -> str:
+        if not self.workspace or not isinstance(getattr(result, "metadata", None), dict):
+            return ""
+        file_path = str(result.metadata.get("path") or "")
+        if not file_path:
+            return ""
+        resolver = getattr(self.workspace, "resolver", None)
+        rel_path = resolver.to_virtual_path(file_path) if resolver else None
+        root = self.workspace.root_path
+        if not rel_path and root and file_path.startswith(root):
+            rel_path = os.path.relpath(file_path, root)
+        return rel_path or file_path
+
+    def _open_file_index(self, path: str) -> int | None:
+        if not self.workspace:
+            return None
+        for index, tab in enumerate(self.workspace.state.open_files):
+            if tab.path == path:
+                return index
+        return None
 
     # ── 客户端状态同步 / 动态上下文 ──
 

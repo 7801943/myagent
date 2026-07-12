@@ -195,21 +195,29 @@ class WorkspaceManager:
         file_count = sum(1 for f in self._state.files if not f.is_dir)
         dir_count = sum(1 for f in self._state.files if f.is_dir)
         lines.append(f"  共 {dir_count} 个目录, {file_count} 个文件")
-        # 只列出文件（非目录），按路径排序，限制行数
-        files_only = sorted(
-            [f for f in self._state.files if not f.is_dir],
-            key=lambda f: f.path,
+        entries = sorted(
+            self._state.files,
+            key=lambda f: (f.path.lower(), 0 if f.is_dir else 1),
         )
-        for f in files_only[:80]:
-            size_str = f"{f.size}B" if f.size < 1024 else f"{f.size // 1024}KB"
+        for f in entries[:120]:
             flags = ""
+            if f.is_dir:
+                flags += " [目录]"
+            else:
+                size_str = f"{f.size}B" if f.size < 1024 else f"{f.size // 1024}KB"
+                flags += f" [{size_str}]"
+            if f.area == "private" and f.can_agent_write:
+                flags += " [私有可写]"
+            elif f.area == "public" and not f.can_agent_write:
+                flags += " [公共只读]"
             if f.is_user_opened:
                 flags += " [用户已打开]"
             if f.is_llm_read:
                 flags += " [LLM已读取]"
-            lines.append(f"  {f.path} ({size_str}){flags}")
-        if len(files_only) > 80:
-            lines.append(f"  ... 还有 {len(files_only) - 80} 个文件")
+            display_path = f"{f.path}/" if f.is_dir else f.path
+            lines.append(f"  {display_path}{flags}")
+        if len(entries) > 120:
+            lines.append(f"  ... 还有 {len(entries) - 120} 个条目")
         return "\n".join(lines)
 
     # ── 统一状态更新入口 ──

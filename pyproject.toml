@@ -22,6 +22,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "python-multipart>=0.0.9",
+    "websockets>=12.0",
 
     # 配置 & 应用日志
     "pyyaml>=6.0",

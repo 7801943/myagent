@@ -126,7 +126,9 @@ agent:
     enabled: true
     # 公共 Skill 目录；每个用户再通过 data/users.json 的 visible_skills 控制可见性
     common_dir: "prompts/skills/common"
-    # 启用的 skill 名称列表；留空则启用 common_dir 下的所有可见 skill
+    # 当前用户私有 Skill 目录模板；同名 Skill 会覆盖 common_dir 中的公共版本
+    user_dir_template: "prompts/skills/{username}"
+    # 启用的 skill 名称列表；留空则启用公共目录和当前用户私有目录下的所有可见 skill
     active: []
       # - "office-automation"
       # - "web-search"
@@ -234,7 +236,10 @@ auth:
 # ── 文档预览/编辑（OnlyOffice）──
 documents:
   enabled: false
-  onlyoffice_url: "http://localhost:8081"
+  # 浏览器访问入口。推荐使用同源 FastAPI 反代，避免浏览器直接访问 DocumentServer。
+  onlyoffice_url: "/onlyoffice"
+  # FastAPI 到 OnlyOffice DocumentServer 的内部地址；容器部署时可填 http://onlyoffice-documentserver:80。
+  onlyoffice_internal_url: "http://localhost:8081"
   myagent_public_url: "http://localhost:8001"
   myagent_internal_url: "http://host.docker.internal:8001"
   access_token_ttl_seconds: 3600

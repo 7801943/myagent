@@ -2,7 +2,9 @@
 import io
 import logging
 import os
+import re
 from copy import copy, deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -15,13 +17,14 @@ from myagent.tools.builtin._file_common import (
     _cell_change,
     _check_path_safety,
     _coerce_cell_value,
-    _column_index,
     _compact_changes,
     _content_token,
     _detect_encoding,
     _detect_file_type,
+    _format_docx_table_cell,
     _hash_json,
     _is_merged_non_anchor,
+    _iter_docx_body_blocks,
     _lookup_header,
     _normalize_color,
     _parse_a1_range,
@@ -135,6 +138,24 @@ def _atomic_write_binary(path: Path, data: bytes) -> None:
         except OSError:
             pass
         raise
+
+
+def _coerce_optional_line_number(value: Any, name: str) -> tuple[int | None, str | None]:
+    """Accept JSON numbers and digit strings for line-range parameters."""
+    if value is None:
+        return None, None
+    if isinstance(value, bool):
+        return None, f"{name} 必须是整数行号，不能是布尔值。"
+    if isinstance(value, int):
+        return value, None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped == "":
+            return None, None
+        if re.fullmatch(r"[+-]?\d+", stripped):
+            return int(stripped), None
+        return None, f"{name} 必须是整数行号，例如 67；当前值: {value!r}。"
+    return None, f"{name} 必须是整数行号，例如 67；当前类型: {type(value).__name__}。"
 
 
 # ── 纯文本编辑 ──
@@ -298,10 +319,197 @@ def _normalize_docx_edit_text(
     return target_content, replacement_content
 
 
+@dataclass(frozen=True)
+class _DocxParagraphRef:
+    paragraph: Any
+    line_no: int
+    location: str
+    line_text: str
+
+
+def _docx_line_range_label(start_line: int | None, end_line: int | None) -> str:
+    if start_line is None and end_line is None:
+        return "全文"
+    if start_line is not None and end_line is not None and start_line == end_line:
+        return f"第 {start_line} 行"
+    if start_line is not None and end_line is not None:
+        return f"第 {start_line}-{end_line} 行"
+    if start_line is not None:
+        return f"第 {start_line} 行至文末"
+    return f"第 1-{end_line} 行"
+
+
+def _compact_line_numbers(line_numbers: list[int], limit: int = 8) -> str:
+    unique = sorted(set(line_numbers))
+    shown = ", ".join(str(n) for n in unique[:limit])
+    if len(unique) > limit:
+        shown += f" 等 {len(unique)} 行"
+    return shown or "未知行"
+
+
+def _looks_like_docx_display_text(text: str) -> bool:
+    stripped = text.strip()
+    return (
+        bool(re.match(r"^\d+\s*\|", stripped))
+        or "[表格 " in stripped
+        or (stripped.startswith("|") and stripped.endswith("|"))
+    )
+
+
+def _build_docx_paragraph_refs(doc: Any) -> tuple[list[_DocxParagraphRef], dict[int, str], int]:
+    """Build editable paragraph refs using the same logical lines file_read shows."""
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    refs: list[_DocxParagraphRef] = []
+    display_lines: dict[int, str] = {}
+    seen_paragraphs: set[int] = set()
+    line_no = 1
+    table_index = 0
+
+    def add_ref(paragraph: Any, current_line: int, location: str, line_text: str) -> None:
+        key = id(paragraph._p)
+        if key in seen_paragraphs:
+            return
+        seen_paragraphs.add(key)
+        refs.append(_DocxParagraphRef(paragraph, current_line, location, line_text))
+
+    for block in _iter_docx_body_blocks(doc):
+        if isinstance(block, Paragraph):
+            text = block.text
+            display_lines[line_no] = text
+            add_ref(block, line_no, f"第 {line_no} 行正文段落", text)
+            line_no += 1
+            continue
+
+        if isinstance(block, Table):
+            table_index += 1
+            display_lines[line_no] = f"[表格 {table_index}]"
+            line_no += 1
+            for row_index, row in enumerate(block.rows, 1):
+                cells = [_format_docx_table_cell(cell.text) for cell in row.cells]
+                row_text = f"| {' | '.join(cells)} |"
+                display_lines[line_no] = row_text
+                for cell_index, cell in enumerate(row.cells, 1):
+                    location = f"第 {line_no} 行（表格 {table_index} 第 {row_index} 行第 {cell_index} 列）"
+                    for paragraph in cell.paragraphs:
+                        add_ref(paragraph, line_no, location, row_text)
+                line_no += 1
+            display_lines[line_no] = f"[/表格 {table_index}]"
+            line_no += 1
+
+    return refs, display_lines, line_no - 1
+
+
+def _filter_docx_refs_by_line_range(
+    refs: list[_DocxParagraphRef],
+    start_line: int | None,
+    end_line: int | None,
+) -> list[_DocxParagraphRef]:
+    if start_line is None and end_line is None:
+        return refs
+    start = start_line or 1
+    end = end_line
+    return [
+        ref
+        for ref in refs
+        if ref.line_no >= start and (end is None or ref.line_no <= end)
+    ]
+
+
+def _build_docx_virtual_text(
+    refs: list[_DocxParagraphRef],
+) -> tuple[str, list[tuple[int, int, int, int]]]:
+    virtual_parts: list[str] = []
+    # 每个 entry: (ref_idx, run_idx, char_start, char_end)
+    run_map: list[tuple[int, int, int, int]] = []
+    char_pos = 0
+
+    for ref_idx, ref in enumerate(refs):
+        if ref_idx > 0:
+            virtual_parts.append("\n")
+            char_pos += 1
+        for run_idx, run in enumerate(ref.paragraph.runs):
+            text = run.text
+            start = char_pos
+            end = char_pos + len(text)
+            if text:
+                run_map.append((ref_idx, run_idx, start, end))
+                virtual_parts.append(text)
+                char_pos = end
+
+    return "".join(virtual_parts), run_map
+
+
+def _find_docx_matches(
+    virtual_text: str,
+    run_map: list[tuple[int, int, int, int]],
+    target_content: str,
+) -> list[tuple[int, int, list[tuple[int, int, int, int]]]]:
+    if not target_content:
+        return []
+
+    matches: list[tuple[int, int, list[tuple[int, int, int, int]]]] = []
+    search_start = 0
+    while search_start < len(virtual_text):
+        match_idx = virtual_text.find(target_content, search_start)
+        if match_idx < 0:
+            break
+        match_end = match_idx + len(target_content)
+        involved = [
+            (ref_idx, run_idx, cs, ce)
+            for ref_idx, run_idx, cs, ce in run_map
+            if cs < match_end and ce > match_idx
+        ]
+        if involved:
+            matches.append((match_idx, match_end, involved))
+        search_start = match_end
+    return matches
+
+
+def _docx_no_match_message(
+    target_content: str,
+    display_lines: dict[int, str],
+    start_line: int | None,
+    end_line: int | None,
+    full_match_count: int,
+) -> str:
+    line_range = _docx_line_range_label(start_line, end_line)
+    if full_match_count:
+        return (
+            f"未在指定 DOCX 行号范围（{line_range}）找到目标内容；"
+            f"但全文其他位置有 {full_match_count} 处匹配。"
+            "请用 file_read 确认目标行号，或调整 start_line/end_line 后重试。"
+        )
+
+    display_matches = [
+        line_no for line_no, line_text in display_lines.items()
+        if target_content and target_content in line_text
+    ]
+    if display_matches or _looks_like_docx_display_text(target_content):
+        line_hint = f"（展示行: {_compact_line_numbers(display_matches)}）" if display_matches else ""
+        return (
+            "未找到可编辑的 DOCX 原始文本。"
+            f"{line_hint} 你提供的 target_content 看起来可能来自 file_read 的展示层"
+            "（行号、[表格 n] 标记、Markdown 管道符或单元格内换行被显示为 /）。"
+            "编辑 DOCX 表格时，请指定 start_line/end_line 为对应表格数据行，"
+            "并把 target_content 缩小为目标单元格内的真实文本；"
+            "普通段落整行替换时，可指定 start_line=end_line，并使用该行不含左侧行号的完整段落文本。"
+        )
+
+    return (
+        f"未在 DOCX {line_range} 找到目标内容。"
+        "请先用 file_read 确认最新内容和行号；"
+        "若目标在表格中，建议设置 start_line/end_line 为表格数据行，并仅匹配目标单元格文本。"
+    )
+
+
 async def _edit_docx(
     path: Path,
     target_content: str,
     replacement_content: str,
+    start_line: int | None,
+    end_line: int | None,
     allow_multiple: bool,
     highlight: str | None,
     comment: str | None,
@@ -325,59 +533,78 @@ async def _edit_docx(
         replacement_content,
     )
 
-    # ── 构建虚拟文本流及 Run 映射 ──
-    virtual_parts: list[str] = []
-    # 每个 entry: (para_idx, run_idx, char_start, char_end)
-    run_map: list[tuple[int, int, int, int]] = []
-    char_pos = 0
+    if start_line is not None and start_line < 1:
+        return ToolResult(content="start_line 必须大于等于 1。", is_error=True)
+    if end_line is not None and end_line < 1:
+        return ToolResult(content="end_line 必须大于等于 1。", is_error=True)
+    if start_line is not None and end_line is not None and start_line > end_line:
+        return ToolResult(content="start_line 不能大于 end_line。", is_error=True)
 
-    for pi, para in enumerate(doc.paragraphs):
-        if pi > 0:
-            virtual_parts.append("\n")
-            char_pos += 1
-        for ri, run in enumerate(para.runs):
-            text = run.text
-            start = char_pos
-            end = char_pos + len(text)
-            if text:
-                run_map.append((pi, ri, start, end))
-                virtual_parts.append(text)
-                char_pos = end
+    # ── 构建与 file_read 对齐的 DOCX 逻辑行及 Run 映射 ──
+    all_refs, display_lines, total_lines = _build_docx_paragraph_refs(doc)
+    if start_line is not None and start_line > total_lines:
+        return ToolResult(
+            content=f"DOCX 文档共 {total_lines} 行，start_line={start_line} 超出范围。",
+            is_error=True,
+            metadata={"path": str(path.resolve()), "total_lines": total_lines},
+        )
 
-    virtual_text = "".join(virtual_parts)
+    selected_refs = _filter_docx_refs_by_line_range(all_refs, start_line, end_line)
+    if not selected_refs:
+        return ToolResult(
+            content=(
+                f"指定的 DOCX 行号范围（{_docx_line_range_label(start_line, end_line)}）"
+                "没有可编辑文本，可能是空行、[表格 n] 边界行或 [/表格 n] 边界行。"
+                "请使用 file_read 选择正文段落行或表格数据行后重试。"
+            ),
+            is_error=True,
+            metadata={"path": str(path.resolve()), "total_lines": total_lines},
+        )
+
+    virtual_text, run_map = _build_docx_virtual_text(selected_refs)
+    full_virtual_text, full_run_map = _build_docx_virtual_text(all_refs)
 
     # ── 精确匹配 ──
-    count = virtual_text.count(target_content)
+    matches = _find_docx_matches(virtual_text, run_map, target_content)
+    count = len(matches)
     if count == 0:
         return ToolResult(
-            content="未找到目标内容。请使用 file_read 确认文档最新内容后重试。",
+            content=_docx_no_match_message(
+                target_content,
+                display_lines,
+                start_line,
+                end_line,
+                len(_find_docx_matches(full_virtual_text, full_run_map, target_content)),
+            ),
             is_error=True,
-            metadata={"path": str(path.resolve()), "match_count": 0},
+            metadata={
+                "path": str(path.resolve()),
+                "match_count": 0,
+                "line_range": {"start_line": start_line, "end_line": end_line},
+                "total_lines": total_lines,
+            },
         )
     if count > 1 and not allow_multiple:
-        return ToolResult(
-            content=f"找到 {count} 个匹配，请提供更精确的 target_content 或设置 allow_multiple=True。",
-            is_error=True,
-            metadata={"path": str(path.resolve()), "match_count": count},
-        )
-
-    matches: list[tuple[int, int, list[tuple[int, int, int, int]]]] = []
-    search_start = 0
-    while search_start < len(virtual_text):
-        match_idx = virtual_text.find(target_content, search_start)
-        if match_idx < 0:
-            break
-        match_end = match_idx + len(target_content)
-        involved = [
-            (pi, ri, cs, ce)
-            for pi, ri, cs, ce in run_map
-            if cs < match_end and ce > match_idx
+        matched_lines = [
+            selected_refs[involved[0][0]].line_no
+            for _, _, involved in matches
+            if involved
         ]
-        if involved:
-            matches.append((match_idx, match_end, involved))
-        search_start = match_end
-        if not allow_multiple:
-            break
+        return ToolResult(
+            content=(
+                f"在 DOCX {_docx_line_range_label(start_line, end_line)} 找到 {count} 个匹配"
+                f"（涉及逻辑行: {_compact_line_numbers(matched_lines)}）。"
+                "请提供更精确的 target_content，或设置 start_line/end_line 缩小到目标行，"
+                "确认需要全部替换时再设置 allow_multiple=True。"
+            ),
+            is_error=True,
+            metadata={
+                "path": str(path.resolve()),
+                "match_count": count,
+                "matched_lines": sorted(set(matched_lines)),
+                "line_range": {"start_line": start_line, "end_line": end_line},
+            },
+        )
 
     cross_paragraph = [
         (match_idx, match_end)
@@ -385,27 +612,38 @@ async def _edit_docx(
         if involved[0][0] != involved[-1][0]
     ]
     if cross_paragraph:
+        involved_lines = [
+            selected_refs[span[0]].line_no
+            for _, _, involved in matches
+            for span in involved
+        ]
         return ToolResult(
             content=(
-                "DOCX 编辑被拒绝：当前安全编辑器只支持单个段落内的替换。"
-                "这次匹配跨越了多个段落，继续写入可能产生额外空行或破坏段落对齐。"
-                "请把 target_content 缩小到一个段落内后重试。"
+                "DOCX 编辑被拒绝：当前安全编辑器只支持单个段落或单个表格单元格段落内的替换。"
+                f"这次匹配跨越了多个段落/单元格（涉及逻辑行: {_compact_line_numbers(involved_lines)}），"
+                "继续写入可能产生额外空行或破坏段落、表格对齐。"
+                "请把 target_content 缩小到一个段落或目标单元格内后重试；"
+                "需要处理整行时，先用 start_line/end_line 定位行，再按单元格或段落分别编辑。"
             ),
             is_error=True,
             metadata={
                 "path": str(path.resolve()),
                 "match_count": count,
                 "cross_paragraph_matches": len(cross_paragraph),
+                "matched_lines": sorted(set(involved_lines)),
             },
         )
 
     # ── 执行替换（逐个匹配处理）──
     actual_count = 0
     comment_count = 0
+    matched_lines: list[int] = []
     for match_idx, match_end, involved in reversed(matches):
         first_pi, first_ri, first_cs, first_ce = involved[0]
         last_pi, last_ri, last_cs, last_ce = involved[-1]
-        first_para = doc.paragraphs[first_pi]
+        first_ref = selected_refs[first_pi]
+        matched_lines.append(first_ref.line_no)
+        first_para = first_ref.paragraph
         first_run = first_para.runs[first_ri]
 
         # 第一段第一段：保留前缀 + 替换内容
@@ -414,7 +652,7 @@ async def _edit_docx(
             prefix = first_run.text[:match_idx - first_cs]
 
         # 最后一段最后一段：保留后缀
-        last_para = doc.paragraphs[last_pi]
+        last_para = selected_refs[last_pi].paragraph
         last_run = last_para.runs[last_ri]
         suffix = ""
         if last_ce > match_end:
@@ -491,6 +729,8 @@ async def _edit_docx(
             "highlight": highlight,
             "comment_added": comment_count > 0,
             "comments_added": comment_count,
+            "matched_lines": sorted(set(matched_lines)),
+            "line_range": {"start_line": start_line, "end_line": end_line},
         },
     )
 
@@ -1329,11 +1569,15 @@ async def file_edit_table(
       description=(
           "精确编辑已有文件。支持纯文本文件和 DOCX 两种类型。\n"
           "通过 target_content 精确匹配原始内容，替换为 replacement_content。\n"
-          "支持对修改位置进行标色（highlight）和添加批注（comment）。\n\n"
+          "支持对修改位置进行标色（highlight）和添加批注（comment）。\n"
+          "DOCX 支持正文段落和表格单元格；start_line/end_line 对应 file_read 输出的逻辑行号，"
+          "可用于把搜索范围限制到某个段落行或表格数据行。\n\n"
           "使用建议：\n"
           "- 修改已有文件优先使用 file_edit，而非 file_write\n"
-          "- target_content 必须精确匹配原文（含缩进和空白）\n"
-          "- 匹配失败时先 file_read 确认最新内容再重试\n"
+          "- target_content 必须精确匹配真实原文（含缩进和空白），不要包含 file_read 左侧行号\n"
+          "- 编辑 DOCX 表格时，通常设置 start_line/end_line 为表格数据行，并匹配目标单元格内文本；"
+          "不要把 [表格 n]、外层 | 分隔符当作 target_content；行号参数应传 JSON 数字，如 start_line: 67\n"
+          "- 匹配失败时先 file_read 确认最新内容和行号再重试\n"
           "- 不支持 .doc 旧格式\n"
           "- 编辑 XLSX 请使用 file_edit_table"
       ))
@@ -1352,10 +1596,10 @@ async def file_edit(
 
     Args:
         path: 文件路径，支持文本/DOCX。可传绝对路径、workspace 可见路径或相对路径；在会话工作区中会由工具层解析到允许的真实路径
-        target_content: 要被替换的原始文本（精确匹配，必填）
-        replacement_content: 替换后的新文本（必填）
-        start_line: 纯文本文件搜索范围起始行（1-based）
-        end_line: 纯文本文件搜索范围结束行
+        target_content: 要被替换的真实原始文本（精确匹配，必填且不能为空）。不要包含 file_read 输出左侧行号；DOCX 表格不要包含 [表格 n] 或外层 | 分隔符。
+        replacement_content: 替换后的新文本（必填）。高亮/批注会作用在替换后的文本上。
+        start_line: 搜索范围起始行（1-based）。文本文件是物理行；DOCX 是 file_read 输出的逻辑行（普通段落一行、表格数据行一行）。应传 JSON 数字，例如 67；数字字符串会被兼容解析。
+        end_line: 搜索范围结束行。DOCX 表格编辑建议与 start_line 设为同一个表格数据行，用于精确定位。应传 JSON 数字，例如 67；数字字符串会被兼容解析。
         allow_multiple: 是否允许替换多个匹配（默认 False）
         highlight: 标色颜色: "yellow"/"green"/"red"/"pink"/None
         comment: 批注内容，None=不添加批注
@@ -1366,6 +1610,23 @@ async def file_edit(
             content=f"不支持的 highlight 颜色: {highlight!r}。可选: yellow, green, red, pink",
             is_error=True,
         )
+    if target_content == "":
+        return ToolResult(
+            content="target_content 不能为空。若要删除内容，请把要删除的原文放入 target_content，并将 replacement_content 设为空字符串。",
+            is_error=True,
+        )
+    start_line, line_error = _coerce_optional_line_number(start_line, "start_line")
+    if line_error:
+        return ToolResult(content=line_error, is_error=True)
+    end_line, line_error = _coerce_optional_line_number(end_line, "end_line")
+    if line_error:
+        return ToolResult(content=line_error, is_error=True)
+    if start_line is not None and start_line < 1:
+        return ToolResult(content="start_line 必须大于等于 1。", is_error=True)
+    if end_line is not None and end_line < 1:
+        return ToolResult(content="end_line 必须大于等于 1。", is_error=True)
+    if start_line is not None and end_line is not None and start_line > end_line:
+        return ToolResult(content="start_line 不能大于 end_line。", is_error=True)
 
     logger.info("file_edit 开始: path=%s", path)
 
@@ -1410,6 +1671,7 @@ async def file_edit(
     elif file_type == "docx":
         return await _edit_docx(
             target, target_content, replacement_content,
+            start_line, end_line,
             allow_multiple, highlight, comment,
         )
     else:

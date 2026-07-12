@@ -283,6 +283,17 @@ class SessionManager:
             skill_root,
             active_names=set(skill_cfg.active),
             visible_names=visible_names,
+            warn_missing=False,
+        )
+        user_dir_template = getattr(skill_cfg, "user_dir_template", "") or "prompts/skills/{username}"
+        user_dir = Path(user_dir_template.format(username=username))
+        if not user_dir.is_absolute():
+            user_dir = self._config_dir / user_dir
+        registry.load_from_user_dir(
+            user_dir,
+            active_names=set(skill_cfg.active),
+            visible_names=visible_names,
+            warn_missing=True,
         )
         return registry
 
