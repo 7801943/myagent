@@ -233,6 +233,37 @@ auth:
   #   - "127.0.0.1"
   #   - "::1"
 
+# ── 私有端点加密隧道 ──
+# 这是现有 HTTP/WS 的平行入口：私有客户端 LocalProxy 连接该 TCP 端口，
+# 完成 X25519 + PSK 握手后，把 WebView 的 HTTP/WS 字节流加密转发到 upstream。
+private_transport:
+  enabled: false
+  listen_host: "0.0.0.0"
+  listen_port: 9443
+  upstream_host: "127.0.0.1"
+  upstream_port: 8000
+  protocol_version: 1
+  server_key_id: "server-v1"
+  # 32 字节 X25519 私钥，base64url 编码。生成方式见 升级加密端点.md。
+  server_private_key: "${MYAGENT_PRIVATE_SERVER_KEY}"
+  client_psk_id: "client-v1"
+  # 建议至少 32 字节随机字符串或 base64:<base64url>。
+  client_psk: "${MYAGENT_PRIVATE_CLIENT_PSK}"
+  max_frame_size: 1048576
+  handshake_timeout_seconds: 10
+  idle_timeout_seconds: 300
+  # 兼容已发布客户端的独立 OnlyOffice LocalProxy。新客户端使用同源
+  # /onlyoffice 时无需启用该入口，会自动复用上面的主隧道。
+  onlyoffice:
+    enabled: false
+    listen_host: "0.0.0.0"
+    listen_port: 9444
+    upstream_host: "127.0.0.1"
+    upstream_port: 8081
+    # 未配置时继承 private_transport 顶层的密钥、key id、协议版本和超时。
+    server_key_id: "server-v1"
+    client_psk_id: "client-v1"
+
 # ── 文档预览/编辑（OnlyOffice）──
 documents:
   enabled: false

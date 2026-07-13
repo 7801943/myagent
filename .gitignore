@@ -51,6 +51,7 @@ build/
 旧方案/
 历史方案/
 *.md
+!升级加密端点.md
 !prompts/
 !prompts/skills/
 !prompts/skills/**/

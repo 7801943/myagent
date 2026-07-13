@@ -4,6 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from myagent.interfaces.web.dependencies import get_document_service, get_session_manager
+from myagent.interfaces.web.services.document_service import normalize_private_onlyoffice_origin
 from myagent.utils.logging import get_logger
 
 
@@ -44,6 +45,14 @@ async def editor_config(
     )
     session = _session_for_user(session_id, username)
     resolver = getattr(session.workspace, "resolver", None) if session and session.workspace else None
+    raw_private_onlyoffice_origin = request.headers.get("x-myagent-private-onlyoffice-origin")
+    private_onlyoffice_origin = normalize_private_onlyoffice_origin(raw_private_onlyoffice_origin)
+    if raw_private_onlyoffice_origin and not private_onlyoffice_origin:
+        logger.warning(
+            "Documents editor-config ignored invalid private OnlyOffice origin: client=%s origin=%s",
+            _client_host(request),
+            raw_private_onlyoffice_origin,
+        )
     return service.build_editor_config(
         path,
         username=username,
@@ -52,6 +61,7 @@ async def editor_config(
         workspace_root=session.workspace.root_path if session and session.workspace else None,
         resolver=resolver,
         session_id=session_id,
+        onlyoffice_url_override=private_onlyoffice_origin,
     )
 
 
