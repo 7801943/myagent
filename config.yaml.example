@@ -252,17 +252,6 @@ private_transport:
   max_frame_size: 1048576
   handshake_timeout_seconds: 10
   idle_timeout_seconds: 300
-  # 兼容已发布客户端的独立 OnlyOffice LocalProxy。新客户端使用同源
-  # /onlyoffice 时无需启用该入口，会自动复用上面的主隧道。
-  onlyoffice:
-    enabled: false
-    listen_host: "0.0.0.0"
-    listen_port: 9444
-    upstream_host: "127.0.0.1"
-    upstream_port: 8081
-    # 未配置时继承 private_transport 顶层的密钥、key id、协议版本和超时。
-    server_key_id: "server-v1"
-    client_psk_id: "client-v1"
 
 # ── 文档预览/编辑（OnlyOffice）──
 documents:

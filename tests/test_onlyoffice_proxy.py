@@ -106,6 +106,7 @@ def test_proxy_forwarded_headers_use_virtual_onlyoffice_path():
             "connection": "keep-alive",
             "range": "bytes=0-10",
             "x-forwarded-for": "10.0.0.1",
+            "x-forwarded-prefix": "/upstream-prefix",
         },
         client_host="10.0.0.2",
         request_scheme="https",
@@ -119,7 +120,7 @@ def test_proxy_forwarded_headers_use_virtual_onlyoffice_path():
     assert headers["X-Forwarded-For"] == "10.0.0.1, 10.0.0.2"
     assert headers["X-Forwarded-Proto"] == "https"
     assert headers["X-Forwarded-Host"] == "app.example.com/onlyoffice"
-    assert headers["X-Forwarded-Prefix"] == "/onlyoffice"
+    assert "x-forwarded-prefix" not in {name.lower() for name in headers}
 
 
 def test_forwarded_host_can_use_absolute_browser_url():

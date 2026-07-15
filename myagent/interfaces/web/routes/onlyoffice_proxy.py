@@ -248,7 +248,6 @@ def _add_forwarded_headers(
         headers["X-Forwarded-For"] = forwarded_for
     headers["X-Forwarded-Proto"] = request_scheme
     headers["X-Forwarded-Host"] = forwarded_host(request_host, browser_url)
-    headers["X-Forwarded-Prefix"] = PROXY_PREFIX
 
 
 def _pop_header_case_insensitive(headers: dict[str, str], name: str) -> str:

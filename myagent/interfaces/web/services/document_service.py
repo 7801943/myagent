@@ -110,13 +110,10 @@ class DocumentService:
         session_id: str = "",
         group: str = "user",
         resolver=None,
-        onlyoffice_url_override: str | None = None,
     ) -> dict[str, Any]:
         """构造前端 `new DocsAPI.DocEditor(...)` 所需配置。"""
         if not self.enabled:
             raise HTTPException(status_code=404, detail="文档预览/编辑未启用")
-        onlyoffice_url_override = normalize_private_onlyoffice_origin(onlyoffice_url_override)
-
         path, scope = self.resolve_document_path(relative_path, workspace_root, resolver, operation="read", actor="user")
         ext = path.suffix.lower()
         doc_type = self._document_type(ext)
@@ -138,7 +135,6 @@ class DocumentService:
             session_id=session_id,
             group=group,
             scope=scope,
-            onlyoffice_proxy_origin=onlyoffice_url_override,
         )
         file_url = self._internal_api_url("/api/documents/download", relative_path, token)
         callback_url = self._internal_api_url("/api/documents/callback", relative_path, token)
@@ -192,7 +188,7 @@ class DocumentService:
             "config": config,
             "document_type": doc_type,
             "file_name": path.name,
-            "onlyoffice_url": onlyoffice_url_override or self.config.onlyoffice_url,
+            "onlyoffice_url": self.config.onlyoffice_url,
             "onlyoffice_jwt_header": self.config.onlyoffice_jwt_header,
         }
 
@@ -257,10 +253,7 @@ class DocumentService:
 
         # OnlyOffice 回调里的 url 是一次性下载地址，需要服务端立即拉取。
         try:
-            resolved_download_url = self.rewrite_onlyoffice_download_url(
-                str(download_url),
-                trusted_proxy_base=str(token_payload.get("onlyoffice_proxy_origin") or ""),
-            )
+            resolved_download_url = self.rewrite_onlyoffice_download_url(str(download_url))
             logger.info(
                 "OnlyOffice callback downloading updated file: path=%s url=%s",
                 relative_path,
@@ -293,7 +286,7 @@ class DocumentService:
 
         return {"error": 0}
 
-    def rewrite_onlyoffice_download_url(self, download_url: str, trusted_proxy_base: str = "") -> str:
+    def rewrite_onlyoffice_download_url(self, download_url: str) -> str:
         """
         Resolve the one-time ONLYOFFICE callback download URL to an internal DocumentServer URL.
 
@@ -310,9 +303,6 @@ class DocumentService:
             return raw_url
 
         proxy_bases = self._onlyoffice_proxy_bases()
-        normalized_extra_base = normalize_private_onlyoffice_origin(trusted_proxy_base)
-        if normalized_extra_base:
-            proxy_bases.append(normalized_extra_base)
         for proxy_base in _dedupe_strings(proxy_bases):
             if _url_is_under_base(raw_url, proxy_base):
                 suffix_path, query = _url_suffix_after_base(raw_url, proxy_base)
@@ -399,7 +389,6 @@ class DocumentService:
         session_id: str = "",
         group: str = "user",
         scope: str = "workspace",
-        onlyoffice_proxy_origin: str | None = None,
     ) -> str:
         now = int(time.time())
         payload = {
@@ -413,8 +402,6 @@ class DocumentService:
             "exp": now + self.config.access_token_ttl_seconds,
             "nonce": secrets.token_urlsafe(12),
         }
-        if onlyoffice_proxy_origin:
-            payload["onlyoffice_proxy_origin"] = onlyoffice_proxy_origin
         return self._sign_payload(payload, self._access_secret)
 
     def verify_access_token(self, token: str, relative_path: str) -> dict[str, Any]:
@@ -501,30 +488,6 @@ def _fingerprint(value: str) -> str:
     if not value:
         return "<empty>"
     return f"<sha256:{hashlib.sha256(value.encode('utf-8')).hexdigest()[:12]}>"
-
-
-def normalize_private_onlyoffice_origin(value: str | None) -> str | None:
-    """Accept only LocalProxy loopback HTTP origins for private OnlyOffice access."""
-    if not value:
-        return None
-
-    try:
-        parsed = urlsplit(value.strip())
-        if parsed.scheme != "http" or not parsed.netloc:
-            return None
-        if parsed.username or parsed.password:
-            return None
-        if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
-            return None
-        # Accessing .port validates malformed port values.
-        _ = parsed.port
-    except ValueError:
-        return None
-
-    if parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
-        return None
-
-    return f"{parsed.scheme}://{parsed.netloc}"
 
 
 def _normalize_url_base(value: str) -> str:

@@ -15,7 +15,6 @@ FastAPI 应用入口：统一 HTTP + WebSocket + 静态文件服务。
   - / — 静态文件服务（web/ 目录）
 """
 import argparse
-import asyncio
 
 import uvicorn
 from contextlib import asynccontextmanager
@@ -180,7 +179,7 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理：初始化和清理全局资源。"""
     config_path = getattr(app.state, "config_path", "config.yaml")
     setup_logging(level="INFO")
-    private_tunnels: list[PrivateTunnelServer] = []
+    private_tunnel: PrivateTunnelServer | None = None
 
     try:
         # Startup：初始化服务
@@ -193,32 +192,14 @@ async def lifespan(app: FastAPI):
         if private_tunnel_config.enabled:
             private_tunnel = PrivateTunnelServer(private_tunnel_config)
             await private_tunnel.start()
-            private_tunnels.append(private_tunnel)
             app.state.private_tunnel = private_tunnel
-
-        # 兼容已发布客户端的独立 OnlyOffice LocalProxy；新客户端可直接让
-        # 同源 /onlyoffice 请求复用上面的主隧道。
-        onlyoffice_tunnel_config = PrivateTunnelConfig.from_nested_mapping(
-            raw_private_transport,
-            "onlyoffice",
-            default_listen_port=9444,
-            default_upstream_host="127.0.0.1",
-            default_upstream_port=8081,
-        )
-        if onlyoffice_tunnel_config.enabled:
-            onlyoffice_tunnel = PrivateTunnelServer(onlyoffice_tunnel_config)
-            await onlyoffice_tunnel.start()
-            private_tunnels.append(onlyoffice_tunnel)
-            app.state.onlyoffice_private_tunnel = onlyoffice_tunnel
-
-        app.state.private_tunnels = private_tunnels
         logger.info("z-workbench FastAPI server started")
 
         yield
 
     finally:
         # Shutdown：清理资源
-        for private_tunnel in reversed(private_tunnels):
+        if private_tunnel is not None:
             await private_tunnel.stop()
         await shutdown()
         logger.info("z-workbench FastAPI server stopped")

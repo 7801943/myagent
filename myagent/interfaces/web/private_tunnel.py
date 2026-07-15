@@ -67,42 +67,6 @@ class PrivateTunnelConfig:
             idle_timeout_seconds=float(data.get("idle_timeout_seconds") or 300.0),
         )
 
-    @classmethod
-    def from_nested_mapping(
-        cls,
-        raw: dict[str, Any] | None,
-        section: str,
-        *,
-        default_listen_port: int,
-        default_upstream_port: int,
-        default_upstream_host: str = "127.0.0.1",
-    ) -> "PrivateTunnelConfig":
-        parent = raw or {}
-        child_raw = parent.get(section, {})
-        child = child_raw if isinstance(child_raw, dict) else {}
-
-        def inherited(name: str, default: Any) -> Any:
-            if name in child:
-                return child[name]
-            return parent.get(name, default)
-
-        return cls(
-            enabled=bool(child.get("enabled", False)),
-            listen_host=str(child.get("listen_host") or parent.get("listen_host") or "0.0.0.0"),
-            listen_port=int(child.get("listen_port") or default_listen_port),
-            upstream_host=str(child.get("upstream_host") or default_upstream_host),
-            upstream_port=int(child.get("upstream_port") or default_upstream_port),
-            protocol_version=int(inherited("protocol_version", PROTOCOL_VERSION) or PROTOCOL_VERSION),
-            server_key_id=str(inherited("server_key_id", "server-v1") or "server-v1"),
-            server_private_key=str(inherited("server_private_key", "") or ""),
-            client_psk_id=str(inherited("client_psk_id", "client-v1") or "client-v1"),
-            client_psk=str(inherited("client_psk", "") or ""),
-            max_frame_size=int(inherited("max_frame_size", DEFAULT_MAX_FRAME_SIZE) or DEFAULT_MAX_FRAME_SIZE),
-            handshake_timeout_seconds=float(inherited("handshake_timeout_seconds", 10.0) or 10.0),
-            idle_timeout_seconds=float(inherited("idle_timeout_seconds", 300.0) or 300.0),
-        )
-
-
 @dataclass
 class _TunnelSession:
     c2s_aead: Any
