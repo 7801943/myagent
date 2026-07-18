@@ -73,9 +73,11 @@ class WebSocketHandler:
         self,
         websocket: WebSocket,
         session_manager: SessionManager,
+        encrypted_transport: bool = False,
     ):
         self._ws = websocket
         self._session_manager = session_manager
+        self._encrypted_transport = encrypted_transport
         # 当前活跃的 Session（可能与其他 WS 连接共享）
         self._session: Session | None = None
         self._session_id: str = ""
@@ -134,6 +136,7 @@ class WebSocketHandler:
             "session_id": self._session_id,
             "context_window_size": context_window_size,
             "messages": history,
+            "encrypted_transport": self._encrypted_transport,
         })
 
         # ── 5. 推送初始状态。workspace_state 单独推送，方便前端恢复编辑器。

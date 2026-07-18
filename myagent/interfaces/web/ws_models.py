@@ -151,6 +151,7 @@ class MessageEndMessage(ServerMessage):
 class ConnectedMessage(ServerMessage):
     type: str = "connected"
     session_id: str = ""
+    encrypted_transport: bool = False
 
 
 class SessionListResultMessage(ServerMessage):

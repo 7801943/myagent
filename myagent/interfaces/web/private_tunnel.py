@@ -5,10 +5,11 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import ipaddress
 import json
 import secrets
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from myagent.utils.logging import get_logger
@@ -36,9 +37,11 @@ DEFAULT_READ_CHUNK_SIZE = 64 * 1024
 class PrivateTunnelConfig:
     enabled: bool = False
     listen_host: str = "0.0.0.0"
+    listen_hosts: list[str] = field(default_factory=lambda: ["0.0.0.0", "::"])
     listen_port: int = 9443
     upstream_host: str = "127.0.0.1"
     upstream_port: int = 8000
+    upstream_source_host: str = "127.0.0.2"
     protocol_version: int = PROTOCOL_VERSION
     server_key_id: str = "server-v1"
     server_private_key: str = ""
@@ -51,12 +54,23 @@ class PrivateTunnelConfig:
     @classmethod
     def from_mapping(cls, raw: dict[str, Any] | None) -> "PrivateTunnelConfig":
         data = raw or {}
+        raw_listen_hosts = data.get("listen_hosts")
+        if isinstance(raw_listen_hosts, (list, tuple)):
+            listen_hosts = _dedupe_hosts(raw_listen_hosts)
+            if not listen_hosts:
+                raise ValueError("private_transport.listen_hosts must not be empty")
+        elif "listen_host" in data:
+            listen_hosts = [str(data.get("listen_host") or "0.0.0.0")]
+        else:
+            listen_hosts = ["0.0.0.0", "::"]
         return cls(
             enabled=bool(data.get("enabled", False)),
-            listen_host=str(data.get("listen_host") or "0.0.0.0"),
+            listen_host=listen_hosts[0],
+            listen_hosts=listen_hosts,
             listen_port=int(data.get("listen_port") or 9443),
             upstream_host=str(data.get("upstream_host") or "127.0.0.1"),
             upstream_port=int(data.get("upstream_port") or 8000),
+            upstream_source_host=str(data.get("upstream_source_host") or "127.0.0.2"),
             protocol_version=int(data.get("protocol_version") or PROTOCOL_VERSION),
             server_key_id=str(data.get("server_key_id") or "server-v1"),
             server_private_key=str(data.get("server_private_key") or ""),
@@ -66,6 +80,7 @@ class PrivateTunnelConfig:
             handshake_timeout_seconds=float(data.get("handshake_timeout_seconds") or 10.0),
             idle_timeout_seconds=float(data.get("idle_timeout_seconds") or 300.0),
         )
+
 
 @dataclass
 class _TunnelSession:
@@ -105,10 +120,11 @@ class PrivateTunnelServer:
             raise ValueError("private_transport.client_psk must contain at least 16 bytes")
         if self.config.protocol_version != PROTOCOL_VERSION:
             raise ValueError(f"unsupported private tunnel protocol_version: {self.config.protocol_version}")
+        _validate_upstream_source_host(self.config.upstream_source_host)
 
         self._server = await asyncio.start_server(
             self._handle_client,
-            self.config.listen_host,
+            self.config.listen_hosts,
             self.config.listen_port,
         )
         sockets = ", ".join(str(sock.getsockname()) for sock in self._server.sockets or [])
@@ -147,6 +163,7 @@ class PrivateTunnelServer:
             upstream_reader, upstream_writer = await asyncio.open_connection(
                 self.config.upstream_host,
                 self.config.upstream_port,
+                local_addr=(self.config.upstream_source_host, 0),
             )
             logger.info(
                 "Private tunnel upstream connected: conn=%s peer=%s upstream=%s:%s",
@@ -631,3 +648,21 @@ def _close_writer(writer: asyncio.StreamWriter) -> None:
         writer.close()
     except Exception:
         pass
+
+
+def _dedupe_hosts(values: list[Any] | tuple[Any, ...]) -> list[str]:
+    hosts: list[str] = []
+    for value in values:
+        host = str(value or "").strip()
+        if host and host not in hosts:
+            hosts.append(host)
+    return hosts
+
+
+def _validate_upstream_source_host(value: str) -> None:
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError as exc:
+        raise ValueError("private_transport.upstream_source_host must be a loopback IP address") from exc
+    if not address.is_loopback:
+        raise ValueError("private_transport.upstream_source_host must be a loopback IP address")

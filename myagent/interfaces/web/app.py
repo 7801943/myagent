@@ -33,6 +33,7 @@ from myagent.interfaces.web.dependencies import (
 )
 from myagent.interfaces.web.ws_handler import WebSocketHandler
 from myagent.interfaces.web.routes import health, sessions, auth, documents, onlyoffice_proxy, workspace_files
+from myagent.interfaces.web.auth import normalize_ip
 from myagent.interfaces.web.private_tunnel import PrivateTunnelConfig, PrivateTunnelServer
 from myagent.utils.config import load_yaml_config
 from myagent.utils.logging import get_logger, setup_logging
@@ -189,7 +190,11 @@ async def lifespan(app: FastAPI):
         raw_private_transport = full_config.get("private_transport", {})
 
         private_tunnel_config = PrivateTunnelConfig.from_mapping(raw_private_transport)
+        app.state.encrypted_transport_sources = set()
         if private_tunnel_config.enabled:
+            app.state.encrypted_transport_sources = {
+                normalize_ip(private_tunnel_config.upstream_source_host),
+            }
             private_tunnel = PrivateTunnelServer(private_tunnel_config)
             await private_tunnel.start()
             app.state.private_tunnel = private_tunnel
@@ -216,6 +221,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
 
     # 保存配置路径供 lifespan 使用
     app.state.config_path = config_path
+    app.state.encrypted_transport_sources = set()
 
     # ── CORS 中间件 ──
     # TODO: [AUTH] 生产环境应限制 allow_origins
@@ -261,7 +267,11 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         ws.state.user = token_info
 
         session_manager = get_session_manager()
-        handler = WebSocketHandler(ws, session_manager)
+        handler = WebSocketHandler(
+            ws,
+            session_manager,
+            encrypted_transport=_is_encrypted_websocket(ws, app),
+        )
         await handler.run()
 
     # ── 静态文件挂载（必须放在最后，否则会拦截所有路由）──
@@ -272,6 +282,14 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         logger.warning(f"Web directory not found: {web_dir}")
 
     return app
+
+
+def _is_encrypted_websocket(websocket: WebSocket, app: FastAPI) -> bool:
+    if websocket.client is None:
+        return False
+    peer_host = normalize_ip(websocket.client.host)
+    trusted_sources = getattr(app.state, "encrypted_transport_sources", set())
+    return peer_host in trusted_sources
 
 
 # 默认应用实例（uvicorn myagent.interfaces.web.app:app 会使用这个）

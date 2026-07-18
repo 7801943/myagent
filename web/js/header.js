@@ -89,12 +89,7 @@ export function initHeader() {
 
     // 监听连接状态事件（来自 chat.js setStatus）
     on('header:conn-status', function (data) {
-        if (headerConnDot) {
-            headerConnDot.className = "header-conn-dot" + (data.cls === "connected" ? " connected" : "");
-        }
-        if (headerConnText) {
-            headerConnText.textContent = data.cls === "connected" ? "已连接" : "未连接";
-        }
+        updateHeaderConnStatus(data.cls, data.text);
     });
 
     // 监听 WebSocket 打开/关闭事件
@@ -120,6 +115,12 @@ export function initHeader() {
         updateRunModeDisabled();
     });
 
+    on('transport:changed', function () {
+        if (state.isConnected) {
+            updateHeaderConnStatus("connected", "已连接");
+        }
+    });
+
     on('processing:changed', function () {
         updateModelPickerDisabled();
         updateRunModeDisabled();
@@ -131,7 +132,9 @@ function updateHeaderConnStatus(cls, text) {
         headerConnDot.className = "header-conn-dot" + (cls === "connected" ? " connected" : "");
     }
     if (headerConnText) {
-        headerConnText.textContent = text;
+        headerConnText.textContent = cls === "connected"
+            ? (state.encryptedTransport ? "已连接（加密连接）" : "已连接")
+            : text;
     }
     // 动态切换标题栏渐变色
     updateHeaderGradient(cls === "connected");

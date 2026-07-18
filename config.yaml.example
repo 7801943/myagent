@@ -238,10 +238,15 @@ auth:
 # 完成 X25519 + PSK 握手后，把 WebView 的 HTTP/WS 字节流加密转发到 upstream。
 private_transport:
   enabled: false
-  listen_host: "0.0.0.0"
+  # 双栈监听；旧版单值 listen_host 仍然兼容。
+  listen_hosts:
+    - "0.0.0.0"
+    - "::"
   listen_port: 9443
   upstream_host: "127.0.0.1"
   upstream_port: 8000
+  # 加密隧道回源 FastAPI 时使用，用于可信识别当前 WebSocket 的链路类型。
+  upstream_source_host: "127.0.0.2"
   protocol_version: 1
   server_key_id: "server-v1"
   # 32 字节 X25519 私钥，base64url 编码。生成方式见 升级加密端点.md。

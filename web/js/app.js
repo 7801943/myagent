@@ -50,6 +50,7 @@ on('auth:logout', function () {
         state.ws = null;
     }
     state.isConnected = false;
+    state.encryptedTransport = false;
 });
 
 // ── 全局快捷键注册 ──
@@ -73,4 +74,3 @@ window.addEventListener("keydown", function (e) {
         }
     }
 });
-

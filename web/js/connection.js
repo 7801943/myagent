@@ -48,6 +48,7 @@ export function connect() {
 
     state.ws.onopen = function () {
         state.isConnected = true;
+        state.encryptedTransport = false;
         reconnectAttempts = 0;
         startHeartbeat();
         emit('ws:open');
@@ -55,6 +56,7 @@ export function connect() {
 
     state.ws.onclose = function () {
         state.isConnected = false;
+        state.encryptedTransport = false;
         stopHeartbeat();
         emit('ws:close');
         scheduleReconnect();
@@ -62,6 +64,7 @@ export function connect() {
 
     state.ws.onerror = function (err) {
         console.error("WebSocket error:", err);
+        state.encryptedTransport = false;
         emit('ws:error', { message: "连接错误" });
     };
 

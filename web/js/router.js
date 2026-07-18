@@ -19,6 +19,8 @@ function handleMessage(data) {
         case "connected":
             state.currentSessionId = data.session_id;
             state.contextWindowSize = data.context_window_size || 0;
+            state.encryptedTransport = data.encrypted_transport === true;
+            emit('transport:changed', { encrypted: state.encryptedTransport });
             console.log("Session:", data.session_id, "Context Window:", state.contextWindowSize);
 
             resetProcessingState();

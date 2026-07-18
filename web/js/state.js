@@ -7,6 +7,7 @@
 export const state = {
     ws: null,
     isConnected: false,
+    encryptedTransport: false,
     isProcessing: false,
     currentSessionId: null,
     sessions: [],
