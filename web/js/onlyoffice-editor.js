@@ -79,6 +79,8 @@ function loadOnlyOfficeApi(onlyofficeUrl) {
         script.onload = function () { resolve(); };
         script.onerror = function () {
             console.error('[OnlyOffice] api.js load failed', script.src);
+            apiPromise = null;
+            if (script.parentNode) script.parentNode.removeChild(script);
             reject(new Error('OnlyOffice API 加载失败'));
         };
         document.head.appendChild(script);
