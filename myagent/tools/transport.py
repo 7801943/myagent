@@ -8,6 +8,7 @@ import os
 import signal
 import sys
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,8 @@ class SubprocessTransport(Transport):
     本地 Python 子进程传输层。
 
     主进程 spawn 子进程，通过 stdin/stdout 管道通信。
-    注册信号和 atexit，确保主进程退出时子进程被 kill。
+    正常退出由调用方显式 stop；atexit 只作为异常退出时的最后兜底。
+    不注册进程级信号，避免覆盖 Uvicorn/CLI 自己的优雅退出处理。
     """
 
     # 100MB — 允许大型工具结果（如 PDF 渲染为 base64）通过 JSON-RPC 管道
@@ -62,6 +64,7 @@ class SubprocessTransport(Transport):
         self._writer: asyncio.StreamWriter | None = None
         self._drain_task: asyncio.Task | None = None
         self._exit_hooks_registered = False
+        self._atexit_cleanup: Callable[[], None] | None = None
 
     @property
     def reader(self) -> asyncio.StreamReader:
@@ -89,8 +92,10 @@ class SubprocessTransport(Transport):
         # TODO: 未来优化方向 — 让 try_create_transport() 只负责创建、不负责启动，
         #       将 start() 统一交给 JsonRpcProxy 管理，届时可移除此保护。
         if self._proc is not None:
-            logger.debug("SubprocessTransport.start() skipped: already started (idempotent guard)")
-            return
+            if self._proc.returncode is None:
+                logger.debug("SubprocessTransport.start() skipped: already started (idempotent guard)")
+                return
+            await self.stop()
 
         self._proc = await asyncio.create_subprocess_exec(
             sys.executable, "-m", "myagent.tools.runner",
@@ -100,6 +105,10 @@ class SubprocessTransport(Transport):
             cwd=self._cwd,
             env=self._env,
             limit=self._READER_LIMIT,
+            # The runner may itself spawn shell commands. Giving it a dedicated
+            # process group lets shutdown terminate the whole tree instead of
+            # orphaning a command when only the runner is killed.
+            start_new_session=(os.name == "posix"),
         )
         logger.info(f"SubprocessTransport started: PID={self._proc.pid}")
 
@@ -118,52 +127,100 @@ class SubprocessTransport(Transport):
         def _cleanup():
             if self._proc and self._proc.returncode is None:
                 try:
-                    self._proc.kill()
+                    self._signal_process_tree(self._proc, signal.SIGKILL)
                     logger.info(
-                        f"SubprocessTransport cleanup: killed PID={self._proc.pid}")
+                        "SubprocessTransport emergency cleanup: killed process tree PID=%s",
+                        self._proc.pid,
+                    )
                 except Exception:
                     pass
 
+        self._atexit_cleanup = _cleanup
         atexit.register(_cleanup)
 
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            try:
-                def _signal_handler(s=sig):
-                    _cleanup()
-                    # 移除自定义 handler，恢复默认行为，让进程能正常退出
-                    loop.remove_signal_handler(s)
-                    # 向自身重新发送信号，触发默认处理（KeyboardInterrupt / 终止）
-                    os.kill(os.getpid(), s)
-                loop.add_signal_handler(sig, _signal_handler)
-            except NotImplementedError:
-                pass
-
     async def stop(self) -> None:
-        if self._drain_task:
-            self._drain_task.cancel()
+        proc = self._proc
+        writer = self._writer
+        drain_task = self._drain_task
+
+        if writer:
             try:
-                await self._drain_task
-            except asyncio.CancelledError:
+                writer.close()
+            except (OSError, RuntimeError):
                 pass
 
-        if self._writer:
-            try:
-                self._writer.close()
-            except Exception:
-                pass
-
-        if self._proc and self._proc.returncode is None:
-            try:
-                self._proc.terminate()
-                await asyncio.wait_for(self._proc.wait(), timeout=3.0)
-            except Exception:
+        try:
+            if proc is not None:
+                await self._terminate_process_tree(proc)
+        finally:
+            # Do not leave pipe tasks or StreamWriter references retaining this
+            # transport, including when shutdown itself is cancelled.
+            if drain_task and not drain_task.done():
+                drain_task.cancel()
+            if drain_task:
+                await asyncio.gather(drain_task, return_exceptions=True)
+            if writer:
                 try:
-                    self._proc.kill()
-                except ProcessLookupError:
+                    await writer.wait_closed()
+                except (OSError, RuntimeError):
                     pass
 
+            if proc is None or proc.returncode is not None:
+                self._reader = None
+                self._writer = None
+                self._drain_task = None
+                if self._proc is proc:
+                    self._proc = None
+                self._unregister_exit_hook()
+
         logger.info("SubprocessTransport stopped")
+
+    async def _terminate_process_tree(self, proc: asyncio.subprocess.Process) -> None:
+        """Terminate, then kill on timeout, and always reap the runner process."""
+        was_running = proc.returncode is None
+        if was_running:
+            self._signal_process_tree(proc, signal.SIGTERM)
+
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=3.0)
+            # The runner can exit before a descendant that ignores SIGTERM.
+            # Immediately kill any remaining members of the dedicated group.
+            if was_running and os.name == "posix":
+                self._signal_process_tree(proc, signal.SIGKILL)
+        except asyncio.TimeoutError:
+            self._signal_process_tree(proc, signal.SIGKILL)
+            await proc.wait()
+        except asyncio.CancelledError:
+            # Shutdown itself can be cancelled. Kill synchronously before
+            # propagating cancellation, and make a best effort to reap.
+            self._signal_process_tree(proc, signal.SIGKILL)
+            reap_task = asyncio.create_task(proc.wait())
+            try:
+                await asyncio.shield(reap_task)
+            except asyncio.CancelledError:
+                pass
+            raise
+
+    @staticmethod
+    def _signal_process_tree(proc: asyncio.subprocess.Process, sig: signal.Signals) -> None:
+        try:
+            if os.name == "posix":
+                os.killpg(proc.pid, sig)
+            elif proc.returncode is not None:
+                return
+            elif sig == signal.SIGTERM:
+                proc.terminate()
+            else:
+                proc.kill()
+        except ProcessLookupError:
+            pass
+
+    def _unregister_exit_hook(self) -> None:
+        cleanup = self._atexit_cleanup
+        if cleanup is not None:
+            atexit.unregister(cleanup)
+        self._atexit_cleanup = None
+        self._exit_hooks_registered = False
 
     async def _drain_stderr(self) -> None:
         # 截断超长日志行，防止 openai SDK / 大文件片段等淹没主进程日志

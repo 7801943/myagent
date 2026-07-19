@@ -9,7 +9,6 @@ import asyncio
 import importlib.util
 import inspect
 import logging
-import os
 import sys
 import time
 from collections import OrderedDict
@@ -381,10 +380,22 @@ class ToolManager:
                 await self._watch_task
             except asyncio.CancelledError:
                 pass
+        self._watch_task = None
+
+        if self._mcp_clients:
+            results = await asyncio.gather(
+                *(self.disconnect_mcp(name) for name in list(self._mcp_clients)),
+                return_exceptions=True,
+            )
+            for result in results:
+                if isinstance(result, BaseException):
+                    logger.warning("Failed to disconnect MCP server during shutdown: %s", result)
 
         if self._proxy:
             await self._proxy.stop()
             self._proxy = None
+
+        await self._idempotency.clear()
 
         logger.info("ToolManager stopped")
 

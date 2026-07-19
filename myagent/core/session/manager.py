@@ -118,6 +118,50 @@ class SessionManager:
                 await self._cleanup_task
             except asyncio.CancelledError:
                 pass
+            self._cleanup_task = None
+
+        sessions = list(self._sessions.values())
+        if sessions:
+            # Stop new work at the Session boundary before tearing down the
+            # transports it may currently be using.
+            for session in sessions:
+                session.request_cancel("server_shutdown", "服务正在关闭")
+
+            running_tasks = {
+                task
+                for session in sessions
+                if (task := getattr(session, "_running_task", None)) is not None and not task.done()
+            }
+            pending_tasks: set[asyncio.Task] = set()
+            if running_tasks:
+                _done, pending_tasks = await asyncio.wait(running_tasks, timeout=5.0)
+
+            for session in sessions:
+                session.unregister_events()
+
+            # Every Session owns a ToolManager/Transport. Close all of them,
+            # even if one Session cleanup fails, so no runner is orphaned.
+            await asyncio.gather(
+                *(self._cleanup_session_resources(session) for session in sessions),
+                return_exceptions=True,
+            )
+
+            if pending_tasks:
+                _done, still_pending = await asyncio.wait(pending_tasks, timeout=3.0)
+                if still_pending:
+                    logger.warning(
+                        "SessionManager shutdown left %s cancelled session task(s) pending",
+                        len(still_pending),
+                    )
+
+            for session in sessions:
+                try:
+                    await session.save()
+                except Exception as exc:
+                    logger.warning("Failed to save session %s during shutdown: %s", session.id, exc)
+
+            # Drop manager-owned references after all async cleanup completes.
+            self._sessions.clear()
         logger.info("SessionManager TTL cleanup stopped")
 
     async def _cleanup_loop(self) -> None:

@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ class MCPClient:
         self._request_id = 0
         self._lock = asyncio.Lock()
         self._server_name = ""
+        self._drain_task: asyncio.Task | None = None
 
     async def connect(self, transport: str, url_or_cmd: str,
                       server_name: str = "") -> None:
@@ -54,11 +56,12 @@ class MCPClient:
             stderr=asyncio.subprocess.PIPE,
             cwd=os.getcwd(),
             env=env,
+            start_new_session=(os.name == "posix"),
         )
         logger.info(f"MCP connected: {server_name or url_or_cmd} "
                      f"(PID={self._proc.pid})")
 
-        asyncio.create_task(self._drain_stderr())
+        self._drain_task = asyncio.create_task(self._drain_stderr())
 
         init_result = await self._send_request("initialize", {
             "protocolVersion": "2024-11-05",
@@ -103,18 +106,52 @@ class MCPClient:
         }
 
     async def disconnect(self) -> None:
-        if self._proc and self._proc.returncode is None:
+        proc = self._proc
+        drain_task = self._drain_task
+        if proc:
             try:
-                self._proc.stdin.close()
-                self._proc.terminate()
-                await asyncio.wait_for(self._proc.wait(), timeout=3.0)
-            except Exception:
+                if proc.stdin:
+                    proc.stdin.close()
+                was_running = proc.returncode is None
+                if was_running:
+                    self._signal_process_tree(proc, signal.SIGTERM)
                 try:
-                    self._proc.kill()
-                except ProcessLookupError:
-                    pass
+                    await asyncio.wait_for(proc.wait(), timeout=3.0)
+                    if was_running and os.name == "posix":
+                        self._signal_process_tree(proc, signal.SIGKILL)
+                except asyncio.TimeoutError:
+                    self._signal_process_tree(proc, signal.SIGKILL)
+                    await proc.wait()
+                except asyncio.CancelledError:
+                    self._signal_process_tree(proc, signal.SIGKILL)
+                    reap_task = asyncio.create_task(proc.wait())
+                    try:
+                        await asyncio.shield(reap_task)
+                    except asyncio.CancelledError:
+                        pass
+                    raise
+            finally:
+                if drain_task and not drain_task.done():
+                    drain_task.cancel()
+                if drain_task:
+                    await asyncio.gather(drain_task, return_exceptions=True)
         self._proc = None
+        self._drain_task = None
         logger.info(f"MCP disconnected: {self._server_name}")
+
+    @staticmethod
+    def _signal_process_tree(proc: asyncio.subprocess.Process, sig: signal.Signals) -> None:
+        try:
+            if os.name == "posix":
+                os.killpg(proc.pid, sig)
+            elif proc.returncode is not None:
+                return
+            elif sig == signal.SIGTERM:
+                proc.terminate()
+            else:
+                proc.kill()
+        except ProcessLookupError:
+            pass
 
     async def _send_request(self, method: str,
                             params: dict[str, Any] | None = None

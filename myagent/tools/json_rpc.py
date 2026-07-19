@@ -44,8 +44,11 @@ class JsonRpcProxy:
         try:
             await self._send("ping", {}, timeout=10.0)
             logger.info("JsonRpcProxy connected and healthy")
+        except asyncio.CancelledError:
+            await self.stop()
+            raise
         except Exception:
-            await self._transport.stop()
+            await self.stop()
             raise RuntimeError("JsonRpcProxy health check failed: server not responding")
 
     async def stop(self) -> None:
