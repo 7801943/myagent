@@ -22,6 +22,7 @@ import httpx
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
 
+from myagent.interfaces.web.private_proxy_context import normalize_loopback_http_origin
 from myagent.utils.logging import get_logger
 
 
@@ -110,10 +111,14 @@ class DocumentService:
         session_id: str = "",
         group: str = "user",
         resolver=None,
+        onlyoffice_proxy_origin: str | None = None,
     ) -> dict[str, Any]:
         """构造前端 `new DocsAPI.DocEditor(...)` 所需配置。"""
         if not self.enabled:
             raise HTTPException(status_code=404, detail="文档预览/编辑未启用")
+        onlyoffice_proxy_origin = normalize_loopback_http_origin(onlyoffice_proxy_origin)
+        if _is_absolute_http_url(self.config.onlyoffice_url):
+            onlyoffice_proxy_origin = None
         path, scope = self.resolve_document_path(relative_path, workspace_root, resolver, operation="read", actor="user")
         ext = path.suffix.lower()
         doc_type = self._document_type(ext)
@@ -135,6 +140,7 @@ class DocumentService:
             session_id=session_id,
             group=group,
             scope=scope,
+            onlyoffice_proxy_origin=onlyoffice_proxy_origin,
         )
         file_url = self._internal_api_url("/api/documents/download", relative_path, token)
         callback_url = self._internal_api_url("/api/documents/callback", relative_path, token)
@@ -253,14 +259,19 @@ class DocumentService:
 
         # OnlyOffice 回调里的 url 是一次性下载地址，需要服务端立即拉取。
         try:
-            resolved_download_url = self.rewrite_onlyoffice_download_url(str(download_url))
+            resolved_download_url = self.rewrite_onlyoffice_download_url(
+                str(download_url),
+                trusted_proxy_origin=str(token_payload.get("onlyoffice_proxy_origin") or ""),
+            )
             logger.info(
                 "OnlyOffice callback downloading updated file: path=%s url=%s",
                 relative_path,
                 _safe_url(resolved_download_url),
             )
-            async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
                 response = await client.get(resolved_download_url)
+                if response.is_redirect:
+                    raise ValueError("OnlyOffice callback download redirect is not allowed")
                 response.raise_for_status()
             logger.info(
                 "OnlyOffice callback downloaded updated file: path=%s status_code=%s bytes=%s",
@@ -286,7 +297,7 @@ class DocumentService:
 
         return {"error": 0}
 
-    def rewrite_onlyoffice_download_url(self, download_url: str) -> str:
+    def rewrite_onlyoffice_download_url(self, download_url: str, trusted_proxy_origin: str = "") -> str:
         """
         Resolve the one-time ONLYOFFICE callback download URL to an internal DocumentServer URL.
 
@@ -302,8 +313,26 @@ class DocumentService:
         if _url_is_under_base(raw_url, internal_base):
             return raw_url
 
-        proxy_bases = self._onlyoffice_proxy_bases()
-        for proxy_base in _dedupe_strings(proxy_bases):
+        normalized_private_origin = normalize_loopback_http_origin(trusted_proxy_origin)
+        if normalized_private_origin and not _is_absolute_http_url(self.config.onlyoffice_url):
+            private_proxy_base = _join_origin_and_path(normalized_private_origin, self.config.onlyoffice_url)
+            private_cache_base = f"{private_proxy_base.rstrip('/')}/cache/files"
+            if not _url_is_under_base(raw_url, private_cache_base):
+                logger.warning(
+                    "OnlyOffice private callback download URL rejected outside cache path: url=%s",
+                    _safe_url(raw_url),
+                )
+                raise ValueError("OnlyOffice private download URL is not a cache file")
+            suffix_path, query = _url_suffix_after_base(raw_url, private_proxy_base)
+            rewritten = _join_base_and_suffix(internal_base, suffix_path, query)
+            logger.info(
+                "OnlyOffice callback download URL rewritten: from=%s to=%s",
+                _safe_url(raw_url),
+                _safe_url(rewritten),
+            )
+            return rewritten
+
+        for proxy_base in _dedupe_strings(self._onlyoffice_proxy_bases()):
             if _url_is_under_base(raw_url, proxy_base):
                 suffix_path, query = _url_suffix_after_base(raw_url, proxy_base)
                 rewritten = _join_base_and_suffix(internal_base, suffix_path, query)
@@ -389,6 +418,7 @@ class DocumentService:
         session_id: str = "",
         group: str = "user",
         scope: str = "workspace",
+        onlyoffice_proxy_origin: str | None = None,
     ) -> str:
         now = int(time.time())
         payload = {
@@ -402,6 +432,8 @@ class DocumentService:
             "exp": now + self.config.access_token_ttl_seconds,
             "nonce": secrets.token_urlsafe(12),
         }
+        if onlyoffice_proxy_origin:
+            payload["onlyoffice_proxy_origin"] = onlyoffice_proxy_origin
         return self._sign_payload(payload, self._access_secret)
 
     def verify_access_token(self, token: str, relative_path: str) -> dict[str, Any]:

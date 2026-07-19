@@ -4,6 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from myagent.interfaces.web.dependencies import get_document_service, get_session_manager
+from myagent.interfaces.web.private_proxy_context import resolve_private_proxy_context
 from myagent.utils.logging import get_logger
 
 
@@ -44,6 +45,22 @@ async def editor_config(
     )
     session = _session_for_user(session_id, username)
     resolver = getattr(session.workspace, "resolver", None) if session and session.workspace else None
+    proxy_context = resolve_private_proxy_context(
+        request,
+        getattr(request.app.state, "encrypted_transport_sources", set()),
+    )
+    if proxy_context.trusted_tunnel and not proxy_context.browser_origin:
+        logger.warning(
+            "Documents editor-config could not resolve private browser origin: client=%s host=%s",
+            _client_host(request),
+            request.headers.get("host", ""),
+        )
+    elif proxy_context.browser_origin:
+        logger.info(
+            "Documents editor-config private browser origin resolved: client=%s origin=%s",
+            _client_host(request),
+            proxy_context.browser_origin,
+        )
     data = service.build_editor_config(
         path,
         username=username,
@@ -52,6 +69,7 @@ async def editor_config(
         workspace_root=session.workspace.root_path if session and session.workspace else None,
         resolver=resolver,
         session_id=session_id,
+        onlyoffice_proxy_origin=proxy_context.browser_origin,
     )
     logger.info(
         "Documents editor-config response: path=%s onlyoffice_url=%s",
