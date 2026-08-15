@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from myagent.tools.api import ToolResult
+from myagent.tools.builtin.pdf_router import parse_pdf_with_routing
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,6 @@ _DENIED_HOME_SUBPATHS = (".ssh", ".aws", ".gnupg", ".config/gcloud")
 
 _MAX_BASE64_BYTES = 20 * 1024 * 1024  # 20MB base64 输出上限
 _PDF_DEFAULT_MAX_PAGES = 3            # 未指定页码范围时，默认最多渲染页数
-_PDF_SCAN_FALLBACK_RATIO = 0.5        # 无文本页占比超过此阈值时，自动回退到 base64 渲染
 
 
 def _is_within(path: str, base: str) -> bool:
@@ -566,93 +566,65 @@ async def _read_pdf_text(
     start_line: int | None,
     end_line: int | None,
 ) -> ToolResult:
-    """使用 pdfplumber 提取 PDF 文本内容。"""
-    # 抑制 pdfminer 的 DEBUG 日志洪水。
-    # pdfminer 在解析 PDF 时会为每个 token/操作输出大量 DEBUG 日志
-    # （nexttoken / add_results / nextobject / do_keyword / exec 等），
-    # 一个普通 PDF 可能产生数千~数万条日志，导致：
-    #   1. 子进程 stderr 被海量日志填满，产生严重 I/O 瓶颈
-    #   2. 主进程 _drain_stderr 逐行读取并以 INFO 级别转发，进一步加剧延迟
-    #   3. PDF 解析看似"卡住"，实际大部分时间花在日志 I/O 上
-    # 将 pdfminer 相关 logger 提升到 WARNING 级别，彻底消除底层噪音。
-    for _logger_name in ("pdfminer", "pdfminer.psparser", "pdfminer.pdfinterp",
-                         "pdfminer.pdfpage", "pdfminer.converter",
-                         "pdfminer.layout", "pdfminer.utils"):
-        logging.getLogger(_logger_name).setLevel(logging.WARNING)
-
+    """Use pdf-inspector for text PDFs and PyMuPDF images as fallback."""
     try:
-        import pdfplumber
-    except ImportError:
-        return ToolResult(
-            content="缺少 pdfplumber 库，无法解析 PDF。请安装: pip install pdfplumber",
-            is_error=True,
-        )
+        routed = parse_pdf_with_routing(path, start_line, end_line)
+        route_meta = routed.metadata()
 
-    try:
+        if routed.route == "image":
+            rendered = await _read_pdf_pages_base64(
+                path,
+                routed.fallback_pages,
+                limit_to_default=start_line is None and end_line is None,
+            )
+            rendered.metadata.update(route_meta)
+            rendered.metadata["fallback_triggered"] = True
+            rendered.content = (
+                f"pdf-inspector 选择图片回退：{routed.reason}。\n"
+                f"{rendered.content}"
+            )
+            return rendered
+
         all_lines: list[str] = []
-        page_count = 0
+        for page in routed.pages:
+            all_lines.append(f"--- 第 {page.page_number} 页 ---\n")
+            if page.markdown:
+                all_lines.extend(f"{line}\n" for line in page.markdown.splitlines())
+            elif page.needs_image:
+                all_lines.append("[此页已回退为图片，见多模态内容块]\n")
+            else:
+                all_lines.append("[此页无有效正文文本]\n")
 
-        with pdfplumber.open(str(path)) as pdf:
-            page_count = len(pdf.pages)
-            start_page = max(1, start_line or 1)
-            end_page = min(end_line or page_count, page_count) if end_line else page_count
-
-            if start_page > page_count:
-                return ToolResult(
-                    content=f"PDF 共 {page_count} 页，start_line={start_page} 超出范围。",
-                    is_error=True,
-                    metadata={"page_count": page_count},
-                )
-
-            for page_num in range(start_page, end_page + 1):
-                page = pdf.pages[page_num - 1]
-                text = page.extract_text() or ""
-                # 添加页码标记
-                all_lines.append(f"--- 第 {page_num} 页 ---\n")
-                if text.strip():
-                    for line in text.split("\n"):
-                        all_lines.append(line + "\n")
-                else:
-                    all_lines.append("[此页无可提取文本，可能是扫描图片]\n")
-
-        if not all_lines:
-            return ToolResult(
-                content="PDF 未能提取到任何文本。可能是扫描件/图片 PDF，"
-                        "请使用 output_format=\"base64\" 以图片形式读取。",
-                metadata={"page_count": page_count},
-            )
-
-        # ── 扫描页检测：如果大部分页无文本，自动回退到 base64 渲染 ──
-        pages_read_count = end_page - start_page + 1
-        empty_page_count = sum(
-            1 for line in all_lines
-            if line.strip() == "[此页无可提取文本，可能是扫描图片]"
-        )
-        # 每个 empty page 产生 2 行（页码标题 + 提示），实际空页数 = empty_page_count
-        if (
-            pages_read_count > 0
-            and empty_page_count / pages_read_count > _PDF_SCAN_FALLBACK_RATIO
-        ):
-            logger.debug(
-                "PDF 扫描页回退: 读取 %d 页中 %d 页无文本(%.0f%% > 阈值 %.0f%%)，回退到 base64 渲染",
-                pages_read_count, empty_page_count,
-                empty_page_count / pages_read_count * 100,
-                _PDF_SCAN_FALLBACK_RATIO * 100,
-            )
-            return await _read_pdf_base64(path, start_line, end_line)
-
-        # 把所有行视为一个整体，用页码范围代替行号范围
         total = len(all_lines)
-        s = 1  # 已经只取了目标页的内容
-
-        content, meta = _format_lines(all_lines, s, None, total)
+        content, meta = _format_lines(all_lines, 1, None, total)
         meta["path"] = str(path.resolve())
         meta["format"] = "pdf"
-        meta["page_count"] = page_count
-        meta["pages_read"] = f"{start_page}-{end_page}"
+        meta.update(route_meta)
+        meta["pages_read"] = list(routed.selected_pages)
 
-        logger.info("file_read PDF文本完成: %s, 读取页数=%d", path, end_page - start_page + 1)
-        return ToolResult(content=content, metadata=meta)
+        content_blocks = None
+        if routed.route == "hybrid" and routed.fallback_pages:
+            rendered = await _read_pdf_pages_base64(
+                path,
+                routed.fallback_pages,
+                limit_to_default=start_line is None and end_line is None,
+            )
+            if rendered.is_error:
+                return rendered
+            content += f"\n{rendered.content}\n"
+            content_blocks = rendered.content_blocks
+            meta["pages_rendered"] = rendered.metadata.get("pages_rendered", [])
+            meta["fallback_triggered"] = True
+
+        logger.info(
+            "file_read PDF完成: %s route=%s confidence=%.3f pages=%d fallback_pages=%s",
+            path,
+            routed.route,
+            routed.confidence,
+            len(routed.selected_pages),
+            routed.fallback_pages,
+        )
+        return ToolResult(content=content, metadata=meta, content_blocks=content_blocks)
 
     except Exception as e:
         return ToolResult(content=f"解析 PDF 失败: {e}", is_error=True)
@@ -663,7 +635,40 @@ async def _read_pdf_base64(
     start_line: int | None,
     end_line: int | None,
 ) -> ToolResult:
-    """使用 PyMuPDF 将 PDF 页渲染为 JPEG 图片并返回 base64。"""
+    """使用 PyMuPDF 将连续 PDF 页码范围渲染为 JPEG 图片。"""
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        return ToolResult(
+            content="缺少 PyMuPDF 库，无法渲染 PDF。请安装: pip install PyMuPDF",
+            is_error=True,
+        )
+
+    try:
+        with fitz.open(str(path)) as doc:
+            page_count = len(doc)
+        if start_line is None and end_line is None:
+            pages = list(range(1, page_count + 1))
+            limit_to_default = True
+        else:
+            start_page = max(1, start_line or 1)
+            end_page = min(end_line or page_count, page_count)
+            pages = list(range(start_page, end_page + 1))
+            limit_to_default = False
+        return await _read_pdf_pages_base64(
+            path, pages, limit_to_default=limit_to_default
+        )
+    except Exception as e:
+        return ToolResult(content=f"渲染 PDF 失败: {e}", is_error=True)
+
+
+async def _read_pdf_pages_base64(
+    path: Path,
+    pages: list[int],
+    *,
+    limit_to_default: bool = False,
+) -> ToolResult:
+    """Render an explicit list of 1-indexed PDF pages with PyMuPDF."""
     try:
         import fitz  # PyMuPDF
     except ImportError:
@@ -675,27 +680,27 @@ async def _read_pdf_base64(
     try:
         doc = fitz.open(str(path))
         page_count = len(doc)
-
-        # 未指定范围时，默认只渲染前几页，避免生成过大响应
-        if start_line is None and end_line is None:
-            start_page = 1
-            end_page = min(_PDF_DEFAULT_MAX_PAGES, page_count)
-        else:
-            start_page = max(1, start_line or 1)
-            end_page = min(end_line or page_count, page_count) if end_line else page_count
-
-        if start_page > page_count:
+        requested_pages = sorted({int(page) for page in pages if int(page) >= 1})
+        if not requested_pages:
+            requested_pages = list(range(1, page_count + 1))
+        invalid = [page for page in requested_pages if page > page_count]
+        if invalid:
             doc.close()
             return ToolResult(
-                content=f"PDF 共 {page_count} 页，start_line={start_page} 超出范围。",
+                content=f"PDF 共 {page_count} 页，页码 {invalid[0]} 超出范围。",
                 is_error=True,
                 metadata={"page_count": page_count},
             )
+        selected_pages = (
+            requested_pages[:_PDF_DEFAULT_MAX_PAGES]
+            if limit_to_default
+            else requested_pages
+        )
 
         content_blocks: list[dict[str, Any]] = []
         total_bytes = 0
 
-        for page_num in range(start_page, end_page + 1):
+        for page_num in selected_pages:
             page = doc[page_num - 1]
             # 渲染为 150 DPI 的 JPEG
             pix = page.get_pixmap(dpi=150)
@@ -715,15 +720,15 @@ async def _read_pdf_base64(
             })
 
             if total_bytes > _MAX_BASE64_BYTES:
-                # 超过大小限制，截断
-                remaining = end_page - page_num
+                remaining = len(selected_pages) - len(content_blocks)
                 desc = (
-                    f"PDF 共 {page_count} 页，已渲染第 {start_page}-{page_num} 页为图片。"
+                    f"PDF 共 {page_count} 页，已渲染页面 "
+                    f"{[block['page'] for block in content_blocks]} 为图片。"
                     f"（剩余 {remaining} 页因大小限制未输出，"
                     f"可调整 start_line/end_line 读取其他页）"
                 )
                 doc.close()
-                logger.info("file_read PDF图片完成(截断): %s, 渲染页数=%d", path, page_num - start_page + 1)
+                logger.info("file_read PDF图片完成(截断): %s, 渲染页数=%d", path, len(content_blocks))
                 return ToolResult(
                     content=desc,
                     content_blocks=content_blocks,
@@ -731,24 +736,26 @@ async def _read_pdf_base64(
                         "path": str(path.resolve()),
                         "format": "pdf",
                         "page_count": page_count,
-                        "pages_rendered": list(range(start_page, page_num + 1)),
+                        "pages_rendered": [block["page"] for block in content_blocks],
+                        "pages_requested": requested_pages,
                         "truncated": True,
                     },
                 )
 
         doc.close()
 
-        pages_hint = ""
-        if page_count > end_page:
-            pages_hint = (
-                f"（仅渲染了前 {end_page - start_page + 1} 页，"
-                f"共 {page_count} 页。可指定 start_line/end_line 读取更多页）"
-            )
-        desc = (
-            f"PDF 共 {page_count} 页，已渲染第 {start_page}-{end_page} 页为图片"
-            f"（共 {end_page - start_page + 1} 张）。{pages_hint}"
+        truncated = len(selected_pages) < len(requested_pages)
+        pages_hint = (
+            f"（按默认上限仅渲染前 {_PDF_DEFAULT_MAX_PAGES} 个待处理页面，"
+            "可指定 start_line/end_line 读取更多页）"
+            if truncated
+            else ""
         )
-        logger.info("file_read PDF图片完成: %s, 渲染页数=%d", path, end_page - start_page + 1)
+        desc = (
+            f"PDF 共 {page_count} 页，已渲染页面 {selected_pages} 为图片"
+            f"（共 {len(selected_pages)} 张）。{pages_hint}"
+        )
+        logger.info("file_read PDF图片完成: %s, 渲染页数=%d", path, len(selected_pages))
         return ToolResult(
             content=desc,
             content_blocks=content_blocks,
@@ -756,7 +763,9 @@ async def _read_pdf_base64(
                 "path": str(path.resolve()),
                 "format": "pdf",
                 "page_count": page_count,
-                "pages_rendered": list(range(start_page, end_page + 1)),
+                "pages_rendered": selected_pages,
+                "pages_requested": requested_pages,
+                "truncated": truncated,
             },
         )
 

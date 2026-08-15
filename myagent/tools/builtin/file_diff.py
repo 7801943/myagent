@@ -23,8 +23,10 @@ from myagent.tools.builtin._file_common import (
     _json_value,
     _parse_a1_range,
     _range_from_bounds,
+    _read_pdf_pages_base64,
     _worksheet_tables,
 )
+from myagent.tools.builtin.pdf_router import PdfRoutingResult, parse_pdf_with_routing
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +53,7 @@ _TEXT_TYPES = {"text", "csv", "docx", "pdf"}
     timeout=120,
     description=(
         "对比两个文件的差异并返回受控的差异报告。\n"
-        "- 文本类（txt/csv/docx/pdf）：按文本行做传统 diff（新增/删除/替换的行）。\n"
+        "- 文本类（txt/csv/docx/pdf）：按文本行做传统 diff；PDF 使用 pdf-inspector，非文本页回退为图片供视觉比较。\n"
         "- XLSX vs XLSX：在两个文件中按名字匹配同名表（命中 sheet 名或原生 table 名均可），"
         "对匹配到的表逐行对比；只在一侧存在的表返回概要，不报错。\n"
         "大差异会自动截断并告警，可用 table_name/columns 收窄范围。"
@@ -129,8 +131,13 @@ async def file_diff(
 async def _diff_text(
     target_a: Path, target_b: Path, type_a: str, type_b: str
 ) -> ToolResult:
-    lines_a = _load_text_lines(target_a, type_a)
-    lines_b = _load_text_lines(target_b, type_b)
+    lines_a, pdf_a = _load_text_lines(target_a, type_a)
+    lines_b, pdf_b = _load_text_lines(target_b, type_b)
+
+    if (pdf_a and pdf_a.route == "image") or (pdf_b and pdf_b.route == "image"):
+        return await _build_visual_diff_fallback(
+            target_a, target_b, type_a, type_b, pdf_a, pdf_b, lines_a, lines_b
+        )
 
     hunks, stats = _diff_text_lines(lines_a, lines_b)
     total = len(hunks)
@@ -153,22 +160,52 @@ async def _diff_text(
         "truncated": truncated,
         "warn_threshold": _WARN_THRESHOLD,
     }
+    if pdf_a:
+        metadata["pdf_a"] = pdf_a.metadata()
+    if pdf_b:
+        metadata["pdf_b"] = pdf_b.metadata()
     content = _maybe_warn(content, total)
+
+    content_blocks: list[dict[str, Any]] = []
+    for label, target, routed in (("A", target_a, pdf_a), ("B", target_b, pdf_b)):
+        if not routed or not routed.fallback_pages:
+            continue
+        rendered = await _read_pdf_pages_base64(
+            target, routed.fallback_pages, limit_to_default=True
+        )
+        if rendered.is_error:
+            continue
+        for block in rendered.content_blocks or []:
+            content_blocks.append({**block, "source": label})
+        content += (
+            f"\n\nPDF {label} 的部分页面需要视觉比较：{rendered.content}"
+        )
+        metadata[f"pdf_{label.lower()}_pages_rendered"] = rendered.metadata.get(
+            "pages_rendered", []
+        )
+
     logger.info("file_diff 文本完成: hunks=%d added=%d removed=%d",
                 total, stats["added"], stats["removed"])
-    return ToolResult(content=content, metadata=metadata)
+    return ToolResult(
+        content=content,
+        metadata=metadata,
+        content_blocks=content_blocks or None,
+    )
 
 
-def _load_text_lines(path: Path, file_type: str) -> list[str]:
+def _load_text_lines(
+    path: Path, file_type: str
+) -> tuple[list[str], PdfRoutingResult | None]:
     """把文本类文件解析成纯文本行列表（供 difflib 使用）。"""
     if file_type == "text":
-        return _read_plain_lines(path)
+        return _read_plain_lines(path), None
     if file_type == "csv":
-        return _read_csv_lines(path)
+        return _read_csv_lines(path), None
     if file_type == "docx":
-        return _read_docx_lines(path)
+        return _read_docx_lines(path), None
     if file_type == "pdf":
-        return _read_pdf_lines(path)
+        routed = parse_pdf_with_routing(path)
+        return _read_pdf_lines(path, routed), routed
     raise ValueError(f"不支持的文本类类型: {file_type}")
 
 
@@ -201,22 +238,78 @@ def _read_docx_lines(path: Path) -> list[str]:
     return [line.rstrip("\n\r") for line in _extract_docx_lines(doc)]
 
 
-def _read_pdf_lines(path: Path) -> list[str]:
-    # 抑制 pdfminer DEBUG 日志洪水（同 file_read/file_query 的处理）
-    for name in ("pdfminer", "pdfminer.psparser", "pdfminer.pdfinterp",
-                 "pdfminer.pdfpage", "pdfminer.converter",
-                 "pdfminer.layout", "pdfminer.utils"):
-        logging.getLogger(name).setLevel(logging.WARNING)
-
-    import pdfplumber
-
+def _read_pdf_lines(path: Path, routed: PdfRoutingResult | None = None) -> list[str]:
+    routed = routed or parse_pdf_with_routing(path)
     lines: list[str] = []
-    with pdfplumber.open(str(path)) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text() or ""
-            for line in text.split("\n"):
-                lines.append(line.rstrip("\n\r"))
+    for page in routed.pages:
+        if page.markdown:
+            lines.append(f"--- 第 {page.page_number} 页 ---")
+            lines.extend(line.rstrip("\n\r") for line in page.markdown.splitlines())
     return lines
+
+
+async def _build_visual_diff_fallback(
+    target_a: Path,
+    target_b: Path,
+    type_a: str,
+    type_b: str,
+    pdf_a: PdfRoutingResult | None,
+    pdf_b: PdfRoutingResult | None,
+    lines_a: list[str],
+    lines_b: list[str],
+) -> ToolResult:
+    """Render non-text PDF pages so the main vision model can compare them."""
+    blocks: list[dict[str, Any]] = []
+    rendered_meta: dict[str, Any] = {}
+    descriptions: list[str] = []
+
+    for label, target, routed, lines in (
+        ("A", target_a, pdf_a, lines_a),
+        ("B", target_b, pdf_b, lines_b),
+    ):
+        if not routed:
+            preview = "\n".join(lines[:80])
+            descriptions.append(
+                f"{label} 为可读文本，前 {min(80, len(lines))} 行如下：\n{preview}"
+            )
+            continue
+        pages_to_render = (
+            routed.fallback_pages if routed.needs_images else routed.selected_pages
+        )
+        rendered = await _read_pdf_pages_base64(
+            target, pages_to_render, limit_to_default=True
+        )
+        if rendered.is_error:
+            return rendered
+        for block in rendered.content_blocks or []:
+            blocks.append({**block, "source": label})
+        descriptions.append(f"PDF {label}: {rendered.content}")
+        rendered_meta[f"pdf_{label.lower()}_pages_rendered"] = rendered.metadata.get(
+            "pages_rendered", []
+        )
+
+    metadata: dict[str, Any] = {
+        "mode": "visual_fallback",
+        "path_a": str(target_a.resolve()),
+        "path_b": str(target_b.resolve()),
+        "type_a": type_a,
+        "type_b": type_b,
+        **rendered_meta,
+    }
+    if pdf_a:
+        metadata["pdf_a"] = pdf_a.metadata()
+    if pdf_b:
+        metadata["pdf_b"] = pdf_b.metadata()
+
+    return ToolResult(
+        content=(
+            "至少一个 PDF 未进入可信文本路由，file_diff 已回退为页面图片。"
+            "请由主模型进行视觉比较；默认最多返回每个文件 3 个待处理页面。\n"
+            + "\n".join(descriptions)
+        ),
+        metadata=metadata,
+        content_blocks=blocks or None,
+    )
 
 
 def _diff_text_lines(lines_a: list[str], lines_b: list[str]) -> tuple[list[dict], dict]:

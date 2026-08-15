@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
           "- 文本文件(txt/md/py/json/yaml/log等): 按行输出，带行号\n"
           "- CSV/TSV: 解析后按行输出，列用 | 分隔\n"
           "- XLSX/XLS: 多 Sheet 时先列出 Sheet 信息，需指定 sheet_name 读取\n"
-          "- PDF: 提取文本(默认) 或渲染为图片(base64模式)\n"
+          "- PDF: pdf-inspector 提取 Markdown；低置信度/扫描/图片页自动回退为页面图片，base64模式可强制渲染\n"
           "- DOCX: 按文档内容顺序提取段落和表格，按行输出（不支持按真实 Word 页码定位）\n"
           "- 图片(png/jpg/gif等): 以 base64 编码返回\n"
           "参数 start_line_or_page / end_line_or_page 对文本/CSV/DOCX/XLSX 表示输出行号，对 PDF 表示页码；DOCX 不支持真实 Word 页码定位"

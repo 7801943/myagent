@@ -22,7 +22,9 @@ from myagent.tools.builtin._file_common import (
     _detect_encoding,
     _detect_file_type,
     _extract_docx_lines,
+    _read_pdf_pages_base64,
 )
+from myagent.tools.builtin.pdf_router import PdfRoutingResult, parse_pdf_with_routing
 from myagent.utils.config import AgentConfig, load_yaml_config
 
 logger = logging.getLogger(__name__)
@@ -90,7 +92,8 @@ class _SimpleMessage:
     description=(
         "使用子代理模型查询大型文件内容。适用于文件过大（比如超过20MB）或者行数过多（比如超过3000行）、直接读取会超过模型最佳上下文区间的场景；"
         "工具会将文件按行自动切块并保留重叠上下文，把每个片段交给子代理判断是否包含答案，"
-        "再根据子代理返回的证据行号回填原文引用。支持文本/CSV/DOCX/XLSX/PDF文本层，暂不支持图片、二进制、扫描PDF/OCR。"
+        "再根据子代理返回的证据行号回填原文引用。支持文本/CSV/DOCX/XLSX/PDF文本层；"
+        "PDF 由 pdf-inspector 分类，非文本页会回退为页面图片交给主模型处理。暂不内置 OCR。"
         "注意，本工具执行速度较慢，且会消耗大量tokens，在无法直接使用file_read读取时才使用。"
     ),
 )
@@ -181,8 +184,27 @@ async def _file_query_impl(
             is_error=True,
         )
 
+    pdf_routing: PdfRoutingResult | None = None
     try:
-        lines = await _extract_located_lines(target, file_type, sheet_name)
+        if file_type == "pdf":
+            pdf_routing = parse_pdf_with_routing(target)
+            if pdf_routing.route == "image":
+                rendered = await _read_pdf_pages_base64(
+                    target,
+                    pdf_routing.fallback_pages,
+                    limit_to_default=True,
+                )
+                rendered.content = (
+                    "file_query 无法对该 PDF 建立可信文本索引，已回退为页面图片，"
+                    "请由主模型根据图片回答原问题。\n"
+                    f"回退原因: {pdf_routing.reason}\n{rendered.content}"
+                )
+                rendered.metadata.update(pdf_routing.metadata())
+                rendered.metadata.update({"query": query, "mode": mode, "fallback_triggered": True})
+                return rendered
+            lines = _extract_pdf_text_lines(target, pdf_routing)
+        else:
+            lines = await _extract_located_lines(target, file_type, sheet_name)
         logger.info("file_query extracted: file_type=%s line_count=%s", file_type, len(lines))
     except Exception as exc:
         logger.exception("file_query extract failed")
@@ -276,7 +298,25 @@ async def _file_query_impl(
     if chunk_failures:
         metadata["chunk_failures"] = chunk_failures
 
-    return ToolResult(content=content, metadata=metadata)
+    content_blocks = None
+    if pdf_routing is not None:
+        metadata.update(pdf_routing.metadata())
+        if pdf_routing.route == "hybrid" and pdf_routing.fallback_pages:
+            rendered = await _read_pdf_pages_base64(
+                target,
+                pdf_routing.fallback_pages,
+                limit_to_default=True,
+            )
+            if not rendered.is_error:
+                content += (
+                    "\n\n部分页面没有可信文本，已附加页面图片供主模型补充检查。\n"
+                    f"{rendered.content}"
+                )
+                content_blocks = rendered.content_blocks
+                metadata["pages_rendered"] = rendered.metadata.get("pages_rendered", [])
+                metadata["fallback_triggered"] = True
+
+    return ToolResult(content=content, metadata=metadata, content_blocks=content_blocks)
 
 
 def _normalize_inputs(
@@ -389,38 +429,31 @@ def _extract_xlsx_lines(path: Path, sheet_name: str | None) -> list[LocatedLine]
         wb.close()
 
 
-def _extract_pdf_text_lines(path: Path) -> list[LocatedLine]:
-    for logger_name in (
-        "pdfminer",
-        "pdfminer.psparser",
-        "pdfminer.pdfinterp",
-        "pdfminer.pdfpage",
-        "pdfminer.converter",
-        "pdfminer.layout",
-        "pdfminer.utils",
-    ):
-        logging.getLogger(logger_name).setLevel(logging.WARNING)
-
-    import pdfplumber
-
+def _extract_pdf_text_lines(
+    path: Path,
+    routed: PdfRoutingResult | None = None,
+) -> list[LocatedLine]:
+    routed = routed or parse_pdf_with_routing(path)
+    if not routed.uses_text:
+        raise ValueError(
+            f"PDF 未进入文本路由: route={routed.route}, reason={routed.reason}"
+        )
     located: list[LocatedLine] = []
     global_line = 1
-    with pdfplumber.open(str(path)) as pdf:
-        for page_num, page in enumerate(pdf.pages, 1):
-            text = page.extract_text() or ""
-            if not text.strip():
-                continue
-            for page_line, line in enumerate(text.split("\n"), 1):
-                located.append(
-                    LocatedLine(
-                        global_line=global_line,
-                        text=line.rstrip("\n\r"),
-                        source_type="pdf",
-                        page=page_num,
-                        local_line=page_line,
-                    )
+    for page in routed.pages:
+        if not page.markdown:
+            continue
+        for page_line, line in enumerate(page.markdown.splitlines(), 1):
+            located.append(
+                LocatedLine(
+                    global_line=global_line,
+                    text=line.rstrip("\n\r"),
+                    source_type="pdf",
+                    page=page.page_number,
+                    local_line=page_line,
                 )
-                global_line += 1
+            )
+            global_line += 1
     return located
 
 
