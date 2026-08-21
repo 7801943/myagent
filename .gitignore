@@ -22,6 +22,11 @@ __pycache__/
 # 工作区用户文件
 workspaces/
 
+# 根目录测试文档（仅本地使用）
+/test.docx
+/test2.docx
+/test_edit.docx
+
 # 审计日志
 audit_logs/
 
