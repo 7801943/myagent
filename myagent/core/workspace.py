@@ -57,6 +57,7 @@ class FileInfo:
     is_user_opened: bool = False  # 用户在前端打开过此文件
     is_llm_read: bool = False     # LLM 后端读取过此文件
     area: str = ""                # private | public
+    version: str = ""             # mtime/size/inode 组成的乐观并发版本
     can_read: bool = True
     can_upload: bool = True
     can_rename: bool = True
@@ -71,6 +72,7 @@ class FileInfo:
             "is_user_opened": self.is_user_opened,
             "is_llm_read": self.is_llm_read,
             "area": self.area,
+            "version": self.version,
             "can_read": self.can_read,
             "can_upload": self.can_upload,
             "can_rename": self.can_rename,
@@ -679,7 +681,12 @@ def _scan_level_sync(root: Path, sub_path: str | None = None) -> list[FileInfo]:
 
         rel = str(entry.relative_to(root))
         if entry.is_dir():
-            result.append(FileInfo(path=rel, is_dir=True))
+            try:
+                stat = entry.stat()
+                version = f"{stat.st_mtime_ns:x}-{stat.st_size:x}-{getattr(stat, 'st_ino', 0):x}"
+            except (PermissionError, OSError):
+                version = ""
+            result.append(FileInfo(path=rel, is_dir=True, version=version))
         else:
             try:
                 stat = entry.stat()
@@ -690,6 +697,7 @@ def _scan_level_sync(root: Path, sub_path: str | None = None) -> list[FileInfo]:
                     modified_at=datetime.fromtimestamp(
                         stat.st_mtime, tz=timezone.utc
                     ).isoformat(),
+                    version=f"{stat.st_mtime_ns:x}-{stat.st_size:x}-{getattr(stat, 'st_ino', 0):x}",
                 ))
             except (PermissionError, OSError):
                 result.append(FileInfo(path=rel, is_dir=False))

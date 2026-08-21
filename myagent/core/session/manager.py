@@ -900,6 +900,41 @@ class SessionManager:
             if public_paths:
                 await session.workspace.update("user", "files_changed", {"changed_paths": public_paths})
 
+    async def notify_workspace_files_changed(self, username: str, change: dict) -> None:
+        """Synchronize file mutations to every affected active workspace.
+
+        Private paths are broadcast only to sessions owned by ``username``;
+        public paths are broadcast to all sessions because they share one root.
+        Each session filters the change payload through its own resolver before
+        rescanning, so persisted tab state and permissions remain authoritative.
+        """
+        changed_paths = [str(path) for path in change.get("changed_paths", []) if path]
+        deleted_paths = [str(path) for path in change.get("deleted_paths", []) if path]
+        renamed_paths = [
+            item for item in change.get("renamed_paths", [])
+            if isinstance(item, dict) and item.get("from") and item.get("to")
+        ]
+
+        for session in list(self._sessions.values()):
+            resolver = getattr(session.workspace, "resolver", None) if session.workspace else None
+            if not resolver:
+                continue
+
+            def visible(path: str) -> bool:
+                area = resolver.virtual_path_area(path)
+                return area == "public" or (area == "private" and session.user.username == username)
+
+            session_change = {
+                "changed_paths": [path for path in changed_paths if visible(path)],
+                "deleted_paths": [path for path in deleted_paths if visible(path)],
+                "renamed_paths": [
+                    item for item in renamed_paths
+                    if visible(str(item["from"])) or visible(str(item["to"]))
+                ],
+            }
+            if any(session_change.values()):
+                await session.workspace.update("user", "files_changed", session_change)
+
     # ── SSPT: Prompt 模板 ──
 
     def load_prompt_template(self):

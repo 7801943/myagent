@@ -221,6 +221,18 @@ workspace:
   public_dir: "workspaces/public"
   public_upload_enabled: true
   public_rename_delete_group: "admin"
+  file_manager:
+    # private 目录总容量 10 GiB；回收站计入配额，上传暂存以预留容量计入。
+    private_quota_bytes: 10737418240
+    max_file_bytes: 1073741824
+    max_batch_bytes: 2147483648
+    max_batch_files: 1000
+    upload_chunk_bytes: 8388608
+    max_concurrent_uploads: 3
+    upload_expiry_hours: 24
+    trash_retention_days: 30
+    list_page_size: 200
+    search_result_limit: 200
 
 # ── 认证系统 ──
 auth:

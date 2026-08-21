@@ -7,6 +7,11 @@ import { state, emit, on } from './state.js';
 import { activateDocument, closeAllDocuments, closeDocument, openDocument } from './onlyoffice-editor.js';
 import { send } from './connection.js';
 import { getToken } from './auth.js';
+import {
+    initWorkspaceFileManager,
+    renderWorkspaceFileManager,
+    resetWorkspaceFileManager,
+} from './workspace-file-manager.js';
 
 let panel;
 let chatPanel;
@@ -53,6 +58,11 @@ export function initWorkspace() {
     workspaceSidebar = document.getElementById("workspaceSidebar");
     workspaceExplorerToggle = document.getElementById("workspaceExplorerToggle");
     explorerContainer = document.getElementById("workspaceExplorer");
+    initWorkspaceFileManager({
+        container: explorerContainer,
+        openFile: openWorkspaceFile,
+        aiRead: aiReadWorkspaceFile,
+    });
 
     // Tab 切换 — 绑定到 activity-bar 中的 ws-tab-btn 按钮
     const abTabBtns = document.querySelectorAll(".ab-item.ws-tab-btn");
@@ -76,7 +86,6 @@ export function initWorkspace() {
     on('workspace:state', handleWorkspaceState);
     on('auth:logout', resetWorkspacePreview);
     on('session:changed', resetWorkspacePreview);
-    ensureWorkspaceUploadInputs();
     document.addEventListener('click', hideWorkspaceContextMenu);
     document.addEventListener('click', function (e) {
         if (tabListPopup && !tabListPopup.contains(e.target)) {
@@ -90,6 +99,7 @@ function resetWorkspacePreview() {
     activeDocumentPath = '';
     latestWorkspaceState = null;
     selectedWorkspacePath = '';
+    resetWorkspaceFileManager();
     hideWorkspaceContextMenu();
     lastRenderedTreeSignature = '';
     clearOptimisticActiveFile();
@@ -475,39 +485,7 @@ function closeFileTab(index) {
 // -- File Explorer --
 
 function renderFileTree(workspaceState) {
-    if (!explorerContainer) return;
-
-    // Save scroll position before rebuilding DOM
-    const oldTree = explorerContainer.querySelector('.workspace-tree');
-    const savedScrollTop = oldTree ? oldTree.scrollTop : 0;
-
-    const files = workspaceState.files || [];
-    const rootName = workspaceState.root_path ? fileName(workspaceState.root_path) : '工作空间';
-
-    explorerContainer.innerHTML = '';
-    explorerContainer.appendChild(createExplorerHeader(rootName, workspaceState.root_path));
-
-    if (!workspaceState.root_path) {
-        explorerContainer.appendChild(createExplorerEmpty('未设置工作空间目录'));
-        return;
-    }
-    if (!files.length) {
-        explorerContainer.appendChild(createExplorerEmpty('目录为空'));
-        return;
-    }
-
-    const tree = buildTree(files);
-    const treeEl = document.createElement('div');
-    treeEl.className = 'workspace-tree';
-    renderTreeChildren(tree.children, treeEl, 0, workspaceState);
-    explorerContainer.appendChild(treeEl);
-
-    // Restore scroll position after rebuild
-    if (savedScrollTop > 0) {
-        requestAnimationFrame(function () {
-            treeEl.scrollTop = savedScrollTop;
-        });
-    }
+    renderWorkspaceFileManager(workspaceState);
 }
 
 function createExplorerHeader(rootName, rootPath) {
@@ -1163,6 +1141,11 @@ function getWorkspaceTreeSignature(workspaceState) {
             file.is_llm_read ? '1' : '0',
             file.modified_at || '',
             file.size || 0,
+            file.version || '',
+            file.area || '',
+            file.can_upload === false ? '0' : '1',
+            file.can_rename === false ? '0' : '1',
+            file.can_delete === false ? '0' : '1',
         ].join(':');
     }).join('\n');
     const expandedPart = (workspaceState.expanded_dirs || []).join('\n');

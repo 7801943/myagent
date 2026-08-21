@@ -10,6 +10,7 @@ import tempfile
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
@@ -17,6 +18,12 @@ from starlette.datastructures import UploadFile
 from pydantic import BaseModel, Field
 
 from myagent.interfaces.web.dependencies import get_session_manager
+from myagent.interfaces.web.services.workspace_file_service import (
+    WorkspaceFileError,
+    WorkspaceFileService,
+    WorkspaceLimits,
+    workspace_jobs,
+)
 from myagent.utils.logging import get_logger
 
 
@@ -67,12 +74,62 @@ class DeleteRequest(BaseModel):
     session_id: str = Field(..., min_length=1)
     paths: list[str] = Field(default_factory=list)
     recursive: bool = False
+    expected_versions: dict[str, str] = Field(default_factory=dict)
 
 
 class RenameRequest(BaseModel):
     session_id: str = Field(..., min_length=1)
     path: str = Field(..., min_length=1)
     new_name: str = Field(..., min_length=1)
+    expected_version: str = ""
+
+
+class FolderRequest(BaseModel):
+    session_id: str = Field(..., min_length=1)
+    parent: str = Field(..., min_length=1)
+    name: str = Field(..., min_length=1)
+
+
+class CopyMoveRequest(BaseModel):
+    session_id: str = Field(..., min_length=1)
+    sources: list[str] = Field(default_factory=list)
+    target_dir: str = Field(..., min_length=1)
+    conflict_policy: Literal["fail", "skip", "overwrite", "keep_both"] = "fail"
+    expected_versions: dict[str, str] = Field(default_factory=dict)
+
+
+class TrashRestoreRequest(BaseModel):
+    session_id: str = Field(..., min_length=1)
+    trash_ids: list[str] = Field(default_factory=list)
+    target_dir: str = ""
+    conflict_policy: Literal["fail", "skip", "overwrite", "keep_both"] = "fail"
+
+
+class TrashPurgeRequest(BaseModel):
+    session_id: str = Field(..., min_length=1)
+    trash_ids: list[str] | None = None
+
+
+class UploadFileSpec(BaseModel):
+    path: str = Field(..., min_length=1)
+    size: int = Field(..., ge=0)
+    last_modified: int = 0
+
+
+class UploadInitRequest(BaseModel):
+    session_id: str = Field(..., min_length=1)
+    target_dir: str = Field(..., min_length=1)
+    files: list[UploadFileSpec] = Field(default_factory=list)
+    conflict_policy: Literal["fail", "skip", "overwrite", "keep_both"] = "fail"
+
+
+class UploadCompleteRequest(BaseModel):
+    session_id: str = Field(..., min_length=1)
+
+
+class DownloadJobRequest(BaseModel):
+    session_id: str = Field(..., min_length=1)
+    paths: list[str] = Field(default_factory=list)
 
 
 @dataclass
@@ -80,6 +137,233 @@ class PathValidation:
     raw_path: str
     relative_path: str = ""
     error: str = ""
+
+
+@router.get("/list")
+async def list_workspace_directory(
+    request: Request,
+    session_id: str = Query(...),
+    path: str = Query(""),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(200, ge=1, le=500),
+    sort_by: Literal["name", "size", "modified", "type"] = Query("name"),
+    order: Literal["asc", "desc"] = Query("asc"),
+):
+    """List one workspace directory with permissions and quota information."""
+    service = _file_service(request, session_id)
+    try:
+        return await service.list_dir(path, offset=offset, limit=limit, sort_by=sort_by, order=order)
+    except WorkspaceFileError as exc:
+        _raise_workspace_error(exc)
+
+
+@router.get("/details")
+async def workspace_path_details(
+    request: Request,
+    session_id: str = Query(...),
+    path: str = Query(...),
+):
+    service = _file_service(request, session_id)
+    try:
+        return await service.details(path)
+    except WorkspaceFileError as exc:
+        _raise_workspace_error(exc)
+
+
+@router.get("/search")
+async def search_workspace_paths(
+    request: Request,
+    session_id: str = Query(...),
+    query: str = Query(..., min_length=1),
+    areas: str = Query("private,public"),
+    limit: int = Query(200, ge=1, le=500),
+):
+    service = _file_service(request, session_id)
+    selected_areas = [value.strip() for value in areas.split(",") if value.strip() in {"private", "public"}]
+    try:
+        return await service.search(query, areas=selected_areas, limit=limit)
+    except WorkspaceFileError as exc:
+        _raise_workspace_error(exc)
+
+
+@router.post("/folders")
+async def create_workspace_folder(payload: FolderRequest, request: Request):
+    service = _file_service(request, payload.session_id)
+    try:
+        return await service.create_folder(payload.parent, payload.name)
+    except WorkspaceFileError as exc:
+        _raise_workspace_error(exc)
+
+
+@router.post("/copy")
+async def copy_workspace_paths(payload: CopyMoveRequest, request: Request):
+    service = _file_service(request, payload.session_id)
+    try:
+        job = service.start_copy_move(
+            kind="copy",
+            sources=payload.sources,
+            target_dir=payload.target_dir,
+            conflict_policy=payload.conflict_policy,
+            expected_versions=payload.expected_versions,
+        )
+        return {"ok": True, "job": job.to_dict()}
+    except WorkspaceFileError as exc:
+        _raise_workspace_error(exc)
+
+
+@router.post("/move")
+async def move_workspace_paths(payload: CopyMoveRequest, request: Request):
+    service = _file_service(request, payload.session_id)
+    try:
+        job = service.start_copy_move(
+            kind="move",
+            sources=payload.sources,
+            target_dir=payload.target_dir,
+            conflict_policy=payload.conflict_policy,
+            expected_versions=payload.expected_versions,
+        )
+        return {"ok": True, "job": job.to_dict()}
+    except WorkspaceFileError as exc:
+        _raise_workspace_error(exc)
+
+
+@router.get("/trash")
+async def list_workspace_trash(request: Request, session_id: str = Query(...)):
+    service = _file_service(request, session_id)
+    try:
+        return await service.list_trash()
+    except WorkspaceFileError as exc:
+        _raise_workspace_error(exc)
+
+
+@router.post("/trash/restore")
+async def restore_workspace_trash(payload: TrashRestoreRequest, request: Request):
+    service = _file_service(request, payload.session_id)
+    try:
+        return await service.restore_trash(
+            payload.trash_ids,
+            target_dir=payload.target_dir,
+            conflict_policy=payload.conflict_policy,
+        )
+    except WorkspaceFileError as exc:
+        _raise_workspace_error(exc)
+
+
+@router.post("/trash/purge")
+async def purge_workspace_trash(payload: TrashPurgeRequest, request: Request):
+    service = _file_service(request, payload.session_id)
+    try:
+        return await service.purge_trash(payload.trash_ids)
+    except WorkspaceFileError as exc:
+        _raise_workspace_error(exc)
+
+
+@router.post("/uploads")
+async def initialize_workspace_upload(payload: UploadInitRequest, request: Request):
+    service = _file_service(request, payload.session_id)
+    try:
+        return await service.init_upload(
+            target_dir=payload.target_dir,
+            files=[item.model_dump() for item in payload.files],
+            conflict_policy=payload.conflict_policy,
+        )
+    except WorkspaceFileError as exc:
+        _raise_workspace_error(exc)
+
+
+@router.get("/uploads/{upload_id}")
+async def get_workspace_upload(upload_id: str, request: Request, session_id: str = Query(...)):
+    service = _file_service(request, session_id)
+    try:
+        return await service.upload_status(upload_id)
+    except WorkspaceFileError as exc:
+        _raise_workspace_error(exc)
+
+
+@router.put("/uploads/{upload_id}/chunks/{file_id}/{chunk_index}")
+async def upload_workspace_chunk(
+    upload_id: str,
+    file_id: str,
+    chunk_index: int,
+    request: Request,
+    session_id: str = Query(...),
+):
+    service = _file_service(request, session_id)
+    body = await request.body()
+    checksum = request.headers.get("X-Chunk-SHA256", "")
+    try:
+        return await service.write_upload_chunk(upload_id, file_id, chunk_index, body, checksum)
+    except WorkspaceFileError as exc:
+        _raise_workspace_error(exc)
+
+
+@router.post("/uploads/{upload_id}/complete")
+async def complete_workspace_upload(
+    upload_id: str,
+    payload: UploadCompleteRequest,
+    request: Request,
+):
+    service = _file_service(request, payload.session_id)
+    try:
+        return await service.complete_upload(upload_id)
+    except WorkspaceFileError as exc:
+        _raise_workspace_error(exc)
+
+
+@router.delete("/uploads/{upload_id}")
+async def cancel_workspace_upload(upload_id: str, request: Request, session_id: str = Query(...)):
+    service = _file_service(request, session_id)
+    try:
+        return await service.cancel_upload(upload_id)
+    except WorkspaceFileError as exc:
+        _raise_workspace_error(exc)
+
+
+@router.post("/downloads")
+async def create_workspace_download(payload: DownloadJobRequest, request: Request):
+    service = _file_service(request, payload.session_id)
+    try:
+        job = service.start_archive(payload.paths)
+        return {"ok": True, "job": job.to_dict()}
+    except WorkspaceFileError as exc:
+        _raise_workspace_error(exc)
+
+
+@router.get("/jobs/{job_id}")
+async def get_workspace_job(job_id: str, request: Request):
+    username = _request_username(request)
+    try:
+        return {"job": workspace_jobs.get(job_id, username).to_dict()}
+    except WorkspaceFileError as exc:
+        _raise_workspace_error(exc)
+
+
+@router.delete("/jobs/{job_id}")
+async def cancel_workspace_job(job_id: str, request: Request):
+    username = _request_username(request)
+    try:
+        return {"job": workspace_jobs.cancel(job_id, username).to_dict()}
+    except WorkspaceFileError as exc:
+        _raise_workspace_error(exc)
+
+
+@router.get("/jobs/{job_id}/result")
+async def download_workspace_job_result(job_id: str, request: Request):
+    username = _request_username(request)
+    try:
+        job = workspace_jobs.get(job_id, username)
+    except WorkspaceFileError as exc:
+        _raise_workspace_error(exc)
+    if job.state != "completed" or not job.result_path:
+        raise HTTPException(status_code=409, detail={
+            "code": "JOB_NOT_READY",
+            "message": "下载任务尚未完成",
+            "path": "",
+            "details": None,
+            "retryable": True,
+        })
+    filename = str((job.result or {}).get("filename") or "workspace-download.zip")
+    return FileResponse(job.result_path, filename=filename, media_type="application/zip")
 
 
 @router.post("/preflight")
@@ -135,6 +419,7 @@ async def upload_files(request: Request):
     paths = [str(item) for item in form.getlist("paths[]")]
 
     session = _session_for_request(request, session_id)
+    file_service = _file_service(request, session_id)
     clean_target_dir = _normalize_workspace_target_dir(target_dir, session)
     _validate_target_directory(session, clean_target_dir)
 
@@ -142,6 +427,25 @@ async def upload_files(request: Request):
         raise HTTPException(status_code=400, detail="files 与 paths 数量不一致")
     if not files:
         raise HTTPException(status_code=400, detail="未选择上传文件")
+    if len(files) > file_service.limits.max_batch_files:
+        raise HTTPException(status_code=413, detail={
+            "code": "TOO_MANY_FILES",
+            "message": f"单批最多上传 {file_service.limits.max_batch_files} 个文件",
+        })
+    known_sizes = [int(getattr(upload, "size", 0) or 0) for upload in files]
+    if any(size > file_service.limits.max_file_bytes for size in known_sizes):
+        raise HTTPException(status_code=413, detail={"code": "FILE_TOO_LARGE", "message": "文件超过单文件大小限制"})
+    if sum(known_sizes) > file_service.limits.max_batch_bytes:
+        raise HTTPException(status_code=413, detail={"code": "BATCH_TOO_LARGE", "message": "上传批次超过大小限制"})
+    resolver = getattr(session.workspace, "resolver", None)
+    if resolver and resolver.virtual_path_area(clean_target_dir) == "private":
+        quota = await file_service.quota()
+        if sum(known_sizes) > quota["available_bytes"]:
+            raise HTTPException(status_code=413, detail={
+                "code": "QUOTA_EXCEEDED",
+                "message": "private 工作区可用容量不足",
+                "details": quota,
+            })
 
     uploaded: list[dict] = []
     rejected: list[dict] = []
@@ -177,9 +481,16 @@ async def upload_files(request: Request):
                 rejected.append({"path": raw_path, "target_path": target_rel, "reason": "目标文件已存在"})
                 await upload.close()
                 continue
+            # Public upload permission allows creating new objects, not
+            # replacing existing ones. Overwrite requires write permission.
+            _resolve_workspace_path(session, target_rel, operation="write", must_exist=True)
 
         try:
-            bytes_written = await _save_upload_atomically(upload, target_path)
+            bytes_written = await _save_upload_atomically(
+                upload,
+                target_path,
+                max_bytes=file_service.limits.max_file_bytes,
+            )
         except HTTPException as exc:
             rejected.append({"path": raw_path, "target_path": target_rel, "reason": str(exc.detail)})
             continue
@@ -201,33 +512,11 @@ async def upload_files(request: Request):
 @router.post("/rename")
 async def rename_workspace_path(payload: RenameRequest, request: Request):
     """重命名 workspace 内的文件或目录，不支持跨目录移动。"""
-    session = _session_for_request(request, payload.session_id)
-    rel_path = _validate_relative_path(payload.path, allow_empty=False)
-    new_name = _validate_entry_name(payload.new_name)
-
-    source_path = _resolve_workspace_path(session, rel_path, operation="rename", must_exist=True)
-    if not source_path.exists():
-        raise HTTPException(status_code=404, detail="路径不存在")
-
-    target_rel = _join_workspace_relative(posixpath.dirname(rel_path), new_name)
-    target_path = _resolve_workspace_path(session, target_rel, operation="rename")
-    if target_path.exists():
-        raise HTTPException(status_code=409, detail="目标名称已存在")
-    if _has_forbidden_archive_suffix(target_rel):
-        raise HTTPException(status_code=415, detail="不允许重命名为压缩或归档文件")
-
+    service = _file_service(request, payload.session_id)
     try:
-        os.replace(source_path, target_path)
-    except OSError as exc:
-        logger.warning("Workspace rename failed: from=%s to=%s error=%s", rel_path, target_rel, exc)
-        raise HTTPException(status_code=400, detail=f"重命名失败: {exc}") from exc
-
-    await session.workspace.update(
-        "user",
-        "files_changed",
-        {"renamed_paths": [{"from": rel_path, "to": target_rel}], "changed_paths": [target_rel]},
-    )
-    return {"ok": True, "from": rel_path, "to": target_rel}
+        return await service.rename(payload.path, payload.new_name, payload.expected_version)
+    except WorkspaceFileError as exc:
+        _raise_workspace_error(exc)
 
 
 @router.get("/download")
@@ -269,48 +558,12 @@ async def download_workspace_path(
 
 @router.post("/delete")
 async def delete_workspace_paths(payload: DeleteRequest, request: Request):
-    """删除 workspace 内的文件或目录。"""
-    session = _session_for_request(request, payload.session_id)
-
-    deleted: list[dict] = []
-    rejected: list[dict] = []
-    deleted_paths: list[str] = []
-
-    for raw_path in payload.paths[:200]:
-        try:
-            rel_path = _validate_relative_path(raw_path, allow_empty=False)
-        except HTTPException as exc:
-            rejected.append({"path": raw_path, "reason": str(exc.detail)})
-            continue
-
-        target_path = _resolve_workspace_path(session, rel_path, operation="delete", must_exist=True)
-        if not target_path.exists():
-            rejected.append({"path": raw_path, "reason": "路径不存在"})
-            continue
-        try:
-            if target_path.is_dir():
-                if not payload.recursive:
-                    rejected.append({"path": raw_path, "reason": "删除目录需要 recursive=true"})
-                    continue
-                shutil.rmtree(target_path)
-                kind = "dir"
-            else:
-                target_path.unlink()
-                kind = "file"
-        except OSError as exc:
-            logger.warning("Workspace delete failed: path=%s error=%s", rel_path, exc)
-            rejected.append({"path": raw_path, "reason": f"删除失败: {exc}"})
-            continue
-
-        deleted.append({"path": rel_path, "kind": kind})
-        deleted_paths.append(rel_path)
-
-    if deleted_paths:
-        await session.workspace.update("user", "files_changed", {"deleted_paths": deleted_paths})
-
-    if rejected and not deleted:
-        raise HTTPException(status_code=400, detail={"deleted": deleted, "rejected": rejected})
-    return {"ok": not rejected, "deleted": deleted, "rejected": rejected}
+    """private 路径移入回收站；public 管理员删除仍为永久删除。"""
+    service = _file_service(request, payload.session_id)
+    try:
+        return await service.delete(payload.paths, expected_versions=payload.expected_versions)
+    except WorkspaceFileError as exc:
+        _raise_workspace_error(exc)
 
 
 def _session_for_request(request: Request, session_id: str):
@@ -324,6 +577,29 @@ def _session_for_request(request: Request, session_id: str):
     if session.user.username != username:
         raise HTTPException(status_code=403, detail="无权访问该会话")
     return session
+
+
+def _request_username(request: Request) -> str:
+    token_info = getattr(request.state, "user", None)
+    username = getattr(token_info, "username", "")
+    if not username:
+        raise HTTPException(status_code=401, detail="未认证")
+    return username
+
+
+def _file_service(request: Request, session_id: str) -> WorkspaceFileService:
+    session = _session_for_request(request, session_id)
+    manager = get_session_manager()
+    raw_workspace = getattr(manager, "_raw", {}).get("workspace", {})
+    raw_limits = raw_workspace.get("file_manager", {}) if isinstance(raw_workspace, dict) else {}
+    try:
+        return WorkspaceFileService(session, manager, WorkspaceLimits.from_mapping(raw_limits))
+    except WorkspaceFileError as exc:
+        _raise_workspace_error(exc)
+
+
+def _raise_workspace_error(exc: WorkspaceFileError):
+    raise HTTPException(status_code=exc.status_code, detail=exc.to_detail()) from exc
 
 
 def _normalize_workspace_target_dir(target_dir: str, session=None) -> str:
@@ -443,7 +719,7 @@ def _archive_magic_label(header: bytes) -> str:
     return ""
 
 
-async def _save_upload_atomically(upload: UploadFile, target_path: Path) -> int:
+async def _save_upload_atomically(upload: UploadFile, target_path: Path, max_bytes: int | None = None) -> int:
     try:
         if target_path.parent.exists() and not target_path.parent.is_dir():
             raise HTTPException(status_code=400, detail="目标父路径不是目录")
@@ -473,6 +749,8 @@ async def _save_upload_atomically(upload: UploadFile, target_path: Path) -> int:
                     break
                 tmp_file.write(chunk)
                 bytes_written += len(chunk)
+                if max_bytes is not None and bytes_written > max_bytes:
+                    raise HTTPException(status_code=413, detail="文件超过单文件大小限制")
         os.replace(tmp_name, target_path)
     except Exception:
         try:
