@@ -27,7 +27,8 @@ logger = logging.getLogger(__name__)
           "- PDF: pdf-inspector 提取 Markdown；低置信度/扫描/图片页自动回退为页面图片，base64模式可强制渲染\n"
           "- DOCX: 按文档内容顺序提取段落和表格，按行输出（不支持按真实 Word 页码定位）\n"
           "- 图片(png/jpg/gif等): 以 base64 编码返回\n"
-          "参数 start_line_or_page / end_line_or_page 对文本/CSV/DOCX/XLSX 表示输出行号，对 PDF 表示页码；DOCX 不支持真实 Word 页码定位"
+          "参数 start_line_or_page / end_line_or_page 对文本/CSV/DOCX/XLSX 表示输出行号，对 PDF 表示页码；DOCX 不支持真实 Word 页码定位\n"
+          "使用注意：在没有行号或者页码信息情况下，请不要使用start_line_or_page以及end_line_or_page参数，默认读取全部内容"
       ))
 async def file_read(
     path: str,
@@ -148,4 +149,3 @@ async def file_read(
 
     except Exception as e:
         return ToolResult(content=f"读取文件异常: {type(e).__name__}: {e}", is_error=True)
-
