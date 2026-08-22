@@ -191,7 +191,7 @@ def test_document_edit_exposes_highlight_and_comment_for_docx(tmp_path):
 
     path = tmp_path / "annotated.docx"
     doc = Document()
-    doc.add_paragraph("old text")
+    doc.add_paragraph("prefix old text suffix")
     doc.save(path)
 
     result = run_tool(document_edit(
@@ -204,9 +204,14 @@ def test_document_edit_exposes_highlight_and_comment_for_docx(tmp_path):
     assert not result.is_error, result.content
 
     updated = Document(path)
-    assert any(
-        run.text == "new text" and run.font.highlight_color == WD_COLOR_INDEX.YELLOW
-        for run in updated.paragraphs[0].runs
+    runs = updated.paragraphs[0].runs
+    assert updated.paragraphs[0].text == "prefix new text suffix"
+    highlighted = [run.text for run in runs if run.font.highlight_color == WD_COLOR_INDEX.YELLOW]
+    assert highlighted == ["new text"]
+    assert all(
+        run.font.highlight_color is None
+        for run in runs
+        if run.text in {"prefix ", " suffix"}
     )
     assert result.metadata["highlight"] == "yellow"
     assert result.metadata["comment_added"] is True

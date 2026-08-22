@@ -63,7 +63,8 @@ async def document_read(
     description=(
         "精确编辑 DOCX 或纯文本文件（如 TXT、MD）。用 target_content 匹配真实原文，"
         "不要包含 document_read 展示的行号。全文唯一匹配时忽略 line_no；"
-        "有多个匹配时，必须由 line_no 与 target_content 共同唯一定位。支持标色和批注。"
+        "有多个匹配时，必须由 line_no 与 target_content 共同唯一定位。"
+        "DOCX 标色只作用于 replacement_content 对应的字符，不会自动标色整行；支持批注。"
     ),
 )
 async def document_edit(
@@ -81,7 +82,7 @@ async def document_edit(
         target_content: 要替换的精确原文，不含展示行号。
         replacement_content: 替换后的文本；空字符串表示删除。
         line_no: 可选逻辑行号。全文唯一匹配时忽略；有多个匹配时用于唯一定位。
-        highlight: 可选标色颜色: yellow/green/red/pink。
+        highlight: 可选标色颜色: yellow/green/red/pink。DOCX 只标色替换后的字符；仅当 replacement_content 是整行时才会整行标色。
         comment: 可选批注内容。纯文本将按对应文本语法插入注释，DOCX 添加 Word 批注。
     """
     return await _document_edit_impl(
