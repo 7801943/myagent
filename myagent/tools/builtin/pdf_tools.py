@@ -43,4 +43,4 @@ async def pdf_read(
         start_line_or_page=start_page,
         end_line_or_page=end_page,
     )
-    return attach_version(result, target)
+    return attach_version(result, target, include_in_content=False)

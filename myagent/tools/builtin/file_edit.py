@@ -158,6 +158,128 @@ def _coerce_optional_line_number(value: Any, name: str) -> tuple[int | None, str
     return None, f"{name} 必须是整数行号，例如 67；当前类型: {type(value).__name__}。"
 
 
+def resolve_document_edit_scope(
+    path: Path,
+    target_content: str,
+    replacement_content: str,
+    line_no: int | None,
+) -> tuple[int | None, ToolResult | None]:
+    """Resolve an optional line only when the full document match is ambiguous."""
+    file_type = _detect_file_type(path)
+
+    if file_type == "text":
+        enc = _detect_encoding(path)
+        if enc == "binary":
+            return None, ToolResult(content="文件似乎是二进制格式，无法进行文本编辑。", is_error=True)
+        try:
+            original = path.read_text(encoding=enc, errors="replace")
+        except Exception as exc:
+            return None, ToolResult(content=f"读取文件失败: {exc}", is_error=True)
+
+        count = original.count(target_content)
+        if count == 1:
+            return None, None
+        matched_lines: list[int] = []
+        search_start = 0
+        while target_content and search_start < len(original):
+            match_at = original.find(target_content, search_start)
+            if match_at < 0:
+                break
+            matched_lines.append(original[:match_at].count("\n") + 1)
+            search_start = match_at + len(target_content)
+        total_lines = len(original.split("\n"))
+    elif file_type == "docx":
+        try:
+            from docx import Document
+            doc = Document(str(path))
+        except Exception as exc:
+            return None, ToolResult(content=f"打开 DOCX 失败: {exc}", is_error=True)
+
+        normalized_target, _ = _normalize_docx_edit_text(target_content, replacement_content)
+        all_refs, _display_lines, total_lines = _build_docx_paragraph_refs(doc)
+        full_text, full_run_map = _build_docx_virtual_text(all_refs)
+        full_matches = _find_docx_matches(full_text, full_run_map, normalized_target)
+        count = len(full_matches)
+        if count == 1:
+            return None, None
+        matched_lines = [
+            all_refs[involved[0][0]].line_no
+            for _start, _end, involved in full_matches
+            if involved
+        ]
+        target_content = normalized_target
+    else:
+        return None, ToolResult(content="仅支持纯文本和 DOCX 文件。", is_error=True)
+
+    if count == 0:
+        return None, ToolResult(
+            content="全文未找到 target_content，请先用 document_read 确认最新内容。",
+            is_error=True,
+            metadata={"path": str(path.resolve()), "match_count": 0},
+        )
+
+    resolved_line, line_error = _coerce_optional_line_number(line_no, "line_no")
+    if line_error:
+        return None, ToolResult(content=line_error, is_error=True)
+    if resolved_line is None:
+        return None, ToolResult(
+            content=(
+                f"全文找到 {count} 个匹配（涉及行: {_compact_line_numbers(matched_lines)}）。"
+                "请提供 line_no 指定其中一行。"
+            ),
+            is_error=True,
+            metadata={
+                "path": str(path.resolve()),
+                "match_count": count,
+                "matched_lines": sorted(set(matched_lines)),
+            },
+        )
+    if resolved_line < 1 or resolved_line > total_lines:
+        return None, ToolResult(
+            content=f"line_no={resolved_line} 超出文件行号范围 1-{total_lines}。",
+            is_error=True,
+            metadata={"path": str(path.resolve()), "total_lines": total_lines},
+        )
+
+    if file_type == "text":
+        selected_count = original.split("\n")[resolved_line - 1].count(target_content)
+    else:
+        selected_refs = _filter_docx_refs_by_line_range(all_refs, resolved_line, resolved_line)
+        selected_text, selected_run_map = _build_docx_virtual_text(selected_refs)
+        selected_count = len(_find_docx_matches(selected_text, selected_run_map, target_content))
+
+    if selected_count == 1:
+        return resolved_line, None
+    if selected_count == 0:
+        return None, ToolResult(
+            content=(
+                f"line_no={resolved_line} 与 target_content 不匹配；"
+                f"target_content 实际出现在行: {_compact_line_numbers(matched_lines)}。"
+                "请重新读取并确认行号。"
+            ),
+            is_error=True,
+            metadata={
+                "path": str(path.resolve()),
+                "match_count": count,
+                "matched_lines": sorted(set(matched_lines)),
+                "line_no": resolved_line,
+            },
+        )
+    return None, ToolResult(
+        content=(
+            f"line_no={resolved_line} 内仍找到 {selected_count} 个匹配，无法唯一定位。"
+            "请提供更精确的 target_content。"
+        ),
+        is_error=True,
+        metadata={
+            "path": str(path.resolve()),
+            "match_count": count,
+            "line_match_count": selected_count,
+            "line_no": resolved_line,
+        },
+    )
+
+
 # ── 纯文本编辑 ──
 
 async def _edit_text(
@@ -1287,6 +1409,41 @@ def _content_token_for_bounds(ws, bounds: list[tuple[int, int, int, int]]) -> st
     tokens = [_content_token(ws, bound) for bound in bounds]
     return tokens[0] if len(tokens) == 1 else _hash_json(tokens)
 
+
+_XLSX_HIGHLIGHT_COLORS = {
+    "yellow": "FFF2CC",
+    "green": "E2F0D9",
+    "red": "F4CCCC",
+    "pink": "FCE4D6",
+}
+
+
+def _augment_xlsx_annotations(
+    ws,
+    result: dict[str, Any],
+    *,
+    highlight: str | None,
+    comment: str | None,
+    apply: bool,
+) -> None:
+    """Apply highlight/comment to the ranges affected by a value operation."""
+    if not highlight and not comment:
+        return
+    format_actions = result.setdefault("format_actions", [])
+    counts = result.setdefault("counts", {})
+    formatted_count = 0
+    for affected_range in result.get("affected_ranges", []):
+        format_payload: dict[str, Any] = {"range": affected_range}
+        if highlight:
+            format_payload["fill"] = _XLSX_HIGHLIGHT_COLORS[highlight]
+        if comment:
+            format_payload["comment"] = comment
+        annotation = _plan_format_range(ws, format_payload, apply, include_changes=False)
+        format_actions.extend(annotation.get("format_actions", []))
+        formatted_count += int(annotation.get("counts", {}).get("cells_formatted", 0))
+    if formatted_count:
+        counts["cells_formatted"] = formatted_count
+
 @tool(name="file_edit_table",
       description=(
           "结构化编辑 XLSX 表格文件。使用 operation + payload 表达明确动作，"
@@ -1302,6 +1459,7 @@ def _content_token_for_bounds(ws, bounds: list[tuple[int, int, int, int]]) -> st
           "- delete_rows: 删除指定行或 key 匹配行\n"
           "- insert_rows: 在指定位置插入行\n\n"
           "默认 dry_run=True 只预览不保存。结构性写入需 dry_run=False 且 allow_structure_change=True。"
+          "可选 highlight/comment 会作用于本次操作影响的单元格。"
       ))
 async def file_edit_table(
     path: str,
@@ -1313,6 +1471,8 @@ async def file_edit_table(
     expected_structure_token: str | None = None,
     expected_content_token: str | None = None,
     include_changes: bool = False,
+    highlight: str | None = None,
+    comment: str | None = None,
 ) -> ToolResult:
     """
     结构化编辑 XLSX 表格文件。
@@ -1327,6 +1487,8 @@ async def file_edit_table(
         expected_structure_token: 可选结构 token，不匹配时拒绝写入
         expected_content_token: 可选内容 token，不匹配时拒绝写入
         include_changes: 是否在 metadata 中返回单元格级 changes
+        highlight: 可选标色颜色: yellow/green/red/pink
+        comment: 可选批注内容，将添加到受影响的单元格
     """
     try:
         import openpyxl
@@ -1338,6 +1500,13 @@ async def file_edit_table(
 
     operation = (operation or "").strip().lower()
     payload = payload or {}
+    if highlight is not None:
+        highlight = str(highlight).strip().lower()
+        if highlight not in _XLSX_HIGHLIGHT_COLORS:
+            return ToolResult(
+                content="highlight 可选: yellow, green, red, pink。",
+                is_error=True,
+            )
     if not isinstance(payload, dict):
         return ToolResult(
             content="payload 必须是 object。",
@@ -1390,6 +1559,9 @@ async def file_edit_table(
         # 先 dry-plan 一次：计算影响范围、校验 payload，不写入 workbook。
         plan = _run_xlsx_operation(
             wb, ws, operation, payload, apply=False, include_changes=include_changes
+        )
+        _augment_xlsx_annotations(
+            ws, plan, highlight=highlight, comment=comment, apply=False
         )
         bounds = plan.get("bounds", [])
         previous_content_token = _content_token_for_bounds(ws, bounds)
@@ -1503,6 +1675,9 @@ async def file_edit_table(
 
         applied = _run_xlsx_operation(
             wb, ws, operation, payload, apply=True, include_changes=include_changes
+        )
+        _augment_xlsx_annotations(
+            ws, applied, highlight=highlight, comment=comment, apply=True
         )
         new_profile = _profile_workbook(wb)
         new_structure_token = _hash_json(new_profile)

@@ -116,10 +116,12 @@ _SPREADSHEET_EDIT_SCHEMA = {
             "default": True,
             "description": "默认只预览；确认预览后传 false 才落盘。",
         },
-        "expected_version": {
+        "highlight": {
             "type": "string",
-            "description": "spreadsheet_read 返回的文件版本；不匹配时拒绝写入。",
+            "enum": ["yellow", "green", "red", "pink"],
+            "description": "可选，对本次编辑影响的单元格标色。",
         },
+        "comment": {"type": "string", "description": "可选，给受影响的单元格添加批注。"},
     },
     "required": ["path", "operation", "payload"],
 }
@@ -145,7 +147,7 @@ def _spreadsheet_target(path: str) -> tuple[Path | None, ToolResult | None]:
     name="spreadsheet_read",
     description=(
         "读取 XLSX 工作簿或指定工作表/单元格区域。输出带行号的可读表格，"
-        "并返回文件版本、结构 token 和内容 token。value_mode 可选择值、公式或两者。"
+        "value_mode 可选择值、公式或两者。"
     ),
 )
 async def spreadsheet_read(
@@ -178,12 +180,6 @@ async def spreadsheet_read(
     if result.is_error:
         return result
 
-    version_lines = [f"文件版本: {result.metadata['version']}"]
-    if result.metadata.get("structure_token"):
-        version_lines.append(f"结构 token: {result.metadata['structure_token']}")
-    if result.metadata.get("content_token"):
-        version_lines.append(f"内容 token: {result.metadata['content_token']}")
-    result.content = result.content.rstrip() + "\n\n" + "\n".join(version_lines)
     return result
 
 
@@ -191,7 +187,8 @@ async def spreadsheet_read(
     name="spreadsheet_edit",
     description=(
         "结构化编辑 XLSX。仅提供四个低歧义动作：set_range、update_cells、"
-        "clear_range、append_rows。默认 dry_run=true 返回预览；确认后再以 dry_run=false 落盘。"
+        "clear_range、append_rows。支持对受影响单元格标色和添加批注。"
+        "默认 dry_run=true 返回预览；确认后再以 dry_run=false 落盘。"
     ),
     parameters_schema=_SPREADSHEET_EDIT_SCHEMA,
 )
@@ -201,9 +198,33 @@ async def spreadsheet_edit(
     payload: dict[str, Any],
     sheet_name: str | None = None,
     dry_run: bool = True,
-    expected_version: str | None = None,
+    highlight: Literal["yellow", "green", "red", "pink"] | None = None,
+    comment: str | None = None,
 ) -> ToolResult:
     """结构化编辑 XLSX，默认只预览。"""
+    return await _spreadsheet_edit_impl(
+        path=path,
+        operation=operation,
+        payload=payload,
+        sheet_name=sheet_name,
+        dry_run=dry_run,
+        highlight=highlight,
+        comment=comment,
+    )
+
+
+async def _spreadsheet_edit_impl(
+    *,
+    path: str,
+    operation: str,
+    payload: dict[str, Any],
+    sheet_name: str | None = None,
+    dry_run: bool = True,
+    highlight: str | None = None,
+    comment: str | None = None,
+    expected_version: str | None = None,
+) -> ToolResult:
+    """Internal implementation retaining optional optimistic concurrency checks."""
     target, error = _spreadsheet_target(path)
     if error:
         return error
@@ -221,5 +242,12 @@ async def spreadsheet_edit(
         payload=payload,
         dry_run=dry_run,
         allow_structure_change=(operation == "append_rows"),
+        highlight=highlight,
+        comment=comment,
     )
-    return attach_version(result, target, previous_version=previous_version)
+    return attach_version(
+        result,
+        target,
+        previous_version=previous_version,
+        include_in_content=False,
+    )

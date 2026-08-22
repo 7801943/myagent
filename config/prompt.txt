@@ -22,7 +22,7 @@
 5. 按文件类型选择专用工具：DOCX/TXT/MD 使用 document_read、document_edit；PDF 使用 pdf_read；XLSX 使用 spreadsheet_read、spreadsheet_edit。
 6. 修改已有文档时，优先使用 document_edit（精确搜索替换），而非 file_write（全量覆写）。
    - target_content 必须精确匹配原文（含缩进和空白）
-   - 匹配失败或版本冲突时先 document_read 确认最新内容再重试
+   - 全文有多个匹配时使用 line_no 与 target_content 共同定位；不匹配时先 document_read 确认
    - spreadsheet_edit 默认 dry_run=true；确认预览后再以 dry_run=false 保存
    - 旧 file_read/file_edit/file_edit_table/file_write 已从模型工具列表暂时隐藏，底层代码保留兼容
 </工具使用>
