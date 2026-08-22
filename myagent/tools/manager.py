@@ -159,13 +159,13 @@ class ToolManager:
         name = decorator_meta.get("name") or func.__name__
         description = (decorator_meta.get("description")
                        or extract_description(func) or name)
-        schema = generate_schema(func)
+        schema = decorator_meta.get("parameters_schema") or generate_schema(func)
 
         merged_meta = ToolMeta()
         if decorator_meta:
             merged_meta = merged_meta.merge(
                 {k: v for k, v in decorator_meta.items()
-                 if k not in ("name", "description")})
+                 if k not in ("name", "description", "parameters_schema")})
         if meta:
             merged_meta = merged_meta.merge(meta.model_dump(exclude_none=True))
 
@@ -503,12 +503,12 @@ class ToolManager:
             tool_name = decorator_meta.get("name") or fn_name
             description = (decorator_meta.get("description")
                            or extract_description(fn) or tool_name)
-            schema = generate_schema(fn)
+            schema = decorator_meta.get("parameters_schema") or generate_schema(fn)
             merged_meta = meta
             if decorator_meta:
                 merged_meta = meta.merge(
                     {k: v for k, v in decorator_meta.items()
-                     if k not in ("name", "description")})
+                     if k not in ("name", "description", "parameters_schema")})
 
             self.unregister(tool_name)
 
@@ -580,8 +580,16 @@ class ToolManager:
         from myagent.tools.builtin.file_read import file_read
         from myagent.tools.builtin.file_query import file_query
         from myagent.tools.builtin.file_write import file_write
+        from myagent.tools.builtin.document_tools import document_edit, document_read
+        from myagent.tools.builtin.pdf_tools import pdf_read
+        from myagent.tools.builtin.spreadsheet_tools import spreadsheet_edit, spreadsheet_read
 
         builtin_dir = Path(__file__).parent / "builtin"
+        self._register_file_tool(str(builtin_dir / "document_tools.py"), document_read)
+        self._register_file_tool(str(builtin_dir / "document_tools.py"), document_edit)
+        self._register_file_tool(str(builtin_dir / "pdf_tools.py"), pdf_read)
+        self._register_file_tool(str(builtin_dir / "spreadsheet_tools.py"), spreadsheet_read)
+        self._register_file_tool(str(builtin_dir / "spreadsheet_tools.py"), spreadsheet_edit)
         self._register_file_tool(str(builtin_dir / "file_read.py"), file_read)
         self._register_file_tool(str(builtin_dir / "file_query.py"), file_query)
         self._register_file_tool(str(builtin_dir / "file_write.py"), file_write)
@@ -590,8 +598,9 @@ class ToolManager:
         self._register_file_tool(str(builtin_dir / "file_diff.py"), file_diff)
 
         logger.info(
-            "Registered builtin tools: cli_execute, use_skill(if enabled), file_read, file_query, "
-            "file_write, file_edit, file_edit_table, file_diff")
+            "Registered builtin tools: cli_execute, use_skill(if enabled), document_read, "
+            "document_edit, pdf_read, spreadsheet_read, spreadsheet_edit, file_read, "
+            "file_query, file_write, file_edit, file_edit_table, file_diff")
 
     # ── MCP ──
 

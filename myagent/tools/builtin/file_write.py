@@ -26,6 +26,17 @@ async def file_write(path: str, content: str,
         return ToolResult(content=error, is_error=True)
 
     target = Path(path)
+    if target.suffix.lower() in {
+        ".doc", ".docx", ".xls", ".xlsx", ".pdf",
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif",
+    }:
+        return ToolResult(
+            content=(
+                "file_write 只写纯文本，不能创建或覆盖 Office、PDF 或图片文件。"
+                "请使用对应的 document/spreadsheet 工具。"
+            ),
+            is_error=True,
+        )
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         action = "追加" if append else "写入"

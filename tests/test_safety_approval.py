@@ -217,7 +217,10 @@ async def test_policy_change_is_written_into_persisted_session_metadata():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tool_name", ["file_write", "file_edit", "file_edit_table"])
+@pytest.mark.parametrize(
+    "tool_name",
+    ["document_edit", "spreadsheet_edit", "file_write", "file_edit", "file_edit_table"],
+)
 async def test_file_mutation_tools_pass_through_to_manager(tool_name):
     """内置文件工具不再被硬拒绝，而是正常委托给 ToolManager 执行。"""
     from myagent.tools.api import ToolResult as ApiToolResult

@@ -160,6 +160,24 @@ async def test_file_edit_tool_end_marks_changed_open_docx_for_onlyoffice_refresh
 
 
 @pytest.mark.asyncio
+async def test_document_edit_tool_end_uses_same_workspace_refresh_path(tmp_path):
+    target = tmp_path / "report.docx"
+    target.write_bytes(b"v1")
+    session = make_workspace_session(workspace_root=tmp_path)
+    await session.workspace.update("user", "set_root", {"root_path": str(tmp_path)})
+    await session.workspace.update("user", "open_file", {"path": "report.docx"})
+
+    target.write_bytes(b"v2")
+    await session._on_tool_end(ToolEnd(
+        tool_name="document_edit",
+        result=ToolResult(content="ok", metadata={"path": str(target.resolve())}),
+    ))
+
+    assert session.workspace.state.open_files[0].revision == 1
+    assert session.workspace.state.active_file_index == 0
+
+
+@pytest.mark.asyncio
 async def test_file_write_tool_end_opens_written_file_without_double_revision(tmp_path):
     target = tmp_path / "new.docx"
     target.write_bytes(b"v1")

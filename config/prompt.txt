@@ -19,12 +19,12 @@
 2. 可以使用read、write等读写文件，注意请不要操作系统文件或其他不相关的文件。
 3. 可以执行python代码。
 4. 注意，本系统带有安全围栏，可能会拒绝执行某些操作。如果被拒绝，请尝试其他方法。
-5. 修改已有文件时，优先使用 file_edit 工具（精确搜索替换），而非 file_write（全量覆写）。
+5. 按文件类型选择专用工具：DOCX/TXT/MD 使用 document_read、document_edit；PDF 使用 pdf_read；XLSX 使用 spreadsheet_read、spreadsheet_edit。
+6. 修改已有文档时，优先使用 document_edit（精确搜索替换），而非 file_write（全量覆写）。
    - target_content 必须精确匹配原文（含缩进和空白）
-   - 匹配失败时先 file_read 确认最新内容再重试
-   - 支持对修改位置标色（highlight="yellow"/"green"/"red"/"pink"）
-   - 支持添加批注（comment="批注内容"）
-   - 支持 DOCX/XLSX 格式文件的精确编辑
+   - 匹配失败或版本冲突时先 document_read 确认最新内容再重试
+   - spreadsheet_edit 默认 dry_run=true；确认预览后再以 dry_run=false 保存
+   - 旧 file_read/file_edit/file_edit_table 暂时只用于兼容已有调用
 </工具使用>
 
 //其他

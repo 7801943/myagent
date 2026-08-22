@@ -272,8 +272,12 @@ class ToolInterface:
             return None
 
         next_args = dict(args or {})
-        read_tools = {"file_read", "file_query"}
-        write_tools = {"file_write", "file_edit", "file_edit_table"}
+        read_tools = {
+            "document_read", "pdf_read", "spreadsheet_read", "file_read", "file_query",
+        }
+        write_tools = {
+            "document_edit", "spreadsheet_edit", "file_write", "file_edit", "file_edit_table",
+        }
 
         try:
             if name in read_tools and next_args.get("path"):

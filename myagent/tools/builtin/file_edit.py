@@ -103,11 +103,11 @@ def _build_diff_preview(
     return "\n".join(preview_lines)
 
 
-def _atomic_write_text(path: Path, content: str) -> None:
+def _atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None:
     """原子写入纯文本文件。"""
     import tempfile
     tmp = tempfile.NamedTemporaryFile(
-        mode="w", encoding="utf-8",
+        mode="w", encoding=encoding,
         dir=str(path.parent), suffix=".tmp", delete=False,
     )
     try:
@@ -251,7 +251,7 @@ async def _edit_text(
 
     # ── 原子写入 ──
     try:
-        _atomic_write_text(path, replaced)
+        _atomic_write_text(path, replaced, encoding=enc)
     except Exception as e:
         return ToolResult(content=f"写入文件失败: {e}", is_error=True)
 
@@ -1279,6 +1279,14 @@ def _run_xlsx_operation(
 # file_edit_table — XLSX 结构化编辑工具
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+
+def _content_token_for_bounds(ws, bounds: list[tuple[int, int, int, int]]) -> str:
+    """Match file_read's token for one range; combine tokens for disjoint ranges."""
+    if not bounds:
+        return _content_token(ws)
+    tokens = [_content_token(ws, bound) for bound in bounds]
+    return tokens[0] if len(tokens) == 1 else _hash_json(tokens)
+
 @tool(name="file_edit_table",
       description=(
           "结构化编辑 XLSX 表格文件。使用 operation + payload 表达明确动作，"
@@ -1384,7 +1392,7 @@ async def file_edit_table(
             wb, ws, operation, payload, apply=False, include_changes=include_changes
         )
         bounds = plan.get("bounds", [])
-        previous_content_token = _hash_json([_content_token(ws, bound) for bound in bounds]) if bounds else _content_token(ws)
+        previous_content_token = _content_token_for_bounds(ws, bounds)
 
         if expected_structure_token and expected_structure_token != previous_structure_token:
             wb.close()
@@ -1498,7 +1506,8 @@ async def file_edit_table(
         )
         new_profile = _profile_workbook(wb)
         new_structure_token = _hash_json(new_profile)
-        new_content_token = _hash_json([_content_token(ws, bound) for bound in applied.get("bounds", [])]) if applied.get("bounds") else _content_token(ws)
+        applied_bounds = applied.get("bounds", [])
+        new_content_token = _content_token_for_bounds(ws, applied_bounds)
 
         sheet_title = ws.title
         try:

@@ -125,6 +125,7 @@ def tool(
     description: str | None = None,
     timeout: float | None = None,
     permission: str | None = None,
+    parameters_schema: dict[str, Any] | None = None,
 ) -> Callable:
     """
     工具声明装饰器。
@@ -137,6 +138,8 @@ def tool(
         description: 可选，覆盖函数原本的 docstring 作为工具描述。
         timeout: 可选，设置该工具的执行超时时间。
         permission: 可选，设置该工具的权限级别。
+        parameters_schema: 可选，显式提供 JSON Schema。用于描述仅靠函数签名
+            无法准确表达的 operation + payload 等结构。
 
     用法:
         @tool(name="query_weather", timeout=15)
@@ -158,6 +161,8 @@ def tool(
             meta_overrides["timeout"] = timeout
         if permission is not None:
             meta_overrides["permission"] = permission
+        if parameters_schema is not None:
+            meta_overrides["parameters_schema"] = parameters_schema
 
         func._tool_meta = meta_overrides
         return func

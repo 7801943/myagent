@@ -80,3 +80,38 @@ async def test_cli_public_virtual_path_still_blocks_mutations(tmp_path):
     assert result.is_error is True
     assert "公共目录" in result.content
     manager.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tool_name",
+    ["document_read", "pdf_read", "spreadsheet_read", "document_edit", "spreadsheet_edit"],
+)
+async def test_format_specific_file_tools_resolve_workspace_paths(
+    tmp_path, tool_name
+):
+    private_root = tmp_path / "users" / "admin"
+    public_root = tmp_path / "public"
+    private_root.mkdir(parents=True)
+    public_root.mkdir(parents=True)
+    (private_root / "report.txt").write_text("hello", encoding="utf-8")
+    resolver = WorkspaceResolver(
+        username="admin",
+        group="admin",
+        private_root=private_root,
+        public_root=public_root,
+    )
+    manager = AsyncMock()
+    manager.execute = AsyncMock(return_value=ToolResult(content="ok"))
+    interface = ToolInterface(manager, workspace_resolver=resolver)
+
+    result = await interface.execute(
+        tool_name,
+        {"path": f"{resolver.private_virtual_root}/report.txt"},
+        tool_call_id=f"tc-{tool_name}",
+        skip_safety=True,
+    )
+
+    assert not result.is_error
+    kwargs = manager.execute.await_args.kwargs
+    assert kwargs["path"] == str(private_root / "report.txt")

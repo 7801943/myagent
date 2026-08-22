@@ -176,6 +176,17 @@ def _detect_encoding(path: Path, hint: str | None = None) -> str:
     except UnicodeDecodeError:
         pass
 
+    # chardet 对很短的中文内容经常误判为 KOI8-R 等单字节编码。
+    # 在进入统计检测前，先识别常见的中文编码；gb18030 是 GBK 的超集。
+    try:
+        decoded_zh = raw.decode("gb18030")
+        visible = [char for char in decoded_zh if not char.isspace()]
+        cjk_count = sum("\u3400" <= char <= "\u9fff" for char in visible)
+        if visible and cjk_count >= 2 and cjk_count / len(visible) >= 0.5:
+            return "gb18030"
+    except UnicodeDecodeError:
+        pass
+
     # chardet 检测
     try:
         import chardet
@@ -577,6 +588,18 @@ async def _read_pdf_text(
                 routed.fallback_pages,
                 limit_to_default=start_line is None and end_line is None,
             )
+            # pdf-inspector 不可用或检测失败时，路由结果不知道真实页数。
+            # 这时以 PyMuPDF 的实际渲染结果补齐元数据，避免把有效的页数覆盖为 0。
+            if not route_meta.get("page_count"):
+                route_meta["page_count"] = rendered.metadata.get("page_count", 0)
+            if not route_meta.get("selected_pages"):
+                route_meta["selected_pages"] = list(
+                    rendered.metadata.get("pages_requested")
+                    or rendered.metadata.get("pages_rendered")
+                    or []
+                )
+            if not route_meta.get("fallback_pages"):
+                route_meta["fallback_pages"] = list(route_meta["selected_pages"])
             rendered.metadata.update(route_meta)
             rendered.metadata["fallback_triggered"] = True
             rendered.content = (

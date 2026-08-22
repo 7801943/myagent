@@ -393,8 +393,13 @@ class Session:
             return
         tool_name = event.tool_name
         result = event.result
-        write_tools = {"file_write", "file_edit", "file_edit_table"}
-        open_tools = {"file_read", "file_query", "file_write", "file_edit", "file_edit_table"}
+        write_tools = {
+            "document_edit", "spreadsheet_edit", "file_write", "file_edit", "file_edit_table",
+        }
+        open_tools = {
+            "document_read", "pdf_read", "spreadsheet_read", "document_edit", "spreadsheet_edit",
+            "file_read", "file_query", "file_write", "file_edit", "file_edit_table",
+        }
 
         # CLI may mutate arbitrary files without structured metadata; refresh the tree, but
         # cannot target an open tab for OnlyOffice reload.
