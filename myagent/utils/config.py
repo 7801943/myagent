@@ -125,6 +125,7 @@ class ToolsConfig(BaseModel):
     """工具执行配置。"""
     default_timeout: float = 30.0
     batch_timeout: float = 60.0
+    hidden_tools: list[str] = Field(default_factory=list)
 
 class SkillConfig(BaseModel):
     """Skill 系统配置。"""

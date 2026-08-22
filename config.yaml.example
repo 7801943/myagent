@@ -120,6 +120,12 @@ agent:
   tools:
     default_timeout: 30.0
     batch_timeout: 60.0                            # 工具批量执行超时（秒）
+    # 全局不向模型暴露的工具；底层实现和注册仍保留。
+    hidden_tools:
+      - file_read
+      - file_edit
+      - file_edit_table
+      - file_write
 
   # ── Skills 系统 ──
   skills:

@@ -543,6 +543,7 @@ class SessionManager:
             secret_manager=secret_manager,
             user=user,
             workspace_resolver=workspace_resolver,
+            hidden_tools=self._config.tools.hidden_tools,
         )
         harness = AgentHarness(
             llm_client=llm_client,

@@ -74,6 +74,7 @@ class ToolInterface:
         secret_manager=None,
         user=None,
         workspace_resolver=None,
+        hidden_tools: list[str] | set[str] | tuple[str, ...] | None = None,
     ):
         self._tool_manager = tool_manager
         self._policy_engine = policy_engine
@@ -89,6 +90,9 @@ class ToolInterface:
             self._visible_tools,
             self._hidden_tools,
         ) = self._parse_tool_visibility(visible)
+        self._hidden_tools.update(
+            str(name).strip() for name in (hidden_tools or []) if str(name).strip()
+        )
         if group != "admin":
             self._hidden_tools.update(_ADMIN_ONLY_NETWORK_TOOLS)
         self._cli_fence = next(

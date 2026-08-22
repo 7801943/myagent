@@ -83,3 +83,26 @@ def test_visible_tools_supports_explicit_exclusions():
     visible_names = [schema["name"] for schema in interface.list_schemas()]
 
     assert visible_names == ["file_read"]
+
+
+@pytest.mark.asyncio
+async def test_global_hidden_tools_override_user_wildcard_visibility():
+    manager = _manager(["document_read", "file_read", "file_write"])
+    interface = ToolInterface(
+        manager,
+        user=_user("admin", ["*"]),
+        hidden_tools=["file_read", "file_write"],
+    )
+
+    visible_names = [schema["name"] for schema in interface.list_schemas()]
+    assert visible_names == ["document_read"]
+
+    result = await interface.execute(
+        "file_read",
+        {"path": "report.txt"},
+        tool_call_id="tc-hidden-legacy-tool",
+        skip_safety=True,
+    )
+    assert result.is_error is True
+    assert result.metadata["denied_by"] == "tool_visibility"
+    manager.execute.assert_not_awaited()

@@ -24,7 +24,7 @@
    - target_content 必须精确匹配原文（含缩进和空白）
    - 匹配失败或版本冲突时先 document_read 确认最新内容再重试
    - spreadsheet_edit 默认 dry_run=true；确认预览后再以 dry_run=false 保存
-   - 旧 file_read/file_edit/file_edit_table 暂时只用于兼容已有调用
+   - 旧 file_read/file_edit/file_edit_table/file_write 已从模型工具列表暂时隐藏，底层代码保留兼容
 </工具使用>
 
 //其他
