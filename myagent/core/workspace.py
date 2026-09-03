@@ -246,6 +246,7 @@ class WorkspaceManager:
             "scan_dir": self._handle_scan_dir,
             "collapse_dir": self._handle_collapse_dir,
             "files_changed": self._handle_files_changed,
+            "onlyoffice_saved": self._handle_onlyoffice_saved,
             "sync_client_state": self._handle_sync_client_state,
             "mark_dirty": self._handle_mark_dirty,
             "mark_llm_read": self._handle_mark_llm_read,
@@ -426,6 +427,16 @@ class WorkspaceManager:
 
         self._state.files = all_files
         await self._notify(source)
+
+    async def _handle_onlyoffice_saved(self, source: str, data: dict) -> None:
+        """Refresh file metadata after status=6 without invalidating the live editor."""
+        if not self._state.root_path:
+            return
+        revisions = {tab.path: tab.revision for tab in self._state.open_files}
+        await self._handle_files_changed(source, {"changed_paths": []})
+        for tab in self._state.open_files:
+            if tab.path in revisions:
+                tab.revision = revisions[tab.path]
 
     async def _handle_sync_client_state(self, source: str, data: dict) -> None:
         """同步前端 workspace UI 状态，不接受客户端覆盖文件树/root。"""

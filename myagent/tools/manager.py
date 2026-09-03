@@ -81,6 +81,7 @@ class _ToolRecord:
 
     mcp_client: MCPClient | None = None
     mcp_tool_name: str | None = None
+    inline_handler: Callable[..., Any] | None = None
 
     def to_schema(self) -> dict[str, Any]:
         return {
@@ -152,6 +153,33 @@ class ToolManager:
                 "Only async functions are supported. "
                 "Class-based ToolLike instances must be converted to async "
                 "functions with @tool decorator before registration.")
+
+    def register_inline(
+        self,
+        *,
+        name: str,
+        description: str,
+        parameters_schema: dict[str, Any],
+        handler: Callable[..., Any],
+        meta: ToolMeta | None = None,
+    ) -> None:
+        """Register a session-bound async handler executed in the main process."""
+        if not inspect.iscoroutinefunction(handler):
+            raise TypeError("Inline tool handler must be async")
+        record = _ToolRecord(
+            name=name,
+            description=description,
+            parameters_schema=parameters_schema,
+            meta=meta or ToolMeta(source="runtime", category="document", timeout=90.0),
+            source="runtime",
+            inline_handler=handler,
+        )
+        self._tools[name] = record
+        for callback in self._on_register:
+            try:
+                callback(name, "runtime")
+            except Exception:
+                pass
 
     def _register_file_tool(self, file_path: str, func: Callable,
                             meta: ToolMeta | None = None) -> None:
@@ -243,6 +271,9 @@ class ToolManager:
                 result = await self._execute_mcp(record, args)
             elif record.name == "use_skill":
                 result = await self._execute_use_skill(args)
+            elif record.source == "runtime" and record.inline_handler:
+                raw_result = await asyncio.wait_for(record.inline_handler(**args), timeout=timeout)
+                result = raw_result if isinstance(raw_result, ToolResult) else ToolResult(content=str(raw_result))
             elif self._proxy is None:
                 return ToolResult(
                     content="ToolManager not started: proxy unavailable",

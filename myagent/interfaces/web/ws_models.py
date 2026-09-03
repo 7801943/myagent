@@ -75,6 +75,30 @@ class PingMessage(BaseModel):
     type: Literal["ping"] = "ping"
 
 
+class OnlyOfficeClientStateMessage(BaseModel):
+    """浏览器内活动 ONLYOFFICE 编辑器快照。"""
+    type: Literal["onlyoffice_client_state"] = "onlyoffice_client_state"
+    visible: bool = True
+    last_active_ms: int
+    bridge_revision: int = 1
+    editors: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class OnlyOfficeBridgeResponseMessage(BaseModel):
+    """隐藏插件命令执行结果。"""
+    type: Literal["onlyoffice_bridge_response"] = "onlyoffice_bridge_response"
+    response: dict[str, Any]
+
+
+class OnlyOfficeBridgeDiagnosticMessage(BaseModel):
+    """浏览器宿主上报的非敏感自动化链路诊断事件。"""
+    type: Literal["onlyoffice_bridge_diagnostic"] = "onlyoffice_bridge_diagnostic"
+    phase: str
+    path: str = ""
+    request_id: str = ""
+    message: str = ""
+
+
 # ── 服务端 → 客户端消息（用于类型参考，不强制校验）──
 
 class ServerMessage(BaseModel):
@@ -277,6 +301,9 @@ INCOMING_MESSAGE_TYPES: dict[str, type[BaseModel]] = {
     "session_delete": SessionDeleteMessage,
     "session_list": SessionListMessage,
     "ping": PingMessage,
+    "onlyoffice_client_state": OnlyOfficeClientStateMessage,
+    "onlyoffice_bridge_response": OnlyOfficeBridgeResponseMessage,
+    "onlyoffice_bridge_diagnostic": OnlyOfficeBridgeDiagnosticMessage,
     # Phase 2: workspace 消息
     "workspace_open_file": WorkspaceOpenFileMessage,
     "workspace_close_file": WorkspaceCloseFileMessage,

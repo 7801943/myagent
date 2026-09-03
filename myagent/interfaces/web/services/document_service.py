@@ -6,6 +6,7 @@ OnlyOffice 文档服务。
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -23,6 +24,7 @@ from fastapi import HTTPException
 from fastapi.responses import FileResponse
 
 from myagent.interfaces.web.private_proxy_context import normalize_loopback_http_origin
+from myagent.integrations.onlyoffice.protocol import PLUGIN_GUID, PROTOCOL_VERSION
 from myagent.utils.logging import get_logger
 
 
@@ -51,6 +53,8 @@ class DocumentConfig:
     onlyoffice_jwt_secret: str = ""
     onlyoffice_jwt_header: str = "Authorization"
     supported_extensions: list[str] = field(default_factory=lambda: DEFAULT_SUPPORTED_EXTENSIONS.copy())
+    automation_enabled: bool = False
+    automation_save_timeout_seconds: float = 30.0
 
 
 class DocumentService:
@@ -84,9 +88,15 @@ class DocumentService:
             supported_extensions=[
                 str(ext).lower() for ext in raw.get("supported_extensions", DEFAULT_SUPPORTED_EXTENSIONS)
             ],
+            automation_enabled=bool((raw.get("automation") or {}).get("enabled", False)),
+            automation_save_timeout_seconds=float(
+                (raw.get("automation") or {}).get("save_timeout_seconds", 30)
+            ),
         )
         self.root_dir = Path(root_dir or ".").expanduser().resolve()
         self._access_secret = self.config.access_token_secret or self._derive_dev_secret()
+        self._document_leases: dict[str, tuple[str, float]] = {}
+        self._save_waiters: dict[str, asyncio.Future] = {}
         logger.info(
             "DocumentService initialized: enabled=%s root=%s onlyoffice_url=%s onlyoffice_internal_url=%s "
             "myagent_internal_url=%s jwt_enabled=%s",
@@ -112,11 +122,13 @@ class DocumentService:
         group: str = "user",
         resolver=None,
         onlyoffice_proxy_origin: str | None = None,
+        browser_origin: str | None = None,
     ) -> dict[str, Any]:
         """构造前端 `new DocsAPI.DocEditor(...)` 所需配置。"""
         if not self.enabled:
             raise HTTPException(status_code=404, detail="文档预览/编辑未启用")
         onlyoffice_proxy_origin = normalize_loopback_http_origin(onlyoffice_proxy_origin)
+        browser_origin = _normalize_http_origin(browser_origin)
         if _is_absolute_http_url(self.config.onlyoffice_url):
             onlyoffice_proxy_origin = None
         path, scope = self.resolve_document_path(relative_path, workspace_root, resolver, operation="read", actor="user")
@@ -133,6 +145,7 @@ class DocumentService:
             except Exception:
                 mode = "view"
 
+        document_key = self._leased_document_key(path, relative_path)
         token = self._create_access_token(
             relative_path,
             username,
@@ -141,10 +154,12 @@ class DocumentService:
             group=group,
             scope=scope,
             onlyoffice_proxy_origin=onlyoffice_proxy_origin,
+            document_key=document_key,
         )
         file_url = self._internal_api_url("/api/documents/download", relative_path, token)
         callback_url = self._internal_api_url("/api/documents/callback", relative_path, token)
-        document_key = self._document_key(path, relative_path)
+        editor_session_id = secrets.token_hex(16)
+        bridge_nonce = secrets.token_urlsafe(32)
 
         config = {
             "document": {
@@ -176,6 +191,46 @@ class DocumentService:
             "width": "100%",
         }
 
+        automation_meta = None
+        if self.config.automation_enabled and ext in {".docx", ".pdf", ".xlsx"}:
+            plugin_host_origin = browser_origin or onlyoffice_proxy_origin or self.config.myagent_public_url
+            plugin_payload = {
+                "kind": "onlyoffice_plugin",
+                "path": relative_path,
+                "username": username,
+                "group": group,
+                "session_id": session_id,
+                "editor_session_id": editor_session_id,
+                "document_key": document_key,
+                "nonce": bridge_nonce,
+                "host_origin": plugin_host_origin,
+                "writable": mode == "edit",
+                "iat": int(time.time()),
+                "exp": int(time.time()) + self.config.access_token_ttl_seconds,
+            }
+            plugin_token = self._sign_payload(plugin_payload, self._access_secret)
+            # Keep the plugin manifest and entry point stable. Per-editor secrets belong
+            # in ONLYOFFICE's plugins.options channel; putting them in variations[].url
+            # makes the iframe URL cacheable/reusable across editor instances.
+            plugin_config_url = f"{plugin_host_origin}/onlyoffice-agent-plugin/config.json"
+            config["editorConfig"]["plugins"] = {
+                "pluginsData": [plugin_config_url],
+                "autostart": [PLUGIN_GUID],
+                "options": {
+                    PLUGIN_GUID: {
+                        "token": plugin_token,
+                    },
+                },
+            }
+            automation_meta = {
+                "protocol_version": PROTOCOL_VERSION,
+                "plugin_guid": PLUGIN_GUID,
+                "editor_session_id": editor_session_id,
+                "document_key": document_key,
+                "nonce": bridge_nonce,
+                "writable": mode == "edit",
+            }
+
         if self.config.onlyoffice_jwt_secret:
             config["token"] = self._create_onlyoffice_jwt(config)
 
@@ -190,13 +245,16 @@ class DocumentService:
             bool(config.get("token")),
         )
 
-        return {
+        response = {
             "config": config,
             "document_type": doc_type,
             "file_name": path.name,
             "onlyoffice_url": self.config.onlyoffice_url,
             "onlyoffice_jwt_header": self.config.onlyoffice_jwt_header,
         }
+        if automation_meta:
+            response["automation"] = automation_meta
+        return response
 
     def download_file(
         self,
@@ -228,6 +286,11 @@ class DocumentService:
         """处理 OnlyOffice 保存回调。status=2/6 时下载新文件并原子覆盖。"""
         token_payload = self.verify_access_token(token, relative_path)
         status = int(payload.get("status") or 0)
+        expected_key = str(token_payload.get("document_key") or "")
+        callback_key = str(payload.get("key") or "")
+        if expected_key and callback_key and expected_key != callback_key:
+            logger.warning("OnlyOffice callback rejected for key mismatch: path=%s", relative_path)
+            return {"error": 1}
         logger.info(
             "OnlyOffice callback received: path=%s status=%s user=%s has_url=%s payload_keys=%s",
             relative_path,
@@ -237,6 +300,8 @@ class DocumentService:
             sorted(payload.keys()),
         )
         if status not in {2, 6}:
+            if status == 4 and callback_key:
+                self.release_document_lease(relative_path, callback_key)
             logger.info("OnlyOffice callback ignored: path=%s status=%s", relative_path, status)
             return {"error": 0}
         if token_payload.get("mode") != "edit":
@@ -296,6 +361,96 @@ class DocumentService:
                 return {"error": 1}
 
         return {"error": 0}
+
+    def plugin_config(self, token: str) -> dict[str, Any]:
+        """Legacy signed manifest endpoint kept for already-open editor configs."""
+        payload = self.verify_plugin_token(token)
+        host_origin = str(payload["host_origin"]).rstrip("/")
+        return {
+            "name": "MyAgent ONLYOFFICE Automation Bridge",
+            "guid": PLUGIN_GUID,
+            "version": "1.1.0",
+            "minVersion": "9.4.0",
+            "baseUrl": f"{host_origin}/onlyoffice-agent-plugin/",
+            "variations": [{
+                "description": "Secure structured command bridge for MyAgent",
+                "url": "index.html",
+                "type": "unvisible",
+                "isViewer": True,
+                "EditorsSupport": ["word", "cell", "pdf"],
+                "initDataType": "none",
+                "initData": "",
+                "buttons": [],
+            }],
+        }
+
+    def plugin_runtime(self, token: str) -> dict[str, Any]:
+        payload = self.verify_plugin_token(token)
+        return {
+            "protocol_version": PROTOCOL_VERSION,
+            "plugin_guid": PLUGIN_GUID,
+            "path": payload["path"],
+            "editor_session_id": payload["editor_session_id"],
+            "document_key": payload["document_key"],
+            "nonce": payload["nonce"],
+            "host_origin": payload["host_origin"],
+            "writable": bool(payload.get("writable")),
+        }
+
+    def verify_plugin_token(self, token: str) -> dict[str, Any]:
+        payload = self._verify_signed_payload(token, self._access_secret)
+        if payload.get("kind") != "onlyoffice_plugin" or int(payload.get("exp") or 0) < int(time.time()):
+            raise HTTPException(status_code=403, detail="OnlyOffice 插件 token 无效或已过期")
+        return payload
+
+    async def force_save_and_wait(self, document_key: str, request_id: str, timeout: float | None = None) -> None:
+        if not document_key:
+            raise ValueError("document key is required")
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        self._save_waiters[request_id] = future
+        command = {"c": "forcesave", "key": document_key, "userdata": request_id}
+        if self.config.onlyoffice_jwt_secret:
+            command["token"] = self._create_onlyoffice_jwt(command)
+        command_url = f"{self.config.onlyoffice_internal_url.rstrip('/')}/command?shardkey={document_key}"
+        try:
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
+                response = await client.post(command_url, json=command)
+                response.raise_for_status()
+                data = response.json()
+            error = int(data.get("error") or 0)
+            if error != 0:
+                raise RuntimeError(f"OnlyOffice forcesave failed with error={error}")
+            await asyncio.wait_for(
+                future,
+                timeout=float(timeout or self.config.automation_save_timeout_seconds),
+            )
+        finally:
+            self._save_waiters.pop(request_id, None)
+
+    def notify_save_completed(self, payload: dict[str, Any], *, success: bool) -> None:
+        request_id = str(payload.get("userdata") or "")
+        future = self._save_waiters.get(request_id)
+        if not future or future.done():
+            return
+        if success:
+            future.set_result(True)
+        else:
+            future.set_exception(RuntimeError("OnlyOffice callback save failed"))
+
+    def release_document_lease(self, relative_path: str, document_key: str) -> None:
+        lease = self._document_leases.get(relative_path)
+        if lease and lease[0] == document_key:
+            self._document_leases.pop(relative_path, None)
+
+    def _leased_document_key(self, path: Path, relative_path: str) -> str:
+        lease = self._document_leases.get(relative_path)
+        if lease and time.monotonic() - lease[1] < 7200:
+            self._document_leases[relative_path] = (lease[0], time.monotonic())
+            return lease[0]
+        key = self._document_key(path, relative_path)
+        self._document_leases[relative_path] = (key, time.monotonic())
+        return key
 
     def rewrite_onlyoffice_download_url(self, download_url: str, trusted_proxy_origin: str = "") -> str:
         """
@@ -419,6 +574,7 @@ class DocumentService:
         group: str = "user",
         scope: str = "workspace",
         onlyoffice_proxy_origin: str | None = None,
+        document_key: str = "",
     ) -> str:
         now = int(time.time())
         payload = {
@@ -434,6 +590,8 @@ class DocumentService:
         }
         if onlyoffice_proxy_origin:
             payload["onlyoffice_proxy_origin"] = onlyoffice_proxy_origin
+        if document_key:
+            payload["document_key"] = document_key
         return self._sign_payload(payload, self._access_secret)
 
     def verify_access_token(self, token: str, relative_path: str) -> dict[str, Any]:
@@ -544,6 +702,27 @@ def _default_onlyoffice_internal_url(onlyoffice_url: str) -> str:
 def _is_absolute_http_url(value: str) -> bool:
     parsed = urlsplit(value)
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _normalize_http_origin(value: str | None) -> str | None:
+    """Accept an exact HTTP(S) origin and discard paths, credentials and malformed ports."""
+    if not value or any(ord(char) <= 32 or ord(char) == 127 for char in str(value)):
+        return None
+    try:
+        parsed = urlsplit(str(value))
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+            return None
+        if parsed.username or parsed.password or parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+            return None
+        port = parsed.port
+    except ValueError:
+        return None
+    scheme = parsed.scheme.lower()
+    hostname = (parsed.hostname or "").lower()
+    authority = f"[{hostname}]" if ":" in hostname else hostname
+    if port is not None and not ((scheme == "http" and port == 80) or (scheme == "https" and port == 443)):
+        authority = f"{authority}:{port}"
+    return f"{scheme}://{authority}"
 
 
 def _join_origin_and_path(origin: str, path: str) -> str:

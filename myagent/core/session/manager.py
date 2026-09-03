@@ -50,10 +50,12 @@ class SessionManager:
         state_store: "StateStore | None" = None,
         state_store_registry: "UserStateStoreRegistry | None" = None,
         session_ttl_seconds: int = 3600,
+        document_service=None,
     ):
         self._config_path = config_path
         self._state_store = state_store
         self._state_store_registry = state_store_registry
+        self._document_service = document_service
         self._sessions: dict[tuple[str, str], Session] = {}
         # per-session Harness：每次 create_session / restore_session 都新建独立实例
 
@@ -603,6 +605,8 @@ class SessionManager:
             hitl_enabled=self._config.hitl.enabled,
             approval_timeout=self._config.hitl.approval_timeout,
             skill_registry=skill_registry,
+            document_service=self._document_service,
+            onlyoffice_automation_config=self._raw.get("documents", {}).get("automation", {}),
         )
         self._sessions[self._session_key(user, session.id)] = session
 
@@ -682,6 +686,8 @@ class SessionManager:
             hitl_enabled=self._config.hitl.enabled,
             approval_timeout=self._config.hitl.approval_timeout,
             skill_registry=skill_registry,
+            document_service=self._document_service,
+            onlyoffice_automation_config=self._raw.get("documents", {}).get("automation", {}),
         )
 
         if approval_handler:

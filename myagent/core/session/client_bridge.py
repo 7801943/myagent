@@ -38,10 +38,11 @@ logger = get_logger(__name__)
 class ClientHandle:
     """代表一个客户端的连接句柄，断开时调用 detach() 清理。"""
 
-    def __init__(self, event_handles: list[EventHandle], bridge: "ClientBridge", sender):
+    def __init__(self, event_handles: list[EventHandle], bridge: "ClientBridge", sender, on_detach=None):
         self._event_handles = event_handles
         self._bridge = bridge
         self._sender = sender
+        self._on_detach = on_detach
 
     def detach(self) -> None:
         """断开连接时清理所有注册。"""
@@ -49,6 +50,9 @@ class ClientHandle:
             h.unregister()
         self._event_handles.clear()
         self._bridge.remove_ws_notify(self._sender)
+        if self._on_detach:
+            self._on_detach()
+            self._on_detach = None
 
 
 # ─── ClientBridge ────────────────────────────────────────────
@@ -99,7 +103,7 @@ class ClientBridge:
 
     # ── 客户端连接管理 ──
 
-    def attach_client(self, sender) -> ClientHandle:
+    def attach_client(self, sender, on_detach=None) -> ClientHandle:
         """
         将一个客户端（WebSocket）接入。
         所有回调通过 topic=session_id 注册到 EventBus。
@@ -166,7 +170,7 @@ class ClientBridge:
             await sender({"type": msg_type, **data})
 
         self.add_ws_notify(_ws_notify_wrapper)
-        return ClientHandle(handles, self, _ws_notify_wrapper)
+        return ClientHandle(handles, self, _ws_notify_wrapper, on_detach=on_detach)
 
     # ── 审批管理（原 VirtualApprovalHandler） ──
 

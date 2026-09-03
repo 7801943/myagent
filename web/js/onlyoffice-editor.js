@@ -5,6 +5,12 @@
 
 import { getToken } from './auth.js';
 import { state } from './state.js';
+import {
+    activateOnlyOfficeAutomation,
+    registerOnlyOfficeAutomation,
+    reportOnlyOfficeDiagnostic,
+    unregisterOnlyOfficeAutomation,
+} from './onlyoffice-automation.js';
 
 let apiPromise = null;
 let currentPath = '';
@@ -124,6 +130,7 @@ export async function openDocument(relativePath, mode, options) {
         mode: normalizedMode,
         signature: signature,
     });
+    reportOnlyOfficeDiagnostic('editor_open_started', relativePath, `mode=${normalizedMode}`);
 
     const cached = editorCache.get(relativePath);
     if (cached && cached.signature === signature) {
@@ -150,6 +157,7 @@ export async function openDocument(relativePath, mode, options) {
     showStatus('正在打开文档...');
     deactivateEditors();
 
+    let automationSessionId = '';
     try {
         const data = await fetchEditorConfig(relativePath, normalizedMode);
         if (sequence !== openSequence) {
@@ -158,9 +166,19 @@ export async function openDocument(relativePath, mode, options) {
             return;
         }
         logEditorConfig(relativePath, data);
+        reportOnlyOfficeDiagnostic(
+            'editor_config_loaded',
+            relativePath,
+            `automation=${Boolean(data.automation)} editor=${String((data.automation && data.automation.editor_session_id) || '').slice(0, 12)}`,
+        );
+        automationSessionId = data.automation && data.automation.editor_session_id
+            ? data.automation.editor_session_id
+            : '';
+        registerOnlyOfficeAutomation(relativePath, data.automation);
         await loadOnlyOfficeApi(data.onlyoffice_url);
         if (sequence !== openSequence) {
             if (pendingPath === relativePath) pendingPath = '';
+            unregisterOnlyOfficeAutomation(relativePath, automationSessionId);
             console.info('[OnlyOffice] stale api load ignored', { path: relativePath });
             return;
         }
@@ -181,9 +199,11 @@ export async function openDocument(relativePath, mode, options) {
         data.config.events = Object.assign({}, data.config.events || {}, {
             onAppReady: function () {
                 console.info('[OnlyOffice] app ready', { path: relativePath });
+                reportOnlyOfficeDiagnostic('editor_app_ready', relativePath, 'DocsAPI onAppReady');
             },
             onDocumentReady: function () {
                 console.info('[OnlyOffice] document ready', { path: relativePath });
+                reportOnlyOfficeDiagnostic('editor_document_ready', relativePath, 'DocsAPI onDocumentReady');
             },
             onDocumentStateChange: function (event) {
                 console.info('[OnlyOffice] document state changed', {
@@ -193,6 +213,7 @@ export async function openDocument(relativePath, mode, options) {
             },
             onError: function (event) {
                 console.error('[OnlyOffice] editor error', { path: relativePath, event: event });
+                reportOnlyOfficeDiagnostic('editor_error', relativePath, JSON.stringify(event && event.data ? event.data : event || {}).slice(0, 500));
             },
         });
         console.info('[OnlyOffice] creating editor', { path: relativePath, containerId: containerId });
@@ -214,6 +235,8 @@ export async function openDocument(relativePath, mode, options) {
         if (pendingPath === relativePath) pendingPath = '';
         currentPath = '';
         destroyCachedEditor(relativePath, 'open-failed');
+        unregisterOnlyOfficeAutomation(relativePath, automationSessionId);
+        reportOnlyOfficeDiagnostic('editor_open_failed', relativePath, err && err.message ? err.message : String(err));
         console.error('[OnlyOffice] open document failed', { path: relativePath, error: err });
         showStatus(err.message || '文档打开失败');
     }
@@ -260,6 +283,7 @@ function activateCachedEditor(relativePath) {
     setEditorVisibility(cached, true);
     cached.lastUsed = Date.now();
     currentPath = relativePath;
+    activateOnlyOfficeAutomation(relativePath);
     requestAnimationFrame(function () {
         window.dispatchEvent(new Event('resize'));
         if (cached.editor && typeof cached.editor.resize === 'function') {
@@ -313,5 +337,6 @@ function destroyCachedEditor(relativePath, reason) {
         cached.element.parentNode.removeChild(cached.element);
     }
     editorCache.delete(relativePath);
+    unregisterOnlyOfficeAutomation(relativePath);
     if (currentPath === relativePath) currentPath = '';
 }

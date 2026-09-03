@@ -11,6 +11,11 @@ import { appendToolStart, appendToolEnd, appendToolError, appendSafetyBlocked, s
 import { updateContextProgress, setStateAnimation } from './context-bar.js';
 import { handleConversationState, handleStateChange, updateSessionList } from './header.js';
 import { STATE_MAP } from './utils.js';
+import {
+    handleOnlyOfficeServerMessage,
+    initOnlyOfficeAutomation,
+    reportOnlyOfficeState,
+} from './onlyoffice-automation.js';
 
 function handleMessage(data) {
     const type = data.type;
@@ -44,6 +49,7 @@ function handleMessage(data) {
             }
 
             requestSessionList();
+            reportOnlyOfficeState();
             break;
 
         case "session_list_result":
@@ -63,6 +69,7 @@ function handleMessage(data) {
             updateChatEmptyState(true);
             resetProcessingState();
             requestSessionList();
+            reportOnlyOfficeState();
             break;
 
         case "session_switched":
@@ -75,6 +82,7 @@ function handleMessage(data) {
             }
             loadHistoryMessages(data.messages || []);
             requestSessionList();
+            reportOnlyOfficeState();
             break;
 
         case "session_deleted":
@@ -175,6 +183,12 @@ function handleMessage(data) {
             emit('workspace:state', data);
             break;
 
+        case "onlyoffice_open_request":
+        case "onlyoffice_bridge_command":
+        case "onlyoffice_state_request":
+            handleOnlyOfficeServerMessage(data);
+            break;
+
         case "pong":
             break;
 
@@ -198,5 +212,6 @@ function handleError(message) {
  * 初始化路由：监听 ws:message 事件
  */
 export function initRouter() {
+    initOnlyOfficeAutomation();
     on('ws:message', handleMessage);
 }

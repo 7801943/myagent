@@ -1,0 +1,19 @@
+{
+  "name": "MyAgent ONLYOFFICE Automation Bridge",
+  "guid": "asc.{D8E4A1C7-6F2B-4C3D-9A10-7E5B2F8C4D61}",
+  "version": "1.1.0",
+  "minVersion": "9.4.0",
+  "baseUrl": "",
+  "variations": [
+    {
+      "description": "Secure structured command bridge for MyAgent",
+      "url": "index.html",
+      "type": "unvisible",
+      "isViewer": true,
+      "EditorsSupport": ["word", "cell", "pdf"],
+      "initDataType": "none",
+      "initData": "",
+      "buttons": []
+    }
+  ]
+}

@@ -39,6 +39,7 @@ WebSocket Handler：处理 WebSocket 连接的完整生命周期。
 ═══════════════════════════════════════════════════════════════
 """
 import asyncio
+import inspect
 import json
 from uuid import uuid4
 
@@ -84,6 +85,7 @@ class WebSocketHandler:
 
         # 本连接的客户端句柄（Hook + ws_notify 统一管理）
         self._client_handle: ClientHandle | None = None
+        self._client_id: str = uuid4().hex
 
     # ═══════════════════════════════════════════════════════
     #  连接主循环
@@ -126,7 +128,7 @@ class WebSocketHandler:
         # harness.tool_interface.start() 启动，无需重复调用
 
         # ── 3. 通过 attach_client 统一注册 Hook + ws_notify ──
-        self._client_handle = self._session.attach_client(self._send_json)
+        self._client_handle = self._attach_session_client(self._session)
 
         # ── 4. 发送连接确认（含历史消息，用于恢复会话） ──
         context_window_size = self._session_manager.context_window_size
@@ -137,6 +139,7 @@ class WebSocketHandler:
             "context_window_size": context_window_size,
             "messages": history,
             "encrypted_transport": self._encrypted_transport,
+            "client_id": self._client_id,
         })
 
         # ── 5. 推送初始状态。workspace_state 单独推送，方便前端恢复编辑器。
@@ -187,6 +190,12 @@ class WebSocketHandler:
 
         msg_type = data.get("type", "")
 
+        # WebSocket 本身仍在收发消息时，浏览器客户端就是存活的。不要只依赖
+        # 前端状态快照中的浏览器时钟，否则后台标签页的定时器节流会误判掉线。
+        automation = getattr(self._session, "onlyoffice_automation", None)
+        if automation:
+            automation.touch_client(self._client_id)
+
         # 尝试 Pydantic 校验
         model_cls = INCOMING_MESSAGE_TYPES.get(msg_type)
         if model_cls:
@@ -220,6 +229,18 @@ class WebSocketHandler:
             await self._handle_session_delete(data)
         elif msg_type == "ping":
             await self._send_json({"type": "pong"})
+        elif msg_type == "onlyoffice_client_state":
+            if automation:
+                await automation.update_client_state(self._client_id, data)
+        elif msg_type == "onlyoffice_bridge_response":
+            if automation:
+                automation.resolve_response(
+                    self._client_id,
+                    data.get("response") or {},
+                )
+        elif msg_type == "onlyoffice_bridge_diagnostic":
+            if automation:
+                automation.log_client_diagnostic(self._client_id, data)
         # Workspace 消息路由（统一使用 workspace_update）
         elif msg_type == "workspace_open_file":
             await self._handle_workspace_action("open_file", data)
@@ -260,6 +281,7 @@ class WebSocketHandler:
             response = await session.chat(
                 user_text,
                 client_state=data.get("client_state"),
+                origin_client_id=self._client_id,
             )
         except RuntimeError as e:
             # Session busy（_chat_lock 被占用）
@@ -376,7 +398,7 @@ class WebSocketHandler:
         self._session_id = new_session_id
 
         # attach 到新 Session
-        self._client_handle = self._session.attach_client(self._send_json)
+        self._client_handle = self._attach_session_client(self._session)
 
         await self._send_json({"type": "session_created", "session_id": new_session_id})
         await self._push_conversation_state()
@@ -412,7 +434,7 @@ class WebSocketHandler:
         self._session_id = target_id
 
         # attach 到新 Session
-        self._client_handle = self._session.attach_client(self._send_json)
+        self._client_handle = self._attach_session_client(self._session)
 
         # 加载历史消息（通过 Session 的 serialize_messages 方法）
         history = self._session.serialize_messages()
@@ -446,6 +468,13 @@ class WebSocketHandler:
         if self._client_handle:
             self._client_handle.detach()
             self._client_handle = None
+
+    def _attach_session_client(self, session: Session) -> ClientHandle:
+        """Attach with an automation id while preserving legacy Session-like adapters."""
+        attach = session.attach_client
+        if "client_id" in inspect.signature(attach).parameters:
+            return attach(self._send_json, client_id=self._client_id)
+        return attach(self._send_json)
 
     # ═══════════════════════════════════════════════════════
     #  认证

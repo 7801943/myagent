@@ -44,11 +44,6 @@ def init_services(config_path: str = "config.yaml") -> None:
     )
     _state_store_registry = UserStateStoreRegistry(per_user_dir)
     _state_store = None
-    _session_manager = SessionManager(
-        config_path=config_path,
-        state_store_registry=_state_store_registry,
-    )
-
     # 初始化 AuthService
     auth_config = full_config.get("auth", {})
     _auth_service = AuthService(
@@ -64,6 +59,11 @@ def init_services(config_path: str = "config.yaml") -> None:
     _document_service = DocumentService(
         root_dir=root_dir,
         config=full_config.get("documents", {}),
+    )
+    _session_manager = SessionManager(
+        config_path=config_path,
+        state_store_registry=_state_store_registry,
+        document_service=_document_service,
     )
 
 

@@ -8,6 +8,7 @@
 2026-5-11 引入 RichHandler，增加行号 + 彩色日志级别
 """
 import logging
+import re
 from logging import Formatter
 
 from rich.logging import RichHandler
@@ -16,6 +17,54 @@ from rich.logging import RichHandler
 _FILE_LOG_FORMAT = "%(asctime)s | %(name)s | %(levelname)s | %(filename)s:%(lineno)d | %(message)s"
 
 _initialized = False
+
+_SENSITIVE_QUERY_RE = re.compile(
+    r"(?i)([?&](?:token|jwt|access_token)=)[^&\s\"']+"
+)
+_SENSITIVE_JSON_RE = re.compile(
+    r'''(?i)(["'](?:token|jwt|access_token)["']\s*:\s*["'])[^"']+'''
+)
+
+
+def redact_sensitive_text(value: str) -> str:
+    """Redact credentials commonly embedded in logged URLs or JSON fragments."""
+    text = str(value)
+    text = _SENSITIVE_QUERY_RE.sub(r"\1<redacted>", text)
+    return _SENSITIVE_JSON_RE.sub(r"\1<redacted>", text)
+
+
+class SensitiveDataFilter(logging.Filter):
+    """Logging filter that preserves record structure while redacting credentials."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # AccessFormatter derives client_addr/request_line/status_code from the
+        # original five positional arguments, so keep that structure intact.
+        if record.name == "uvicorn.access":
+            if isinstance(record.msg, str):
+                record.msg = redact_sensitive_text(record.msg)
+            if isinstance(record.args, tuple):
+                record.args = tuple(_redact_log_arg(value) for value in record.args)
+            elif isinstance(record.args, dict):
+                record.args = {key: _redact_log_arg(value) for key, value in record.args.items()}
+            return True
+
+        try:
+            rendered = record.getMessage()
+        except Exception:
+            rendered = str(record.msg)
+        redacted = redact_sensitive_text(rendered)
+        if redacted != rendered:
+            record.msg = redacted
+            record.args = ()
+        return True
+
+
+def _redact_log_arg(value):
+    if isinstance(value, str):
+        return redact_sensitive_text(value)
+    rendered = str(value)
+    redacted = redact_sensitive_text(rendered)
+    return redacted if redacted != rendered else value
 
 
 def setup_logging(level: str = "INFO", log_file: str | None = None) -> None:
@@ -47,6 +96,7 @@ def setup_logging(level: str = "INFO", log_file: str | None = None) -> None:
     console_handler.setFormatter(
         Formatter(fmt="%(name)s | %(filename)s:%(lineno)d | %(message)s")
     )
+    console_handler.addFilter(SensitiveDataFilter())
     root.addHandler(console_handler)
 
     # ── 文件：纯文本（无 ANSI 转义码）──
@@ -55,6 +105,7 @@ def setup_logging(level: str = "INFO", log_file: str | None = None) -> None:
 
         fh = FileHandler(log_file)
         fh.setFormatter(Formatter(_FILE_LOG_FORMAT))
+        fh.addFilter(SensitiveDataFilter())
         root.addHandler(fh)
 
 

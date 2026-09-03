@@ -44,6 +44,11 @@ logger = get_logger(__name__)
 LOGGING_CONFIG = {
     "version": 1,
     "disable_existing_loggers": False,
+    "filters": {
+        "sensitive_data": {
+            "()": "myagent.utils.logging.SensitiveDataFilter",
+        },
+    },
     "formatters": {
         "with_timestamp": {
             "format": "[%(asctime)s.%(msecs)03d] %(levelprefix)s %(message)s",
@@ -61,11 +66,13 @@ LOGGING_CONFIG = {
             "formatter": "with_timestamp",
             "class": "logging.StreamHandler",
             "stream": "ext://sys.stderr",
+            "filters": ["sensitive_data"],
         },
         "access": {
             "formatter": "access_with_timestamp",
             "class": "logging.StreamHandler",
             "stream": "ext://sys.stdout",
+            "filters": ["sensitive_data"],
         },
     },
     "loggers": {
@@ -83,6 +90,9 @@ PUBLIC_PATHS = {
     "/api/documents/download",
     "/api/documents/callback",
     "/api/documents/health",
+    "/api/documents/plugin-config",
+    "/api/documents/plugin-runtime",
+    "/api/documents/plugin-diagnostic",
     "/docs",
     "/openapi.json",
 }
@@ -241,6 +251,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
     app.include_router(sessions.router)
     app.include_router(auth.router)
     app.include_router(documents.router)
+    app.include_router(documents.tools_router)
     app.include_router(onlyoffice_proxy.router)
     app.include_router(workspace_files.router)
 

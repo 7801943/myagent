@@ -279,6 +279,17 @@ private_transport:
 # ── 文档预览/编辑（OnlyOffice）──
 documents:
   enabled: false
+  automation:
+    enabled: false
+    open_timeout_seconds: 30
+    command_timeout_seconds: 15
+    save_timeout_seconds: 30
+    client_ttl_seconds: 45
+    # Agent 隐藏选区有效期；过期后必须重新 navigate_and_select。
+    selection_ttl_seconds: 120
+    max_text_chars: 100000
+    max_html_chars: 200000
+    max_cells: 10000
   # 浏览器访问入口。推荐使用同源 FastAPI 反代，避免浏览器直接访问 DocumentServer。
   onlyoffice_url: "/onlyoffice"
   # FastAPI 到 OnlyOffice DocumentServer 的内部地址；容器部署时可填 http://onlyoffice-documentserver:80。

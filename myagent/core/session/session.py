@@ -57,6 +57,8 @@ class Session:
         approval_timeout: float = 300.0,
         skill_registry: "SkillRegistry | None" = None,
         name: str | None = "新会话",
+        document_service=None,
+        onlyoffice_automation_config: dict | None = None,
     ):
         self.id: str = session_id or uuid4().hex[:16]
         self.created_at: datetime = datetime.now(timezone.utc)
@@ -119,6 +121,16 @@ class Session:
                 resolver=workspace_resolver,
             )
             self.workspace.set_on_change(self._on_workspace_change)
+
+        self.onlyoffice_automation = None
+        if document_service is not None and self.workspace is not None:
+            from myagent.integrations.onlyoffice.runtime import OnlyOfficeSessionAutomation
+            self.onlyoffice_automation = OnlyOfficeSessionAutomation(
+                self,
+                document_service,
+                onlyoffice_automation_config,
+            )
+            self.onlyoffice_automation.register_tools()
 
         if system_prompt:
             self._context.set_system(system_prompt)
@@ -407,7 +419,11 @@ class Session:
             await self.workspace.update("agent", "files_changed", {})
             return
 
-        if tool_name not in open_tools or not hasattr(result, "metadata") or getattr(result, "is_error", False):
+        if not hasattr(result, "metadata") or getattr(result, "is_error", False):
+            return
+        if result.metadata.get("workspace_handled"):
+            return
+        if tool_name not in open_tools:
             return
 
         rel_path = self._workspace_relative_path_from_tool_result(result)
@@ -494,11 +510,22 @@ class Session:
 
     # ── 核心对话 ──
 
-    async def chat(self, user_input: str | list, client_state: dict | None = None) -> str:
+    async def chat(
+        self,
+        user_input: str | list,
+        client_state: dict | None = None,
+        origin_client_id: str = "",
+    ) -> str:
         """发起一轮对话。内置并发锁。"""
         if not self._chat_lock.locked():
             async with self._chat_lock:
-                return await self._chat_inner(user_input, client_state=client_state)
+                if self.onlyoffice_automation and origin_client_id:
+                    self.onlyoffice_automation.set_preferred_client(origin_client_id)
+                try:
+                    return await self._chat_inner(user_input, client_state=client_state)
+                finally:
+                    if self.onlyoffice_automation:
+                        self.onlyoffice_automation.clear_preferred_client()
         else:
             raise RuntimeError("Session is busy, please wait")
 
@@ -688,9 +715,17 @@ class Session:
 
     # ── 委托 ClientBridge ──
 
-    def attach_client(self, sender) -> ClientHandle:
+    def attach_client(self, sender, client_id: str = "") -> ClientHandle:
         """将一个 WS 客户端接入本会话。委托给 ClientBridge。"""
-        return self._bridge.attach_client(sender)
+        if self.onlyoffice_automation and client_id:
+            self.onlyoffice_automation.register_client(client_id, sender)
+        return self._bridge.attach_client(
+            sender,
+            on_detach=(
+                (lambda: self.onlyoffice_automation.unregister_client(client_id))
+                if self.onlyoffice_automation and client_id else None
+            ),
+        )
 
     # ── 消息序列化 ──
 
